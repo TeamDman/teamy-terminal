@@ -1,50 +1,79 @@
-[package]
-# Workspace bootstrap currently retains the template package while the single
-# crate is being converted into the terminal workspace described in docs/tasks.
-name = "teamy-terminal"
+[workspace]
+resolver = "3"
+members = [
+    "crates/teamy-terminal-core",
+    "crates/teamy-terminal-control",
+    "crates/teamy-terminal-font",
+    "crates/teamy-terminal-pty",
+    "crates/teamy-terminal-renderer",
+    "crates/teamy-terminal-cli",
+]
+default-members = ["crates/teamy-terminal-cli"]
+
+[workspace.package]
 version = "0.1.0"
 edition = "2024"
 authors = ["TeamDman"]
-description = "Portable terminal core and Vulkan renderer"
 license = "MPL-2.0"
 readme = "README.md"
 repository = "https://github.com/TeamDman/teamy-terminal"
 keywords = ["terminal", "vulkan", "cli"]
 categories = ["command-line-utilities"]
+
+[workspace.metadata.teamy-terminal]
+description = "Portable terminal core and Vulkan renderer"
 documentation = "https://github.com/TeamDman/teamy-terminal"
 
-[dependencies]
+[workspace.dependencies]
+teamy-terminal-core = { path = "crates/teamy-terminal-core" }
+teamy-terminal-control = { path = "crates/teamy-terminal-control" }
+teamy-terminal-font = { path = "crates/teamy-terminal-font" }
+teamy-terminal-pty = { path = "crates/teamy-terminal-pty" }
+teamy-terminal-renderer = { path = "crates/teamy-terminal-renderer" }
+
 arbitrary = { version = "1.4.1", features = ["derive"] }
 chrono = "0.4"
 color-eyre = "0.6.5"
 eyre = "0.6.12"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.19", features = ["env-filter", "json"] }
-tracing-tracy = { version = "0.11", optional = true, default-features = false, features = ["enable", "system-tracing", "context-switch-tracing", "sampling", "code-transfer", "callstack-inlines", "only-localhost"] }
-directories-next = "2"
-tokio = { version = "1.49.0", features = ["full"] }
-teamy-cancellation = { git = "https://github.com/TeamDman/teamy-cancellation.git", tag = "v0.3.1", features = ["figue", "arbitrary"] }
-facet = { git = "https://github.com/TeamDman/facet.git", rev = "2bfd3c2ee51cd9bdc89bb13f6e52f323ddfc25a9", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
-facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "2bfd3c2ee51cd9bdc89bb13f6e52f323ddfc25a9", package = "facet-csv" }
-facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "2bfd3c2ee51cd9bdc89bb13f6e52f323ddfc25a9", package = "facet-json" }
-facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "2bfd3c2ee51cd9bdc89bb13f6e52f323ddfc25a9", package = "facet-pretty" }
-figue = { git = "https://github.com/TeamDman/facet.git", rev = "2bfd3c2ee51cd9bdc89bb13f6e52f323ddfc25a9", package = "figue", features = ["arbitrary"] }
-open = "5"
-
-[target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
-    "Win32_Globalization",
-    "Win32_System_Console",
+tracing-tracy = { version = "0.11", default-features = false, features = [
+    "enable",
+    "system-tracing",
+    "context-switch-tracing",
+    "sampling",
+    "code-transfer",
+    "callstack-inlines",
+    "only-localhost",
 ] }
+tokio = { version = "1.49.0", features = ["full"] }
+teamy-cancellation = { git = "https://github.com/TeamDman/teamy-cancellation.git", rev = "2ba7fa5", features = ["figue", "arbitrary"] }
 
-[features]
-default = []
-tracy = ["dep:tracing-tracy"]
+# Keep every Facet/Figue package on the same TeamDman/facet revision. The
+# revision is the tested mine/main synchronization commit and is also the
+# source of the dependency-family evidence recorded in the implementation plan.
+facet = { git = "https://github.com/TeamDman/facet.git", rev = "23ad4dcd0", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
+facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "23ad4dcd0", package = "facet-csv" }
+facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "23ad4dcd0", package = "facet-json" }
+facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "23ad4dcd0", package = "facet-pretty" }
+figue = { git = "https://github.com/TeamDman/facet.git", rev = "23ad4dcd0", package = "figue", features = ["arbitrary"] }
 
-[build-dependencies]
 embed-resource = "3.0.6"
+portable-pty = "0.9"
+vte = "0.14"
+unicode-width = "0.2"
+num-traits = "0.2"
+fontdue = "0.9.3"
+fontdb = "0.23"
+swash = "0.2.10"
+ash = "0.38"
+ash-window = "0.13"
+raw-window-handle = "0.6"
+winit = "0.30"
+arboard = "3"
+png = "0.18.1"
 
-[lints.rust]
+[workspace.lints.rust]
 ambiguous_negative_literals = "warn"
 unfulfilled_lint_expectations = "deny"
 missing_debug_implementations = "warn"
@@ -54,7 +83,7 @@ trivial_numeric_casts = "warn"
 unsafe_op_in_unsafe_fn = "warn"
 unused_lifetimes = "warn"
 
-[lints.clippy]
+[workspace.lints.clippy]
 cargo = { level = "warn", priority = -1 }
 complexity = { level = "warn", priority = -1 }
 correctness = { level = "warn", priority = -1 }
@@ -62,8 +91,7 @@ pedantic = { level = "warn", priority = -1 }
 perf = { level = "warn", priority = -1 }
 style = { level = "warn", priority = -1 }
 suspicious = { level = "warn", priority = -1 }
-multiple_crate_versions = "allow" # turn this off periodically to see how bad it has gotten :P
-# nursery = { level = "warn", priority = -1 }  # optional, might cause more false positives
+multiple_crate_versions = "allow"
 multiple_unsafe_ops_per_block = "deny"
 module_inception = "allow"
 allow_attributes = "deny"
@@ -72,7 +100,7 @@ as_pointer_underscore = "warn"
 assertions_on_result_states = "warn"
 clone_on_ref_ptr = "warn"
 deref_by_slicing = "warn"
-disallowed_script_idents = "allow" # facet macros use Unicode identifiers
+disallowed_script_idents = "allow"
 empty_drop = "warn"
 empty_enum_variants_with_brackets = "warn"
 empty_structs_with_brackets = "warn"

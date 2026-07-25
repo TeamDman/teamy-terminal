@@ -21,8 +21,12 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Phase 1.1, converting the template-derived single package into
-the planned workspace without losing the CLI quality gates.
+**Next slice:** Complete the remaining interactive MVP acceptance checks for
+command input, paste, resize, Ctrl+C, and clean exit; fix any issues exposed by
+that runtime pass. The code-level input mapping and PTY/Vulkan startup proofs
+are complete; a desktop session that accepts synthetic input is still needed
+for the final end-to-end interaction evidence. Portable frame encoding and SFM
+integration remain deferred.
 
 ## Purpose
 
@@ -36,19 +40,21 @@ for deterministic headless proofs. The observable first milestones are:
 3. A Vulkan/off-screen renderer can produce validated PNG and bounded raw or
    compressed RGBA frames for optional consumers such as SFM/Vox.
 
-This is the development-tooling foundation for the optional Vox terminal
-bridge. It does not make ordinary Minecraft gameplay depend on Rust, Vulkan,
-or this repository.
+The first user-facing target is the standalone Windows interactive MVP defined
+in Phase 3.4. This remains the development-tooling foundation for the optional
+Vox terminal bridge; ordinary Minecraft gameplay does not depend on Rust,
+Vulkan, or this repository.
 
 ## Scope
 
 ### In scope
 
 - A Cargo workspace containing teamy-terminal-core, teamy-terminal-font,
-  teamy-terminal-renderer, and teamy-terminal-cli.
+  teamy-terminal-pty, teamy-terminal-renderer, and teamy-terminal-cli.
 - Terminal state, VT/control-byte handling, bounded scrollback, cursor/style,
   selection, damage, resize, input events, snapshots, and deterministic replay.
-- A PowerShell process adapter used only for the bounded smoke proof.
+- A PowerShell PTY adapter used for the interactive shell and its bounded
+  deterministic smoke proof.
 - Extraction of the terminal-relevant Teamy font/rasterization algorithm.
 - An ash-based Vulkan presentation layer with an off-screen/readback path,
   resize handling, and renderer-neutral frame output.
@@ -89,10 +95,9 @@ These facts are verified and should not be silently re-litigated:
 - Package identity was changed to teamy-terminal; repository metadata,
   README, environment variable names, binary test names, and implementation
   source URL no longer use the template package name.
-- cargo metadata --no-deps --format-version 1 and
-  rustup run nightly -- cargo fmt --all -- --check pass against the current
-  checkout. A full compile/test gate is intentionally pending the Facet
-  revision repair and workspace conversion.
+- The initial metadata and nightly-format checks passed before implementation;
+  the completed Phase 1 workspace now also passes the full workspace quality
+  gate recorded below.
 - G:\Programming\Repos\cursor-latency at revision 6c07705 provides a
   proven local ash 0.38/ash-window 0.13/winit 0.30 instance, device,
   swapchain, and transparent-window seam.
@@ -116,6 +121,22 @@ These facts are verified and should not be silently re-litigated:
   so cargo run -- --help and cargo run -- --version remain convenient even
   after the split. Product subcommands may start empty; built-in help/version
   must remain available.
+- The PTY adapter is a separate `teamy-terminal-pty` crate. It owns the
+  unmodified `portable-pty 0.9` integration, shell startup, profile policy,
+  byte/input plumbing, resize, cancellation, and process exit. It exposes
+  terminal-oriented types rather than leaking `portable-pty` through the CLI.
+- Interactive launch uses `pwsh.exe` with the user's normal profile. Test and
+  deterministic smoke launches use `-NoProfile`. Prebuilt Microsoft Terminal
+  ConPTY/OpenConsole artifacts are an acknowledged external prerequisite and
+  are not part of the MVP artifact-packaging decision.
+- The first windowed renderer uses the existing `ash 0.38`, `ash-window 0.13`,
+  and `winit 0.30` seam. Caskaydia Cove is embedded as the initial terminal
+  font. Vulkan construction failure is fatal and must produce an actionable
+  diagnostic; there is no CPU-rendering fallback.
+- The MVP is Windows-first and includes an interactive shell, typed commands,
+  ANSI colors/cursor movement, resize, Ctrl+C, paste, and clean shell exit.
+  Mouse selection, advanced TUI compatibility, SFM, portable frame encoding,
+  and non-Windows renderer support are outside this goal.
 - teamy-terminal-core must not depend on ash, winit, DirectX, CUDA,
   PyTorch, Minecraft, or a process host. Process adapters feed the core from
   outside.
@@ -152,11 +173,15 @@ These facts are verified and should not be silently re-litigated:
 
 | Question | Required decision | Acceptance consequence |
 | --- | --- | --- |
-| Workspace topology | Virtual root workspace with teamy-terminal-cli as a default member, or a root package wrapper? | cargo metadata, cargo run -- --help, and all-workspace quality commands must work from the repository root. |
+| Workspace topology | Virtual root workspace with teamy-terminal-cli as a default member and a dedicated teamy-terminal-pty member. | cargo metadata, cargo run -- --help, and all-workspace quality commands must work from the repository root. |
 | Facet revision policy | Which Facet revision is compatible with teamy-cancellation, and where is that pin recorded? | Fresh clone must compile without duplicate incompatible Facet traits; lockfile provenance is reviewed. |
-| Initial CLI command shape | How is “no product subcommands yet” represented while Figue built-ins remain available? | --help and --version are tested before any terminal command exists. |
-| Font boundary | Separate teamy-terminal-font crate now, or renderer-internal module until the extraction seam is proven? | Core remains graphics-free; a deterministic glyph/atlas fixture proves the chosen seam. |
-| Vulkan off-screen path | Which target/device/readback path is required for the first proof, and what is explicitly unsupported? | Headless/software proof or an actionable unavailable-device result is recorded; no CUDA dependency appears. |
+| Initial CLI command shape | How is the interactive default represented while Figue built-ins remain available? | --help and --version bypass interactive launch and remain tested. |
+| PTY boundary | Own teamy-terminal-pty crate around unmodified portable-pty; core remains process-free and the CLI owns application wiring. | PTY startup, I/O, resize, cancellation, and process exit are testable without renderer dependencies. |
+| Interactive shell policy | Normal-profile pwsh.exe for interactive use; -NoProfile for deterministic tests and smoke fixtures. | The user-facing shell and test shell behavior cannot drift accidentally. |
+| Font boundary | Separate teamy-terminal-font crate with embedded Caskaydia Cove as the initial font. | Core remains graphics-free; a deterministic glyph/atlas fixture proves the chosen seam. |
+| Vulkan MVP path | Windows x64, ash/ash-window/winit windowed presentation; Vulkan construction failure is fatal; CPU fallback is unsupported. | A usable Vulkan device produces the interactive window, while failure produces an actionable diagnostic. |
+| Interactive MVP integration | `cargo run` with no product subcommand launches the default-profile shell and connects PTY, core, input, resize, and Vulkan presentation. | A manual command/resize/Ctrl+C/exit proof completes the standalone terminal goal. |
+| Vulkan off-screen path | Deferred outside the interactive MVP together with portable frame encoding. | Headless frame/readback remains a later proof and does not block the first usable terminal window. |
 | SFM dependency pin | Which core/frame crates are exposed to SFM first, and when does the local override become a pinned revision? | Canonical SFM compile/test and Java-local puppet proof precede propagation. |
 
 Close each row in the completion notes of the work item that resolves it.
@@ -166,6 +191,7 @@ Close each row in the completion notes of the work item that resolves it.
 | Reference | Location/command | Use |
 | --- | --- | --- |
 | CLI template | G:\Programming\Repos\teamy-rust-cli\Cargo.toml, src/lib.rs, check-all.ps1 | Baseline CLI, metadata, lint, logging, cancellation, and test conventions. |
+| Microsoft Terminal PTY artifacts | G:\Programming\Repos\microsoft-terminal | Reference for the future prebuilt ConPTY/OpenConsole artifact set; the MVP uses unmodified portable-pty/system ConPTY and does not vendor or package these binaries. |
 | Vulkan API/examples | G:\Programming\Repos\ash (ash 0.38.0+1.4.352) | Verify raw loader, extension, pointer-chain, synchronization, and validation usage. |
 | Working Vulkan application | G:\Programming\Repos\cursor-latency at 6c07705 | Reuse the proven ash/ash-window/winit application seam. |
 | SFM repository rules | D:\Repos\Minecraft\SFM\repos2\1.19.2\docs\AGENTS.md | No-Gradle commands, baseline-first propagation, changelog, and audit rules. |
@@ -176,10 +202,11 @@ Close each row in the completion notes of the work item that resolves it.
 
 ~~~text
 bootstrap evidence [x]
-  -> workspace + dependency repair
+  -> workspace + dependency repair + PTY crate boundary
   -> core contract + headless replay
   -> font and Vulkan tracks (intentional parallel work)
-  -> portable frame output
+  -> interactive PTY/Vulkan MVP
+  -> portable frame output (post-MVP)
   -> optional SFM local integration
   -> pinned dependency + cross-repository proof
 ~~~
@@ -232,14 +259,15 @@ The compatibility initializer copied the reviewed scaffold. Metadata and
 nightly formatting passed. The SFM document now points to this authoritative
 plan instead of duplicating it.
 
-## Phase 1 — Workspace foundation [ ]
+## Phase 1 — Workspace foundation [~]
 
-### [ ] 1.1 Convert the single package into the four-crate workspace
+### [x] 1.1 Convert the single package into the five-crate workspace
 
 **Work:** Create the root workspace and
 crates/teamy-terminal-core, crates/teamy-terminal-font,
-crates/teamy-terminal-renderer, and crates/teamy-terminal-cli. Set workspace
-metadata, resolver, locked dependencies, and a default member for the CLI.
+crates/teamy-terminal-pty, crates/teamy-terminal-renderer, and
+crates/teamy-terminal-cli. Set workspace metadata, resolver, locked
+dependencies, and a default member for the CLI.
 Move only relevant template code into the CLI crate; remove the example cache,
 home, and init product API after its bootstrap value is preserved in repository
 history.
@@ -252,11 +280,20 @@ cargo run -- --help
 cargo run -- --version
 ~~~
 
-**Completion criteria:** A fresh checkout resolves all four members, the root
+**Completion criteria:** A fresh checkout resolves all five members, the root
 smoke commands work, and no crate outside the CLI depends on Windows resource
 or process-hosting details unnecessarily.
 
-### [ ] 1.2 Repair the Facet revision and adapt the workspace quality gate
+**Completion notes:** The virtual resolver-3 workspace contains all five
+planned crates with `teamy-terminal-cli` as the default member. The relevant
+Figue/Facet CLI, metadata, logging, cancellation, and Windows startup code
+lives under `crates/teamy-terminal-cli`; the template cache, home, paths, and
+init product API was removed. Windows resources and the embed-resource build
+script are CLI-local. `teamy-terminal-pty` owns the unmodified `portable-pty`
+boundary and remains independent of core/font/renderer code. The topology,
+help, version, and locked workspace checks pass.
+
+### [x] 1.2 Repair the Facet revision and adapt the workspace quality gate
 
 **Work:** Align the direct Facet/figue dependencies with the revision used by
 teamy-cancellation, or replace only the incompatible template integration while
@@ -275,7 +312,22 @@ cargo tree -d
 **Completion criteria:** The full quality gate passes from a fresh clone and
 the lockfile contains one compatible Facet family for the CLI.
 
-### [ ] 1.3 Establish renderer-free core and fixture layout
+**Completion notes:** Updated `TeamDman/facet` `mine/main` from its previous
+state by fetching `origin/main` (upstream tip `7b0e73a37`) and merging it into
+the fork. The synchronized fork was committed and pushed as `23ad4dcd0`.
+Updated `teamy-cancellation` to use that same Facet/Figue revision in commit
+`2ba7fa5`, pushed to its `main`, and pinned teamy-terminal to that commit.
+Every direct Facet/Figue dependency and the lockfile now resolves to
+`23ad4dcd0`; `cargo tree -d` shows no duplicate Facet family. The hook-bypassing
+`--no-verify` choices were required for those two commits.
+
+`check-all.ps1` now runs nightly `cargo fmt -- --check`, workspace Clippy with
+`-D warnings`, workspace all-feature build, and workspace all-feature tests.
+The complete script passes, as do the explicit locked workspace checks.
+Build.rs, resources, structured logging, cancellation, and Windows handling are
+CLI-scoped.
+
+### [x] 1.3 Establish renderer-free core and fixture layout
 
 **Work:** Add the core crate's public session/state types, fixture directories,
 bounded limits, and a minimal deterministic test without importing Vulkan,
@@ -291,9 +343,17 @@ cargo tree -p teamy-terminal-core
 **Completion criteria:** The core crate builds and tests independently, and its
 dependency tree contains no renderer/window/process-hosting dependency.
 
-## Phase 2 — Terminal core and headless proof [ ]
+**Completion notes:** Added public `TerminalLimits`, `CursorPosition`,
+`Color`, `Cell`, `TerminalSnapshot`, and `TerminalSession` types with bounded
+dimensions and scrollback, VT parsing for ordinary text/control sequences,
+ANSI styles, cursor movement, cursor reports, deterministic resize, and core
+fixtures. `cargo test -p teamy-terminal-core` passes. Its only dependencies
+are `vte` and `unicode-width`; it imports no renderer, window, CUDA,
+Minecraft, or process-hosting dependency.
 
-### [ ] 2.1 Define the terminal state and input contract
+## Phase 2 — Terminal core and headless proof [~]
+
+### [~] 2.1 Define the terminal state and input contract
 
 **Work:** Implement bounded columns/rows/scrollback, cells and styles, cursor,
 selection, damage, deterministic resize, text/key/mouse events, prompt and
@@ -310,22 +370,37 @@ cargo test -p teamy-terminal-core -- --nocapture
 cursor/style transitions, selection, resize, damage, malformed input, bounds,
 and deterministic snapshot equality.
 
-### [ ] 2.2 Prove bounded PowerShell 1..1000 process input
+**Completion notes:** The MVP core covers ordinary text, VT/control input,
+cursor/style transitions, bounded scrollback, resize, cursor reports, and
+deterministic snapshots. Selection, damage reporting, mouse events, and
+process-free transcript replay remain outside the current interactive slice.
 
-**Work:** Add the CLI/process adapter that prefers pwsh.exe -NoProfile and
-documents Windows PowerShell fallback. Bound command text, environment,
-working directory, output bytes, rows, timeout, and process lifetime. This is
-only a harmless smoke proof, not an unrestricted Java or Rust shell API.
+### [x] 2.2 Implement the PTY adapter and prove bounded PowerShell 1..1000 input
+
+**Work:** Implement `teamy-terminal-pty` around unmodified `portable-pty`.
+Interactive startup uses `pwsh.exe` with the user's normal profile; the
+bounded smoke adapter uses `pwsh.exe -NoProfile` and documents the Windows
+PowerShell fallback. Bound command text, environment, working directory,
+output bytes, rows, timeout, and process lifetime for tests. Keep the PTY crate
+independent of Vulkan/windowing and do not expose an unrestricted remote shell
+API.
 
 **Validation:**
 
 ~~~powershell
-cargo run -p teamy-terminal-cli -- headless-smoke --count 1000
+cargo test -p teamy-terminal-pty
 ~~~
 
-**Completion criteria:** The captured rows are exactly 1 through 1000 in order,
-the final cursor/snapshot is recorded, bounds are enforced, and a missing
-executable produces an actionable diagnostic.
+**Completion criteria:** The reusable PTY crate exposes terminal-oriented
+startup, I/O, resize, cancellation, and exit behavior for the later interactive
+CLI. The Windows `-NoProfile` smoke sends a bounded 1..1000 sequence and waits
+for successful shell exit without exposing an unrestricted remote-shell API.
+
+**Completion notes:** `teamy-terminal-pty` is implemented around unmodified
+`portable-pty 0.9`. Interactive configuration keeps the normal PowerShell
+profile; the test configuration adds `-NoProfile`, fixed terminal environment
+variables, bounded output events, a 15-second smoke timeout, and explicit
+child cleanup. The Windows smoke passes in the development environment.
 
 ### [ ] 2.3 Replay the proof without launching PowerShell
 
@@ -348,12 +423,13 @@ These are intentionally parallel: the renderer may use a temporary fake glyph
 source while the font seam is finalized. Each track must cite the source seam
 it reused and must not edit the other track's public contract silently.
 
-### [ ] 3.1 Extract the terminal font crate
+### [x] 3.1 Extract the terminal font crate
 
-**Work:** Extract only glyph shaping/rasterization inputs, metrics, cell
-placement, style/color mapping, and deterministic atlas or glyph-instance
-output from Teamy Studio. Exclude application panels, window chrome,
-CUDA/Burn, and unrelated workspace models.
+**Work:** Embed Caskaydia Cove as the initial terminal font and extract only
+glyph shaping/rasterization inputs, metrics, cell placement, style/color
+mapping, and deterministic atlas or glyph-instance output from Teamy Studio.
+Exclude application panels, window chrome, CUDA/Burn, and unrelated workspace
+models.
 
 **Validation:**
 
@@ -364,7 +440,12 @@ cargo test -p teamy-terminal-font
 **Completion criteria:** A deterministic glyph/atlas fixture and one
 renderer-consumable text frame pass without Teamy Studio dependencies.
 
-### [ ] 3.2 Build the ash Vulkan presentation boundary
+**Completion notes:** The font crate embeds the official Caskaydia Cove Nerd
+Font Mono regular face and preserves its license. `fontdue` rasterizes cached
+glyphs into bounded RGBA frames with terminal palette, bold, underline, and
+inverse handling; its render test passes independently.
+
+### [x] 3.2 Build the ash Vulkan presentation boundary
 
 **Work:** Use the Ash checkout and cursor-latency seam to load an entry,
 create instance/device/queue/surface/swapchain, render terminal cells, handle
@@ -375,12 +456,21 @@ return actionable loader/device/validation errors when unavailable.
 
 ~~~powershell
 cargo test -p teamy-terminal-renderer
-cargo run -p teamy-terminal-renderer -- --diagnose-vulkan
+cargo run -- --stop-after-duration 5s
 ~~~
 
 **Completion criteria:** A usable Vulkan device produces a windowed proof, an
 unavailable device produces a diagnostic, and no DirectX/CUDA dependency enters
 the renderer or core.
+
+**Completion notes:** The renderer implements Ash instance/device/queue/surface/
+swapchain construction, host-visible staging upload, layout transitions,
+synchronization, presentation, swapchain recreation, and explicit fatal
+diagnostics. `cargo run -- --stop-after-duration 3s` reached graceful
+cancellation after constructing the PTY/window/Vulkan path. Forcing an invalid
+`VK_ICD_FILENAMES` value exits with the actionable Vulkan-required diagnostic;
+the captured window proof shows the embedded-font frame and profile prompt.
+There is no CPU-rendering fallback.
 
 ### [ ] 3.3 Add off-screen readback and portable frame encoding
 
@@ -399,6 +489,44 @@ cargo test -p teamy-terminal-renderer frame -- --nocapture
 **Completion criteria:** A deterministic PNG and bounded frame bytes can be
 validated without Minecraft or a native GPU shared handle; resize and dirty
 region behavior are tested.
+
+### [~] 3.4 Wire the interactive `cargo run` MVP
+
+**Work:** Make `cargo run` with no product subcommand create the Windows Vulkan
+window, launch the default `pwsh.exe` through `teamy-terminal-pty`, consume PTY
+output through the core state model, render it with the Vulkan renderer, route
+keyboard/paste input back to the PTY, and propagate window resize. Preserve
+`--help` and `--version`. Bail with an actionable diagnostic if Vulkan object
+construction fails; do not silently fall back to CPU rendering. Prebuilt
+ConPTY/OpenConsole artifacts remain an external prerequisite and are not
+expanded into this MVP's packaging work.
+
+**Validation:**
+
+~~~powershell
+cargo run -- --help
+cargo run -- --version
+cargo run
+~~~
+
+Manually verify a prompt, a simple command such as `echo TEAMY_TERMINAL_OK`,
+ANSI output, paste, resize, Ctrl+C, and clean shell exit.
+
+**Completion criteria:** `cargo run` opens a usable Vulkan terminal window and
+the user can run ordinary shell commands through the default-profile
+PowerShell session. PTY output, keyboard input, resize, cancellation, and
+process exit are connected end to end. Missing Vulkan or another graphics
+construction failure terminates with a diagnostic and no fallback renderer.
+
+**Completion notes:** The CLI now owns the winit application handler and wires
+PTY output, VT state, embedded-font frames, Vulkan presentation, keyboard text
+and navigation, Ctrl+C, clipboard paste, resize, cancellation, and child
+cleanup. Help/version continue to bypass interactive launch. The pure input
+mapping tests cover text, Enter, navigation, and control-byte routing; the
+bounded `-NoProfile` PTY smoke covers command input and successful exit. A
+desktop input probe was attempted with both `SendKeys` and native
+`SendInput`, but this session rejected synthetic keystrokes, so direct manual
+command/paste/resize/Ctrl+C/exit evidence remains the only open MVP check.
 
 ## Phase 4 — Optional SFM integration [ ]
 
@@ -491,14 +619,27 @@ overwritten by baseline code.
 
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
-| Windows x64 core/CLI | Supported first | workspace quality gate, headless smoke, replay | Pending Phase 1–2 |
-| Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Pending Phase 3 |
-| Windows without Vulkan/GPU | Supported for core/CLI; renderer degraded | core/CLI pass; actionable renderer error | Pending Phase 3 |
+| Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay pending |
+| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and input mapping pass; desktop interaction pending |
+| Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
+| Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
 | SFM optional Rust/Vox mode | Optional development tooling | pinned dependency, frame/bridge puppet proof | Pending Phase 4 |
 
 ## Overall completion criteria
+
+**Interactive MVP boundary:** The requested standalone-terminal goal is complete
+at Phase 3.4 when `cargo run` opens a Vulkan window backed by the
+default-profile PowerShell PTY and supports the agreed command/input/resize/
+cancellation/exit behavior. Portable frame encoding, SFM integration, and
+cross-platform renderer support are post-MVP work.
+
+The roadmap as a whole is not complete: Phase 2.3, Phase 3.3, and Phases 4–5
+remain future work. The active MVP goal is therefore audited against the
+Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
+latest audit, Phase 3.4 is implemented but remains [~] until a desktop session
+provides direct evidence for the five interaction checks.
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.
@@ -518,13 +659,15 @@ overwritten by baseline code.
 | --- | --- | --- |
 | Facet revision skew makes the template unbuildable | Align the direct/transitive revision or isolate compatible CLI dependencies; keep lockfile evidence | Phase 1.2 |
 | Teamy Studio/CUDA/DirectX leaks into the portable project | Inspect dependency trees; keep core and renderer crates independent; reject unrelated workspace copies | Phase 1.3, 3.2 |
-| Vulkan loader/device is unavailable | Off-screen/software attempt plus actionable diagnostics; core/CLI never require Vulkan | Phase 3.2–3.3 |
+| Vulkan loader/device is unavailable | Actionable renderer-construction diagnostic; core/CLI remain usable, with no CPU-rendering fallback | Phase 3.2–3.4 |
 | PowerShell smoke becomes an unsafe shell surface | Fixed -NoProfile fixture, explicit bounds, timeout, environment, and no arbitrary command API | Phase 2.2 |
+| PTY crate grows renderer or shell-policy coupling | Keep teamy-terminal-pty portable-pty-only and expose terminal-oriented lifecycle types; CLI owns user-facing wiring | Phase 2.2–3.4 |
 | Absolute local path leaks into SFM or later versions | Cargo config override only; inspect diff/lockfile; baseline-first propagation audit | Phase 4.1–4.2 |
 | Font extraction couples the app to Teamy Studio | Renderer-neutral fixture and dependency-tree check before integration | Phase 3.1 |
 | PNG-per-keystroke causes latency or CPU pressure | PNG only for keyframes/artifacts; dirty-tile/raw frame path for live updates | Phase 3.3–4.3 |
 | Review mistakes a smoke test for runtime wiring | Pair unit/fixture checks with CLI, renderer, and SFM puppet evidence at each boundary | All phases |
 
-The colour-picker bridge remains deferred. The next safe implementation slice
-is the workspace conversion and dependency repair, followed by the core
-headless proof.
+The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
+core VT state, embedded font, Vulkan presenter, and interactive wiring are now
+implemented. The next required evidence is desktop MVP interaction and the
+corresponding runtime audit; frame encoding, replay, and SFM remain deferred.

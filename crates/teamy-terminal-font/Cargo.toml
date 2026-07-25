@@ -1,0 +1,23 @@
+[package]
+name = "teamy-terminal-font"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Renderer-neutral terminal font and glyph seam"
+
+[dependencies]
+eyre.workspace = true
+fontdb.workspace = true
+fontdue.workspace = true
+num-traits.workspace = true
+swash.workspace = true
+teamy-terminal-core.workspace = true
+unicode-width.workspace = true
+
+[lints]
+workspace = true

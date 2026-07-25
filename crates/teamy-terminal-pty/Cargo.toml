@@ -1,0 +1,19 @@
+[package]
+name = "teamy-terminal-pty"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Bounded portable-pty adapter for Teamy Terminal"
+
+[dependencies]
+eyre.workspace = true
+portable-pty.workspace = true
+tracing.workspace = true
+
+[lints]
+workspace = true

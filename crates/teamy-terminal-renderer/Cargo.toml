@@ -1,0 +1,22 @@
+[package]
+name = "teamy-terminal-renderer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Low-level Vulkan terminal renderer boundary"
+
+[dependencies]
+ash.workspace = true
+ash-window.workspace = true
+eyre.workspace = true
+raw-window-handle.workspace = true
+teamy-terminal-font.workspace = true
+winit.workspace = true
+
+[lints]
+workspace = true

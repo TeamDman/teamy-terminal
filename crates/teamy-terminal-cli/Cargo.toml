@@ -1,0 +1,59 @@
+[package]
+name = "teamy-terminal-cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "CLI for Teamy Terminal deterministic proofs"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "teamy-terminal"
+path = "src/main.rs"
+
+[dependencies]
+arboard.workspace = true
+arbitrary.workspace = true
+chrono.workspace = true
+color-eyre.workspace = true
+eyre.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+tracing-tracy = { workspace = true, optional = true }
+tokio.workspace = true
+teamy-cancellation.workspace = true
+teamy-terminal-control.workspace = true
+facet.workspace = true
+facet-csv.workspace = true
+facet-json.workspace = true
+facet-pretty.workspace = true
+figue.workspace = true
+teamy-terminal-core.workspace = true
+teamy-terminal-font.workspace = true
+teamy-terminal-pty.workspace = true
+teamy-terminal-renderer.workspace = true
+winit.workspace = true
+png.workspace = true
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62.2", features = [
+    "Win32_Globalization",
+    "Win32_System_Console",
+] }
+
+[features]
+default = []
+tracy = ["dep:tracing-tracy"]
+
+[build-dependencies]
+embed-resource.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,22 @@
+[package]
+name = "teamy-terminal-control"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Typed cross-platform control-plane service for Teamy Terminal"
+readme = "../../README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+eyre.workspace = true
+facet.workspace = true
+facet-json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+vox = { git = "https://github.com/bearcove/vox.git", rev = "2ca38f41c2d615e05c11347d6d6e781b3a3a178e", package = "vox", default-features = false, features = ["runtime", "transport-local"] }
+
+[lints]
+workspace = true
