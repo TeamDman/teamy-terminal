@@ -2,7 +2,8 @@
 
 **Plan status:** Active
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
-**Coordination mirror:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
+**Plan authority:** This file on teamy-terminal/main
+**SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
 **Last updated:** 2026-07-25
 
 ## How to update this plan
@@ -16,8 +17,9 @@ Put the status in each work-item heading and update its completion notes at the
 same time. A phase is complete only when every work item in it is [x].
 Record decisions, commit IDs, commands, and follow-ups below the task they
 affect; do not append a detached chronological work log. Use [!] only with
-the exact blocker, evidence, and condition that unblocks it. Update this
-coordination copy and the repository mirror together.
+the exact blocker, evidence, and condition that unblocks it. This file is the
+single authoritative plan. Update it in teamy-terminal/main; the SFM document
+is only a pointer and must not duplicate plan content.
 
 **Next slice:** Phase 1.1, converting the template-derived single package into
 the planned workspace without losing the CLI quality gates.
@@ -75,8 +77,8 @@ These facts are verified and should not be silently re-litigated:
 - TeamDman/teamy-terminal is public, MPL-2.0, and has been pushed to
   https://github.com/TeamDman/teamy-terminal. The bootstrap commit is
   e6ff0ec.
-- The checkout is at G:\Programming\Repos\teamy-terminal. The plan is
-  mirrored at docs/tasks/teamy terminal repository and Vulkan renderer plan.md.
+- The checkout is at G:\Programming\Repos\teamy-terminal. This file is the
+  authoritative plan; SFM retains only a pointer to this path and URL.
 - The initial checkout was copied from
   G:\Programming\Repos\teamy-rust-cli using its compatibility initializer.
   The normal cargo run -- init path was attempted but could not compile the
@@ -211,7 +213,7 @@ license key mpl-2.0.
 
 **Work:** Copy the template with its exclusion/preserve rules, replace package
 identity and README placeholders, retain CLI metadata/lint/test conventions,
-and mirror this plan under docs/tasks.
+  and add the SFM pointer without creating a second plan copy.
 
 **Validation:**
 
@@ -227,8 +229,8 @@ exists in the repository, and metadata/format checks pass.
 **Completion notes:** The normal cargo run -- init was attempted and failed
 before dispatch because of the incompatible Facet revisions described above.
 The compatibility initializer copied the reviewed scaffold. Metadata and
-nightly formatting passed. The plan mirror has the same SHA-256 as the
-canonical coordination copy.
+nightly formatting passed. The SFM document now points to this authoritative
+plan instead of duplicating it.
 
 ## Phase 1 — Workspace foundation [ ]
 
@@ -469,9 +471,10 @@ unsupported target is described as working by implication.
 
 ### [ ] 5.2 Update documentation, changelog, and propagation records
 
-**Work:** Keep this plan and its repository mirror synchronized. Update SFM's
-gameplay changelog when an in-game surface changes, run the baseline-first
-propagation/audit workflow, and record commit IDs and intentional exclusions.
+**Work:** Keep this plan authoritative in teamy-terminal/main. Keep the SFM
+pointer valid, update SFM's gameplay changelog when an in-game surface changes,
+run the baseline-first propagation/audit workflow, and record commit IDs and
+intentional exclusions.
 
 **Validation:**
 
@@ -480,9 +483,9 @@ cargo run -- audit --branch core --version-surfaces
 sfm-propagate-changes.exe git status
 ~~~
 
-**Completion criteria:** Public contract, README, plan mirror, SFM changelog,
-and propagation/audit evidence agree; no later target was overwritten by
-baseline code.
+**Completion criteria:** Public contract, README, this plan, the SFM pointer,
+SFM changelog, and propagation/audit evidence agree; no later target was
+overwritten by baseline code.
 
 ## Acceptance matrix
 
@@ -506,8 +509,8 @@ baseline code.
 - [ ] SFM integration is optional, pinned, and never an absolute path in
   canonical or propagated source.
 - [ ] Java-local SFM functionality remains self-sufficient when Rust is absent.
-- [ ] README, plan mirror, changelog, support matrix, and propagation evidence
-  agree with the shipped behavior.
+- [ ] README, authoritative plan, SFM pointer, changelog, support matrix, and
+  propagation evidence agree with the shipped behavior.
 
 ## Risk register
 
