@@ -49,7 +49,7 @@ windows = { version = "0.62.2", features = [
 ] }
 
 [features]
-default = []
+default = ["dirty_rendering"]
 extended_observability = []
 dirty_rendering = []
 tracy = ["extended_observability", "dep:tracing-tracy"]

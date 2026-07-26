@@ -756,7 +756,7 @@ in rasterization, 34.9 ms in upload/present, and 2.1 ms in PTY processing.
 This is diagnostic evidence, so the extended snapshot comparison is not yet a
 production performance claim.
 
-The opt-in prototype now adds `dirty_rendering`, cached-frame cell redraw with
+The `dirty_rendering` prototype now adds cached-frame cell redraw with
 wide-glyph/cursor expansion, packed pixel rectangles, per-image frame
 revisions, image-indexed present semaphores, deferred fence reset, and full
 refresh fallbacks for stale swapchain images, resize, and cache loss. The
@@ -819,10 +819,12 @@ is independent of the still-open MAILBOX full-upload limitation.
 
 Decision: the apples-to-apples comparison confirms that the dirty-rectangle
 prototype is correctness-safe for the measured path and materially reduces
-host rasterization, but it remains opt-in because rotating swapchain images
-force conservative full uploads. It must continue to cache the previous frame
-and update/upload only affected rectangles when the acquired swapchain image
-has the current frame revision. Stale images must receive a full refresh; this
+host rasterization. It is now the default interactive path; the full-frame
+baseline remains available through `--no-default-features`. Rotating swapchain
+images still force conservative full uploads, so the implementation must
+continue to cache the previous frame and update/upload only affected
+rectangles when the acquired swapchain image has the current frame revision.
+Stale images must receive a full refresh; this
 preserves correctness even when it limits the upload benefit. Cursor, scroll,
 wide-glyph, style, resize, occlusion, and full-refresh invalidation remain
 acceptance requirements. The explicit fallback evidence and repeated matched
@@ -844,8 +846,9 @@ The first explicit performance hypothesis is terminal damage handling: the
 current interactive path has one `dirty` gate, but a dirty frame snapshots the
 whole cell grid, rasterizes a whole RGBA frame, and uploads the whole staging
 buffer. Measure this before changing it; do not assume unchanged glyph repaint
-is the dominant cost. The `dirty_rendering` prototype is opt-in until the
-comparable GUI capture and correctness proof pass. Add bounded counters/fields
+is the dominant cost. The `dirty_rendering` path is the default interactive
+renderer now that the comparable capture and correctness proof have passed;
+`--no-default-features` retains the baseline. Add bounded counters/fields
 for total cells, changed
 cells, dirty-rectangle count and area, rasterized pixels, glyph-cache hits and
 misses, uploaded bytes, frame presents, idle redraws, and resize/reflow time.
@@ -981,7 +984,7 @@ MAILBOX images are stale. The bounded fallback counters and a fresh matched
 pair now prove that all 13 candidate frames took the full-refresh path. The
 next implementation slice should evaluate the swapchain/persistent-target
 design before attempting further partial-upload changes, while retaining the
-current CPU dirty-rendering result as the evidence-backed opt-in optimization.
+current CPU dirty-rendering result as the default interactive optimization.
 
 ## Phase 4 — Optional SFM integration [ ]
 

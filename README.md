@@ -28,6 +28,11 @@ The deterministic PTY smoke uses `pwsh.exe -NoProfile` and round-trips a
 bounded `1..1000` sequence. Portable frame encoding, off-screen readback, and
 SFM integration remain outside the standalone interactive MVP.
 
+The interactive build enables the correctness-tested `dirty_rendering` path by
+default, so ordinary `cargo run` redraws changed cells through the cached
+frame. Use `--no-default-features` when a full-frame baseline is specifically
+needed for profiling comparisons.
+
 ## Profiling
 
 The `extended_observability` and `tracy` features are opt-in. The former owns
