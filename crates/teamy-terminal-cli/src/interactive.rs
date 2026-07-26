@@ -20,6 +20,7 @@ use teamy_terminal_core::TerminalSession;
 use teamy_terminal_core::TerminalSnapshot;
 #[cfg(feature = "dirty_rendering")]
 use teamy_terminal_font::CellRect;
+use teamy_terminal_font::DEFAULT_PIXEL_SIZE;
 #[cfg(feature = "dirty_rendering")]
 use teamy_terminal_font::RasterizedFrame;
 use teamy_terminal_font::TerminalFont;
@@ -33,6 +34,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::ElementState;
 use winit::event::KeyEvent;
+use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
@@ -47,6 +49,9 @@ use winit::window::WindowId;
 const INITIAL_WINDOW_WIDTH: u32 = 1280;
 const INITIAL_WINDOW_HEIGHT: u32 = 720;
 const WINDOW_ICON_PNG: &[u8] = include_bytes!("../resources/main.png");
+const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
+const MAX_FONT_PIXEL_SIZE: f32 = 32.0;
+const FONT_PIXEL_SIZE_STEP: f32 = 1.0;
 const MAX_PTY_DRAIN_EVENTS_PER_TURN: usize = 32;
 const MAX_PTY_DRAIN_BYTES_PER_TURN: usize = 512 * 1024;
 static EVENT_LOOP_LOGGED: Once = Once::new();
@@ -96,6 +101,7 @@ struct InteractiveApplication {
     session: Option<PtySession>,
     terminal: TerminalSession,
     font: TerminalFont,
+    font_pixel_size: f32,
     window: Option<Window>,
     renderer: Option<VulkanRenderer>,
     modifiers: ModifiersState,
@@ -120,6 +126,7 @@ impl InteractiveApplication {
             session: Some(session),
             terminal: TerminalSession::new(TerminalLimits::default(), 120, 36),
             font: TerminalFont::embedded().wrap_err("failed to load embedded Caskaydia font")?,
+            font_pixel_size: DEFAULT_PIXEL_SIZE,
             window: None,
             renderer: None,
             modifiers: ModifiersState::default(),
@@ -218,6 +225,26 @@ impl InteractiveApplication {
             self.rendered_frame = None;
         }
         Ok(())
+    }
+
+    fn adjust_font_size(&mut self, direction: f32) -> Result<()> {
+        let next_size = adjusted_font_pixel_size(self.font_pixel_size, direction);
+        if next_size == self.font_pixel_size {
+            return Ok(());
+        }
+
+        self.font = TerminalFont::new(next_size)
+            .wrap_err("failed to rebuild the terminal font at the requested size")?;
+        self.font_pixel_size = next_size;
+        #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
+        {
+            self.last_rendered_snapshot = None;
+        }
+        #[cfg(feature = "dirty_rendering")]
+        {
+            self.rendered_frame = None;
+        }
+        self.resize_terminal()
     }
 
     fn drain_pty(&mut self, event_loop: &ActiveEventLoop) {
@@ -582,6 +609,13 @@ impl ApplicationHandler for InteractiveApplication {
                 self.dirty = true;
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::MouseWheel { delta, .. } if self.modifiers.control_key() => {
+                if let Some(direction) = wheel_zoom_direction(&delta)
+                    && let Err(error) = self.adjust_font_size(direction)
+                {
+                    self.fail(error, event_loop);
+                }
+            }
             WindowEvent::KeyboardInput { event, .. } => self.input(&event, event_loop),
             WindowEvent::RedrawRequested => self.render(event_loop),
             _ => {}
@@ -623,6 +657,25 @@ impl ApplicationHandler for InteractiveApplication {
         self.control_calls.take();
         self.control_server.take();
         self.session.take();
+    }
+}
+
+fn adjusted_font_pixel_size(current: f32, direction: f32) -> f32 {
+    (current + direction.signum() * FONT_PIXEL_SIZE_STEP)
+        .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE)
+}
+
+fn wheel_zoom_direction(delta: &MouseScrollDelta) -> Option<f32> {
+    let vertical = match delta {
+        MouseScrollDelta::LineDelta(_, vertical) => *vertical,
+        MouseScrollDelta::PixelDelta(position) => position.y as f32,
+    };
+    if vertical > 0.0 {
+        Some(1.0)
+    } else if vertical < 0.0 {
+        Some(-1.0)
+    } else {
+        None
     }
 }
 
@@ -851,6 +904,38 @@ mod tests {
     #[test]
     fn embedded_window_icon_decodes_for_winit() {
         load_window_icon().expect("the checked-in window icon should decode");
+    }
+
+    #[test]
+    fn ctrl_wheel_font_zoom_is_bounded_and_directional() {
+        assert_eq!(adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, 1.0), 17.0);
+        assert_eq!(adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, -1.0), 15.0);
+        assert_eq!(
+            adjusted_font_pixel_size(MIN_FONT_PIXEL_SIZE, -1.0),
+            MIN_FONT_PIXEL_SIZE
+        );
+        assert_eq!(
+            adjusted_font_pixel_size(MAX_FONT_PIXEL_SIZE, 1.0),
+            MAX_FONT_PIXEL_SIZE
+        );
+    }
+
+    #[test]
+    fn mouse_wheel_zoom_uses_vertical_scroll_direction() {
+        assert_eq!(
+            wheel_zoom_direction(&MouseScrollDelta::LineDelta(0.0, 1.0)),
+            Some(1.0)
+        );
+        assert_eq!(
+            wheel_zoom_direction(&MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(0.0, -8.0)
+            )),
+            Some(-1.0)
+        );
+        assert_eq!(
+            wheel_zoom_direction(&MouseScrollDelta::LineDelta(0.0, 0.0)),
+            None
+        );
     }
 
     #[test]

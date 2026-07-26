@@ -538,7 +538,8 @@ cargo run
 ~~~
 
 Manually verify a prompt, a simple command such as `echo TEAMY_TERMINAL_OK`,
-ANSI output, paste, resize, Ctrl+C, and clean shell exit.
+ANSI output, paste, resize, Ctrl+C, Ctrl+wheel font scaling, and clean shell
+exit.
 
 **Completion criteria:** `cargo run` opens a usable Vulkan terminal window and
 the user can run ordinary shell commands through the default-profile
@@ -559,7 +560,11 @@ command/paste/resize/Ctrl+C/exit evidence remains the only open MVP check.
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal
 background so gray and white text remain visibly distinct, and keeps the
-existing ANSI palette values explicit and tested.
+existing ANSI palette values explicit and tested. Ctrl+wheel font scaling is
+bounded to 8–32 physical pixels in 1-pixel steps; each change rebuilds the
+font metrics/cache, invalidates the cached frame, reflows the terminal, and
+resizes the PTY. Automated direction/bounds tests pass; direct live-window
+verification remains part of the desktop interaction gate.
 
 ## Phase 3.5 — Profiling contract and Windows presentation polish [~]
 
