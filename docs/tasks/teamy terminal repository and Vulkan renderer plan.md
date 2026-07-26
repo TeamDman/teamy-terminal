@@ -24,10 +24,12 @@ is only a pointer and must not duplicate plan content.
 **Next slice:** Close Phase 3.4 with a direct desktop interaction proof, then
 begin Phase 4's optional SFM integration. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
-contract, and portable frame encoding are complete. The remaining standalone
-gate is live verification of prompt/command input, ANSI output, clipboard
-paste, resize, Ctrl+C interruption, Ctrl navigation, Ctrl+Shift navigation,
-Ctrl+wheel zoom, alternate-screen restoration, and clean shell exit.
+contract, portable frame encoding, visible-grid selection, mouse selection,
+and clipboard copy are complete. The remaining standalone gate is live
+verification of prompt/command input, ANSI output, clipboard paste, resize,
+Ctrl+C interruption/copy, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift
+navigation, Ctrl+wheel zoom, alternate-screen restoration, and clean shell
+exit. Prompt/command-range metadata remains an open Phase 2.1 core item.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -399,13 +401,14 @@ cursor/style transitions, selection, resize, damage, malformed input, bounds,
 and deterministic snapshot equality.
 
 **Completion notes:** The MVP core covers ordinary text, VT/control input,
-cursor/style transitions, bounded scrollback, resize, cursor reports, and
-deterministic snapshots. Selection, damage reporting, and mouse events remain
-outside the current interactive slice; process-free transcript replay is
-covered separately by Phase 2.3.
-The first SFM bridge does not require selection or mouse events, so clipboard
-copy remains a later terminal-UX task; Ctrl+C continues to mean PTY interrupt
-when no selection model is active.
+cursor/style transitions, bounded scrollback, resize, cursor reports,
+visible-grid selection, bounded selected-text extraction, selection clearing
+on resize/alternate-screen transitions, and deterministic snapshots. The CLI
+adds bounded mouse selection, visible selection highlighting, selection-aware
+damage invalidation, and Ctrl+C/Ctrl+Shift+C clipboard copy; Ctrl+C remains
+the PTY interrupt path when no selection is active. Prompt and command-range
+metadata are not implemented yet. Process-free transcript replay is covered
+separately by Phase 2.3.
 
 ### [x] 2.2 Implement the PTY adapter and prove bounded PowerShell 1..1000 input
 
@@ -566,12 +569,12 @@ cargo run
 ~~~
 
 Manually verify a prompt, a simple command such as `echo TEAMY_TERMINAL_OK`,
-ANSI output, clipboard paste, resize, Ctrl+C interruption, Ctrl+A,
+ANSI output, clipboard paste, resize, Ctrl+C interruption with no selection,
+visible selection drag followed by Ctrl+C/Ctrl+Shift+C copy, Ctrl+A,
 Ctrl+Backspace, Ctrl+Arrow navigation, Ctrl+Shift navigation, Ctrl+wheel font
 scaling, alternate-screen entry/restore using `ratatui-key-debug`, and clean
-shell exit. Ctrl+C is the PTY interrupt path in the current MVP; clipboard copy
-requires the selection/mouse model that remains deferred under Phase 2.1 and
-must not be claimed as implemented by this proof.
+shell exit. The selection/copy path is covered by automated tests, but the
+live desktop interaction remains required before this phase can close.
 
 **Completion criteria:** `cargo run` opens a usable Vulkan terminal window and
 the user can run ordinary shell commands through the default-profile
@@ -581,13 +584,15 @@ construction failure terminates with a diagnostic and no fallback renderer.
 
 **Completion notes:** The CLI now owns the winit application handler and wires
 PTY output, VT state, embedded-font frames, Vulkan presentation, keyboard text
-and navigation, Ctrl+C, clipboard paste, resize, cancellation, and child
-cleanup. Help/version continue to bypass interactive launch. The pure input
-mapping tests cover text, Enter, navigation, and control-byte routing; the
-bounded `-NoProfile` PTY smoke covers command input and successful exit. A
-desktop input probe was attempted with both `SendKeys` and native
-`SendInput`, but this session rejected synthetic keystrokes, so direct manual
-command/paste/resize/Ctrl+C/exit evidence remains the only open MVP check.
+and navigation, Ctrl+C, clipboard paste/copy, bounded mouse selection, resize,
+cancellation, and child cleanup. Help/version continue to bypass interactive
+launch. Pure input and selection tests cover text, Enter, navigation,
+control-byte routing, bounded mouse coordinates, selection damage, and
+clipboard behavior; the bounded `-NoProfile` PTY smoke covers command input
+and successful exit. A desktop input probe was attempted with both `SendKeys`
+and native `SendInput`, but this session rejected synthetic keystrokes, so
+direct manual command/paste/resize/Ctrl+C/selection/exit evidence remains the
+only open MVP check.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal
@@ -1063,6 +1068,14 @@ sfm-propagate-changes.exe test run
 **Completion criteria:** A fresh SFM checkout resolves the pinned artifact and
 canonical compile/tests pass before any version propagation.
 
+**Current boundary:** The reviewed Facet/Vox source-of-truth extension is
+committed at `35461380d` on `teamy/vox-java-terminal-contract`, based on the
+earlier reviewed boundary `144382fd5`. It adds frame kind/stride/tile bounds,
+cursor, selection, mouse button state, and capability flags, with generated
+Java 17 sources and a passing focused generator compile. It is not yet a
+published or SFM-consumed pin; broad `test-java` remains environment-limited
+by the installed JBR 17.0.6 `Cannot close compiler resources` failure.
+
 ### [ ] 4.3 Prove the optional frame consumer boundary
 
 **Work:** Coordinate with the SFM Vox plan to consume portable frame data while
@@ -1133,7 +1146,7 @@ default-profile PowerShell PTY and supports the agreed command/input/resize/
 cancellation/exit behavior. Portable frame encoding, SFM integration, and
 cross-platform renderer support are post-MVP work.
 
-The roadmap as a whole is not complete: Phase 3.3 and Phases 4–5 remain future
+The roadmap as a whole is not complete: Phase 3.4 and Phases 4–5 remain future
 work. The active MVP goal is therefore audited against the
 Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
 latest audit, Phase 3.4 is implemented but remains [~] until a desktop session
@@ -1167,6 +1180,8 @@ provides direct evidence for the five interaction checks.
 | Review mistakes a smoke test for runtime wiring | Pair unit/fixture checks with CLI, renderer, and SFM puppet evidence at each boundary | All phases |
 
 The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
-core VT state, embedded font, Vulkan presenter, and interactive wiring are now
-implemented. The next required evidence is desktop MVP interaction and the
-corresponding runtime audit; frame encoding, replay, and SFM remain deferred.
+core VT state, bounded replay, embedded font, Vulkan presenter, portable frame
+encoding, and interactive wiring are implemented. The next required evidence
+is desktop MVP interaction and the corresponding runtime audit; SFM pinning,
+Java-local integration, optional Rust consumption, and propagation remain
+deferred.
