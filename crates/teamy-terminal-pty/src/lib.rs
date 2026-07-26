@@ -384,4 +384,128 @@ mod tests {
         assert!(output.contains('1') && output.contains("1000"));
         assert_eq!(exit.map(|status| status.success), Some(true));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn interactive_shell_ctrl_c_interrupts_a_running_command() {
+        let config = PtyConfig::interactive();
+        let session = PtySession::spawn(&config).expect("pwsh should start in a test PTY");
+        session
+            .resize(100, 30, 0, 0)
+            .expect("test PTY should accept an initial window resize");
+        let respond_to_cursor_queries = |bytes: &[u8]| {
+            let queries = bytes
+                .windows(4)
+                .filter(|window| *window == b"\x1b[6n")
+                .count();
+            for _ in 0..queries {
+                session
+                    .write_input(b"\x1b[1;1R")
+                    .expect("cursor report should be accepted by the PTY");
+            }
+        };
+        session
+            .write_input(b"Write-Output READY\r")
+            .expect("readiness command should be accepted by pwsh");
+        let readiness_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while std::time::Instant::now() < readiness_deadline {
+            let Some(event) = session
+                .recv_timeout(Duration::from_millis(100))
+                .expect("PTY event receive should remain healthy")
+            else {
+                continue;
+            };
+            match event {
+                PtyEvent::Output(bytes) => {
+                    respond_to_cursor_queries(&bytes);
+                    output.extend(bytes);
+                }
+                PtyEvent::Exited(status) => {
+                    panic!("PowerShell exited before readiness: {status:?}")
+                }
+                PtyEvent::Error(error) => panic!("test PTY failed: {error}"),
+            }
+            if String::from_utf8_lossy(&output).contains("READY") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&output).contains("READY"),
+            "PowerShell readiness command did not complete; output was:\n{}",
+            String::from_utf8_lossy(&output)
+        );
+
+        session
+            .write_input(b"ping.exe 127.0.0.1 -t\r")
+            .expect("long-running test command should be accepted by pwsh");
+        std::thread::sleep(Duration::from_millis(500));
+
+        session
+            .write_input(
+                b"\x1b[17;29;0;1;8;1_\x1b[67;46;3;1;8;1_\x1b[67;46;0;0;8;1_\x1b[17;29;0;0;0;1_",
+            )
+            .expect("Ctrl+C should be accepted by the PTY");
+        let interrupt_deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < interrupt_deadline {
+            let Some(event) = session
+                .recv_timeout(Duration::from_millis(100))
+                .expect("PTY event receive should remain healthy")
+            else {
+                continue;
+            };
+            match event {
+                PtyEvent::Output(bytes) => {
+                    respond_to_cursor_queries(&bytes);
+                    output.extend(bytes);
+                }
+                PtyEvent::Exited(status) => {
+                    panic!("PowerShell exited after the interrupt: {status:?}")
+                }
+                PtyEvent::Error(error) => panic!("test PTY failed: {error}"),
+            }
+            if String::from_utf8_lossy(&output).contains("Control-C") {
+                break;
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&output).contains("Control-C"),
+            "Ctrl+C did not interrupt the native console command; output was:\n{}",
+            String::from_utf8_lossy(&output)
+        );
+
+        std::thread::sleep(Duration::from_millis(500));
+
+        session
+            .write_input(b"Write-Output INTERRUPTED\r")
+            .expect("follow-up command should be accepted by pwsh");
+
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        while std::time::Instant::now() < deadline {
+            let Some(event) = session
+                .recv_timeout(Duration::from_millis(100))
+                .expect("PTY event receive should remain healthy")
+            else {
+                continue;
+            };
+            match event {
+                PtyEvent::Output(bytes) => {
+                    respond_to_cursor_queries(&bytes);
+                    output.extend(bytes);
+                }
+                PtyEvent::Exited(status) => {
+                    panic!("PowerShell exited before the interrupt test completed: {status:?}")
+                }
+                PtyEvent::Error(error) => panic!("test PTY failed: {error}"),
+            }
+            if String::from_utf8_lossy(&output).contains("INTERRUPTED") {
+                return;
+            }
+        }
+
+        panic!(
+            "Ctrl+C did not return control to PowerShell within the test bound; output was:\n{}",
+            String::from_utf8_lossy(&output)
+        );
+    }
 }

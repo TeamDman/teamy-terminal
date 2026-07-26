@@ -415,8 +415,8 @@ publish bounded prompt and command ranges plus the reported exit status, and
 interactive PowerShell startup emits the same markers while deterministic
 `-NoProfile` tests remain unchanged. Process-free transcript replay is
 covered separately by Phase 2.3. The core, CLI, and PTY focused suites pass
-with 13, 14, and 3 tests respectively, including the OSC 133 and selection
-boundaries.
+with 14, 14, and 4 tests respectively, including the OSC 133, selection, and
+ConPTY input-mode boundaries.
 
 ### [x] 2.2 Implement the PTY adapter and prove bounded PowerShell 1..1000 input
 
@@ -597,15 +597,22 @@ cancellation, and child cleanup. Help/version continue to bypass interactive
 launch. Pure input and selection tests cover text, Enter, navigation,
 control-byte routing, bounded mouse coordinates, selection damage, and
 clipboard behavior; the bounded `-NoProfile` PTY smoke covers command input
-and successful exit. A desktop input probe was attempted with both `SendKeys`
-and native `SendInput`, but this session rejected synthetic keystrokes, so
-direct manual command/paste/resize/Ctrl+C/selection/exit evidence remains the
-only open MVP check. The control-plane probe is now stronger: a rebuilt live
-window produced prompt/ANSI/resize screenshots and a successful
-`invoke get-content` response, but `Start-Sleep -Seconds 30` continued for its
-full duration after `invoke ... send-keys ctrl+c`. The Windows ConPTY interrupt
-path therefore remains an explicit open correctness issue; `get-content` does
-not substitute for fixing and manually verifying that behavior.
+and successful exit. The core now records ConPTY's `?9001h/l` Win32-input
+mode request, and mode-aware keyboard/control encoding emits the documented
+`KEY_EVENT_RECORD` sequences while retaining raw paste. A focused interactive
+PTY regression, including DSR cursor-report responses and an initial resize,
+passes Ctrl+C against `ping.exe -t` and proves that the PowerShell shell
+survives for a follow-up command. A desktop input probe was attempted with
+both `SendKeys` and native `SendInput`, but this session rejected synthetic
+keystrokes, so direct manual command/paste/resize/Ctrl+C/selection/exit
+evidence remains the only open MVP check. The control-plane probe is now
+stronger: a rebuilt live window produced prompt/ANSI/resize screenshots and a
+successful `invoke get-content` response, but live `invoke ... send-keys ctrl+c`
+still leaves `ping.exe -t` running even though the application emits the exact
+structured sequence. The remaining issue is therefore the live application
+boundary between its PTY/event-loop path and the otherwise passing PTY
+regression; `get-content` does not substitute for resolving and manually
+verifying that behavior.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal

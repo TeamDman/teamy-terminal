@@ -275,6 +275,7 @@ struct TerminalState {
     prompt_start: Option<CursorPosition>,
     command_start: Option<CursorPosition>,
     responses: VecDeque<Vec<u8>>,
+    win32_input_mode: bool,
     alternate_screen: Option<SavedScreen>,
     saved_private_cursor: Option<SavedCursor>,
 }
@@ -300,6 +301,7 @@ impl TerminalState {
             prompt_start: None,
             command_start: None,
             responses: VecDeque::new(),
+            win32_input_mode: false,
             alternate_screen: None,
             saved_private_cursor: None,
         }
@@ -399,6 +401,7 @@ impl TerminalState {
         self.selection = None;
         self.clear_prompt_metadata();
         self.saved_private_cursor = None;
+        self.win32_input_mode = false;
     }
 
     fn save_private_cursor(&mut self) {
@@ -886,6 +889,7 @@ impl Perform for Performer<'_> {
                                 self.state.restore_private_cursor();
                             }
                         }
+                        9001 => self.state.win32_input_mode = enabled,
                         _ => {}
                     }
                 }
@@ -1096,6 +1100,12 @@ impl TerminalSession {
         self.state.rows
     }
 
+    /// Return whether the shell requested Windows `KEY_EVENT_RECORD` input.
+    #[must_use]
+    pub const fn win32_input_mode_enabled(&self) -> bool {
+        self.state.win32_input_mode
+    }
+
     /// Feed raw PTY bytes through the VT parser.
     pub fn process_bytes(&mut self, bytes: &[u8]) {
         let mut performer = Performer {
@@ -1224,6 +1234,18 @@ mod tests {
             Some(Color::Indexed(1))
         );
         assert_eq!(snapshot.cell(8, 0).map(|cell| cell.character), Some('!'));
+    }
+
+    #[test]
+    fn tracks_conpty_win32_input_mode_requests() {
+        let mut terminal = session();
+        assert!(!terminal.win32_input_mode_enabled());
+
+        terminal.process_bytes(b"\x1b[?9001h");
+        assert!(terminal.win32_input_mode_enabled());
+
+        terminal.process_bytes(b"\x1b[?9001l");
+        assert!(!terminal.win32_input_mode_enabled());
     }
 
     #[test]

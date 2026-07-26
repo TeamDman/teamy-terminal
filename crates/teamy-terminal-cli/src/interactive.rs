@@ -406,8 +406,14 @@ impl InteractiveApplication {
             .session
             .as_ref()
             .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))?;
+        let win32_input_mode = self.terminal.win32_input_mode_enabled();
         for key in keys {
-            session.write_input(&control_key_bytes(key)?)?;
+            let bytes = if win32_input_mode {
+                win32_control_key_bytes(key)?
+            } else {
+                control_key_bytes(key)?
+            };
+            session.write_input(&bytes)?;
         }
         Ok(())
     }
@@ -606,7 +612,11 @@ impl InteractiveApplication {
                 }
             }
         }
-        let bytes = match terminal_input(event, self.modifiers) {
+        let bytes = match terminal_input(
+            event,
+            self.modifiers,
+            self.terminal.win32_input_mode_enabled(),
+        ) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return,
             Err(error) => {
@@ -921,8 +931,259 @@ fn mark_cursor_cell(
     }
 }
 
-fn terminal_input(event: &KeyEvent, modifiers: ModifiersState) -> Result<Option<Vec<u8>>> {
-    terminal_input_key(&event.logical_key, event.text.as_deref(), modifiers)
+fn terminal_input(
+    event: &KeyEvent,
+    modifiers: ModifiersState,
+    win32_input_mode: bool,
+) -> Result<Option<Vec<u8>>> {
+    if win32_input_mode {
+        win32_terminal_input(event, modifiers)
+    } else {
+        terminal_input_key(&event.logical_key, event.text.as_deref(), modifiers)
+    }
+}
+
+const LEFT_ALT_PRESSED: u32 = 0x0002;
+const LEFT_CTRL_PRESSED: u32 = 0x0008;
+const SHIFT_PRESSED: u32 = 0x0010;
+const ENHANCED_KEY: u32 = 0x0100;
+
+fn win32_key_event(
+    virtual_key: u32,
+    scan_code: u32,
+    unicode_character: u32,
+    key_down: bool,
+    control_state: u32,
+) -> Vec<u8> {
+    format!(
+        "\x1b[{virtual_key};{scan_code};{unicode_character};{};{control_state};1_",
+        u8::from(key_down),
+    )
+    .into_bytes()
+}
+
+fn win32_key_press(
+    virtual_key: u32,
+    scan_code: u32,
+    unicode_character: u32,
+    control_state: u32,
+) -> Vec<u8> {
+    let mut bytes = win32_key_event(
+        virtual_key,
+        scan_code,
+        unicode_character,
+        true,
+        control_state,
+    );
+    bytes.extend(win32_key_event(
+        virtual_key,
+        scan_code,
+        0,
+        false,
+        control_state,
+    ));
+    bytes
+}
+
+fn win32_control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
+    let bytes = match key {
+        ControlKey::Character { text } | ControlKey::Paste { text } => text.as_bytes().to_vec(),
+        ControlKey::Enter => win32_key_press(0x0D, 0x1C, u32::from('\r'), 0),
+        ControlKey::Tab => win32_key_press(0x09, 0x0F, u32::from('\t'), 0),
+        ControlKey::Backspace => win32_key_press(0x08, 0x0E, 0x08, 0),
+        ControlKey::Escape => win32_key_press(0x1B, 0x01, 0x1B, 0),
+        ControlKey::ArrowUp => win32_key_press(0x26, 0x48, 0, ENHANCED_KEY),
+        ControlKey::ArrowDown => win32_key_press(0x28, 0x50, 0, ENHANCED_KEY),
+        ControlKey::ArrowRight => win32_key_press(0x27, 0x4D, 0, ENHANCED_KEY),
+        ControlKey::ArrowLeft => win32_key_press(0x25, 0x4B, 0, ENHANCED_KEY),
+        ControlKey::Home => win32_key_press(0x24, 0x47, 0, ENHANCED_KEY),
+        ControlKey::End => win32_key_press(0x23, 0x4F, 0, ENHANCED_KEY),
+        ControlKey::Delete => win32_key_press(0x2E, 0x53, 0, ENHANCED_KEY),
+        ControlKey::PageUp => win32_key_press(0x21, 0x49, 0, ENHANCED_KEY),
+        ControlKey::PageDown => win32_key_press(0x22, 0x51, 0, ENHANCED_KEY),
+        ControlKey::CtrlA => win32_ctrl_letter('a', 0x01),
+        ControlKey::CtrlArrowUp => win32_key_press(0x26, 0x48, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlArrowDown => win32_key_press(0x28, 0x50, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlArrowRight => win32_key_press(0x27, 0x4D, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlArrowLeft => win32_key_press(0x25, 0x4B, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlHome => win32_key_press(0x24, 0x47, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlEnd => win32_key_press(0x23, 0x4F, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlDelete => win32_key_press(0x2E, 0x53, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlPageUp => win32_key_press(0x21, 0x49, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlPageDown => win32_key_press(0x22, 0x51, 0, LEFT_CTRL_PRESSED),
+        ControlKey::CtrlCharacter { character } => {
+            let Some(control) = control_character_byte(&character.to_string()) else {
+                eyre::bail!("unsupported control character: {character:?}")
+            };
+            if character.is_ascii_alphabetic() {
+                win32_ctrl_letter(character.to_ascii_lowercase(), control)
+            } else {
+                vec![control]
+            }
+        }
+        ControlKey::CtrlC => {
+            let mut bytes = win32_key_event(0x11, 0x1D, 0, true, LEFT_CTRL_PRESSED);
+            bytes.extend(win32_key_event(0x43, 0x2E, 0x03, true, LEFT_CTRL_PRESSED));
+            bytes.extend(win32_key_event(0x43, 0x2E, 0, false, LEFT_CTRL_PRESSED));
+            bytes.extend(win32_key_event(0x11, 0x1D, 0, false, 0));
+            bytes
+        }
+        ControlKey::CtrlD => win32_ctrl_letter('d', 0x04),
+        ControlKey::CtrlZ => win32_ctrl_letter('z', 0x1A),
+        ControlKey::CtrlL => win32_ctrl_letter('l', 0x0C),
+    };
+    if bytes.len() > teamy_terminal_control::MAX_INPUT_BYTES {
+        eyre::bail!("control key text exceeds the input limit")
+    }
+    Ok(bytes)
+}
+
+fn win32_ctrl_letter(character: char, unicode_character: u8) -> Vec<u8> {
+    let (virtual_key, scan_code) = ascii_key_location(character).unwrap_or((0, 0));
+    win32_key_press(
+        virtual_key,
+        scan_code,
+        u32::from(unicode_character),
+        LEFT_CTRL_PRESSED,
+    )
+}
+
+fn ascii_key_location(character: char) -> Option<(u32, u32)> {
+    let character = character.to_ascii_uppercase();
+    if character.is_ascii_uppercase() {
+        let index = u32::from(character as u8 - b'A');
+        let scan_code = match character {
+            'A' => 0x1E,
+            'B' => 0x30,
+            'C' => 0x2E,
+            'D' => 0x20,
+            'E' => 0x12,
+            'F' => 0x21,
+            'G' => 0x22,
+            'H' => 0x23,
+            'I' => 0x17,
+            'J' => 0x24,
+            'K' => 0x25,
+            'L' => 0x26,
+            'M' => 0x32,
+            'N' => 0x31,
+            'O' => 0x18,
+            'P' => 0x19,
+            'Q' => 0x10,
+            'R' => 0x13,
+            'S' => 0x1F,
+            'T' => 0x14,
+            'U' => 0x16,
+            'V' => 0x2F,
+            'W' => 0x11,
+            'X' => 0x2D,
+            'Y' => 0x15,
+            'Z' => 0x2C,
+            _ => return None,
+        };
+        return Some((0x41 + index, scan_code));
+    }
+    if character.is_ascii_digit() {
+        let scan_code = match character {
+            '1' => 0x02,
+            '2' => 0x03,
+            '3' => 0x04,
+            '4' => 0x05,
+            '5' => 0x06,
+            '6' => 0x07,
+            '7' => 0x08,
+            '8' => 0x09,
+            '9' => 0x0A,
+            '0' => 0x0B,
+            _ => return None,
+        };
+        return Some((u32::from(character as u8), scan_code));
+    }
+    match character {
+        ' ' => Some((0x20, 0x39)),
+        _ => None,
+    }
+}
+
+fn win32_terminal_input(event: &KeyEvent, modifiers: ModifiersState) -> Result<Option<Vec<u8>>> {
+    if modifiers.control_key()
+        && let Key::Character(character) = &event.logical_key
+        && character.as_str().eq_ignore_ascii_case("v")
+    {
+        return terminal_input_key(&event.logical_key, event.text.as_deref(), modifiers);
+    }
+
+    let Some((virtual_key, scan_code, enhanced)) = win32_logical_key(&event.logical_key) else {
+        return terminal_input_key(&event.logical_key, event.text.as_deref(), modifiers);
+    };
+    let control_state = win32_control_state(modifiers) | if enhanced { ENHANCED_KEY } else { 0 };
+    let unicode_character = if modifiers.control_key() {
+        match &event.logical_key {
+            Key::Character(character) => control_character_byte(character).map(u32::from),
+            Key::Named(NamedKey::Backspace) => Some(0x08),
+            _ => None,
+        }
+    } else {
+        event
+            .text
+            .as_deref()
+            .and_then(single_character)
+            .map(u32::from)
+            .or_else(|| match &event.logical_key {
+                Key::Character(character) => single_character(character).map(u32::from),
+                _ => None,
+            })
+    }
+    .unwrap_or(0);
+    Ok(Some(win32_key_press(
+        virtual_key,
+        scan_code,
+        unicode_character,
+        control_state,
+    )))
+}
+
+fn win32_control_state(modifiers: ModifiersState) -> u32 {
+    let mut state = 0;
+    if modifiers.shift_key() {
+        state |= SHIFT_PRESSED;
+    }
+    if modifiers.control_key() {
+        state |= LEFT_CTRL_PRESSED;
+    }
+    if modifiers.alt_key() {
+        state |= LEFT_ALT_PRESSED;
+    }
+    state
+}
+
+fn win32_logical_key(key: &Key) -> Option<(u32, u32, bool)> {
+    match key {
+        Key::Character(character) => single_character(character)
+            .and_then(ascii_key_location)
+            .map(|(virtual_key, scan_code)| (virtual_key, scan_code, false)),
+        Key::Named(NamedKey::Enter) => Some((0x0D, 0x1C, false)),
+        Key::Named(NamedKey::Tab) => Some((0x09, 0x0F, false)),
+        Key::Named(NamedKey::Backspace) => Some((0x08, 0x0E, false)),
+        Key::Named(NamedKey::Escape) => Some((0x1B, 0x01, false)),
+        Key::Named(NamedKey::ArrowUp) => Some((0x26, 0x48, true)),
+        Key::Named(NamedKey::ArrowDown) => Some((0x28, 0x50, true)),
+        Key::Named(NamedKey::ArrowRight) => Some((0x27, 0x4D, true)),
+        Key::Named(NamedKey::ArrowLeft) => Some((0x25, 0x4B, true)),
+        Key::Named(NamedKey::Home) => Some((0x24, 0x47, true)),
+        Key::Named(NamedKey::End) => Some((0x23, 0x4F, true)),
+        Key::Named(NamedKey::Delete) => Some((0x2E, 0x53, true)),
+        Key::Named(NamedKey::PageUp) => Some((0x21, 0x49, true)),
+        Key::Named(NamedKey::PageDown) => Some((0x22, 0x51, true)),
+        Key::Named(NamedKey::Insert) => Some((0x2D, 0x52, true)),
+        _ => None,
+    }
+}
+
+fn single_character(text: &str) -> Option<char> {
+    let mut characters = text.chars();
+    let character = characters.next()?;
+    characters.next().is_none().then_some(character)
 }
 
 fn terminal_input_key(
@@ -1291,6 +1552,16 @@ mod tests {
         assert_eq!(
             control_key_bytes(&ControlKey::CtrlDelete).expect("Ctrl+Delete should encode"),
             b"\x1b[3;5~".to_vec()
+        );
+        assert_eq!(
+            win32_control_key_bytes(&ControlKey::CtrlC).expect("Win32 Ctrl+C should encode"),
+            b"\x1b[17;29;0;1;8;1_\x1b[67;46;3;1;8;1_\x1b[67;46;0;0;8;1_\x1b[17;29;0;0;0;1_"
+                .to_vec()
+        );
+        assert_eq!(
+            win32_control_key_bytes(&ControlKey::CtrlArrowRight)
+                .expect("Win32 Ctrl+Right should encode"),
+            b"\x1b[39;77;0;1;8;1_\x1b[39;77;0;0;8;1_".to_vec()
         );
         assert_eq!(
             terminal_input_key(
