@@ -8,6 +8,8 @@ use std::path::Path;
 use std::sync::Once;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::TryRecvError;
+use std::time::Duration;
+use std::time::Instant;
 use teamy_cancellation::CancellationToken;
 use teamy_terminal_control::ControlAction;
 use teamy_terminal_control::ControlCall;
@@ -52,6 +54,7 @@ const WINDOW_ICON_PNG: &[u8] = include_bytes!("../resources/main.png");
 const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 32.0;
 const FONT_PIXEL_SIZE_STEP: f32 = 1.0;
+const EVENT_LOOP_POLL_INTERVAL: Duration = Duration::from_millis(8);
 const MAX_PTY_DRAIN_EVENTS_PER_TURN: usize = 32;
 const MAX_PTY_DRAIN_BYTES_PER_TURN: usize = 512 * 1024;
 static EVENT_LOOP_LOGGED: Once = Once::new();
@@ -61,7 +64,9 @@ static CONTROL_DRAIN_LOGGED: Once = Once::new();
 /// Run the standalone interactive Vulkan terminal.
 pub fn run(cancellation_token: &CancellationToken) -> Result<()> {
     let event_loop = EventLoop::new().wrap_err("failed to create the terminal event loop")?;
-    event_loop.set_control_flow(ControlFlow::Poll);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(
+        Instant::now() + EVENT_LOOP_POLL_INTERVAL,
+    ));
     let mut application = InteractiveApplication::new(cancellation_token.clone())?;
     event_loop
         .run_app(&mut application)
@@ -646,6 +651,9 @@ impl ApplicationHandler for InteractiveApplication {
         {
             window.request_redraw();
         }
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + EVENT_LOOP_POLL_INTERVAL,
+        ));
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {

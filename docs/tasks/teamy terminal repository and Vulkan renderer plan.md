@@ -808,6 +808,15 @@ refresh and submitted one full-frame upload region. This confirms that the
 current MAILBOX image rotation, not the cell-diff calculation, is preventing
 partial uploads in this workload.
 
+A separate idle-responsiveness audit found that the interactive event loop was
+set to `ControlFlow::Poll`, so it continuously spun while waiting for PTY and
+control-channel work. A short release smoke measured roughly 3.3 CPU-seconds
+for the old polling build during idle startup. The loop now uses an 8 ms
+`ControlFlow::WaitUntil` cadence, retaining bounded PTY latency without
+burning a core when no frame is dirty. The patched release smoke remained
+responsive and used less than one CPU-second while active. This scheduler fix
+is independent of the still-open MAILBOX full-upload limitation.
+
 Decision: the apples-to-apples comparison confirms that the dirty-rectangle
 prototype is correctness-safe for the measured path and materially reduces
 host rasterization, but it remains opt-in because rotating swapchain images
