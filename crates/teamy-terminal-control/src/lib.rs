@@ -79,6 +79,15 @@ pub enum ControlKey {
     CtrlArrowDown,
     CtrlArrowRight,
     CtrlArrowLeft,
+    CtrlHome,
+    CtrlEnd,
+    CtrlDelete,
+    CtrlPageUp,
+    CtrlPageDown,
+    /// A control character not assigned a dedicated named variant.
+    CtrlCharacter {
+        character: char,
+    },
     CtrlC,
     CtrlD,
     CtrlZ,
@@ -149,7 +158,8 @@ pub fn parse_key_sequence(spec: &str) -> Result<Vec<ControlKey>> {
 }
 
 fn parse_named_key(spec: &str) -> Option<ControlKey> {
-    Some(match spec.to_ascii_lowercase().as_str() {
+    let normalized = spec.to_ascii_lowercase();
+    let key = match normalized.as_str() {
         "enter" => ControlKey::Enter,
         "tab" => ControlKey::Tab,
         "backspace" => ControlKey::Backspace,
@@ -168,12 +178,32 @@ fn parse_named_key(spec: &str) -> Option<ControlKey> {
         "ctrl+arrowdown" | "ctrl+down" => ControlKey::CtrlArrowDown,
         "ctrl+arrowright" | "ctrl+right" => ControlKey::CtrlArrowRight,
         "ctrl+arrowleft" | "ctrl+left" => ControlKey::CtrlArrowLeft,
+        "ctrl+home" => ControlKey::CtrlHome,
+        "ctrl+end" => ControlKey::CtrlEnd,
+        "ctrl+delete" | "ctrl+del" => ControlKey::CtrlDelete,
+        "ctrl+pageup" => ControlKey::CtrlPageUp,
+        "ctrl+pagedown" => ControlKey::CtrlPageDown,
         "ctrl+c" => ControlKey::CtrlC,
         "ctrl+d" => ControlKey::CtrlD,
         "ctrl+z" => ControlKey::CtrlZ,
         "ctrl+l" => ControlKey::CtrlL,
-        _ => return None,
-    })
+        _ => {
+            let character = normalized.strip_prefix("ctrl+")?;
+            let mut characters = character.chars();
+            let character = characters.next()?;
+            if characters.next().is_some() {
+                return None;
+            }
+            if character.is_ascii_lowercase()
+                || matches!(character, '@' | ' ' | '[' | '\\' | ']' | '^' | '_' | '?')
+            {
+                ControlKey::CtrlCharacter { character }
+            } else {
+                return None;
+            }
+        }
+    };
+    Some(key)
 }
 
 /// Return the per-user discovery directory used by live instances.
@@ -418,6 +448,12 @@ fn control_key_to_wire(key: &ControlKey) -> String {
         ControlKey::CtrlArrowDown => "ctrl-arrow-down".to_owned(),
         ControlKey::CtrlArrowRight => "ctrl-arrow-right".to_owned(),
         ControlKey::CtrlArrowLeft => "ctrl-arrow-left".to_owned(),
+        ControlKey::CtrlHome => "ctrl-home".to_owned(),
+        ControlKey::CtrlEnd => "ctrl-end".to_owned(),
+        ControlKey::CtrlDelete => "ctrl-delete".to_owned(),
+        ControlKey::CtrlPageUp => "ctrl-page-up".to_owned(),
+        ControlKey::CtrlPageDown => "ctrl-page-down".to_owned(),
+        ControlKey::CtrlCharacter { character } => format!("ctrl-{character}"),
         ControlKey::CtrlC => "ctrl-c".to_owned(),
         ControlKey::CtrlD => "ctrl-d".to_owned(),
         ControlKey::CtrlZ => "ctrl-z".to_owned(),
@@ -456,13 +492,33 @@ fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
         "ctrl-arrow-down" => Ok(ControlKey::CtrlArrowDown),
         "ctrl-arrow-right" => Ok(ControlKey::CtrlArrowRight),
         "ctrl-arrow-left" => Ok(ControlKey::CtrlArrowLeft),
+        "ctrl-home" => Ok(ControlKey::CtrlHome),
+        "ctrl-end" => Ok(ControlKey::CtrlEnd),
+        "ctrl-delete" => Ok(ControlKey::CtrlDelete),
+        "ctrl-page-up" => Ok(ControlKey::CtrlPageUp),
+        "ctrl-page-down" => Ok(ControlKey::CtrlPageDown),
         "ctrl-c" => Ok(ControlKey::CtrlC),
         "ctrl-d" => Ok(ControlKey::CtrlD),
         "ctrl-z" => Ok(ControlKey::CtrlZ),
         "ctrl-l" => Ok(ControlKey::CtrlL),
-        _ => Err(format!(
-            "unknown Teamy Terminal control key wire value: {wire}"
-        )),
+        _ => {
+            let character = wire
+                .strip_prefix("ctrl-")
+                .ok_or_else(|| format!("unknown Teamy Terminal control key wire value: {wire}"))?;
+            let mut characters = character.chars();
+            let character = characters
+                .next()
+                .ok_or_else(|| format!("unknown Teamy Terminal control key wire value: {wire}"))?;
+            if characters.next().is_some()
+                || !(character.is_ascii_lowercase()
+                    || matches!(character, '@' | ' ' | '[' | '\\' | ']' | '^' | '_' | '?'))
+            {
+                return Err(format!(
+                    "unknown Teamy Terminal control key wire value: {wire}"
+                ));
+            }
+            Ok(ControlKey::CtrlCharacter { character })
+        }
     }
 }
 
@@ -582,6 +638,22 @@ mod tests {
         assert_eq!(
             parse_key_sequence("ctrl+left").expect("Ctrl+Left chord should parse"),
             vec![ControlKey::CtrlArrowLeft]
+        );
+        assert_eq!(
+            parse_key_sequence("ctrl+delete").expect("Ctrl+Delete chord should parse"),
+            vec![ControlKey::CtrlDelete]
+        );
+        assert_eq!(
+            parse_key_sequence("ctrl+b").expect("Ctrl+B chord should parse"),
+            vec![ControlKey::CtrlCharacter { character: 'b' }]
+        );
+        assert_eq!(
+            control_key_to_wire(&ControlKey::CtrlCharacter { character: 'b' }),
+            "ctrl-b"
+        );
+        assert_eq!(
+            control_key_from_wire("ctrl-b".to_owned()).expect("Ctrl+B wire value should parse"),
+            ControlKey::CtrlCharacter { character: 'b' }
         );
         assert_eq!(
             parse_key_sequence("ctrl+c").expect("control chord should parse"),

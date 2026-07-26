@@ -127,6 +127,27 @@ struct TerminalRow {
     wrapped: bool,
 }
 
+#[derive(Clone, Debug)]
+struct SavedScreen {
+    columns: u16,
+    rows: u16,
+    cursor: CursorPosition,
+    saved_cursor: CursorPosition,
+    cursor_visible: bool,
+    wrap_pending: bool,
+    style: Style,
+    cells: Vec<Cell>,
+    row_wrapped: Vec<bool>,
+    scrollback: VecDeque<TerminalRow>,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SavedCursor {
+    cursor: CursorPosition,
+    cursor_visible: bool,
+    style: Style,
+}
+
 #[derive(Clone, Copy, Debug)]
 struct ReflowUnit {
     cell: Cell,
@@ -165,6 +186,8 @@ struct TerminalState {
     row_wrapped: Vec<bool>,
     scrollback: VecDeque<TerminalRow>,
     responses: VecDeque<Vec<u8>>,
+    alternate_screen: Option<SavedScreen>,
+    saved_private_cursor: Option<SavedCursor>,
 }
 
 impl TerminalState {
@@ -184,6 +207,8 @@ impl TerminalState {
             row_wrapped: vec![false; usize::from(rows)],
             scrollback: VecDeque::new(),
             responses: VecDeque::new(),
+            alternate_screen: None,
+            saved_private_cursor: None,
         }
     }
 
@@ -276,6 +301,77 @@ impl TerminalState {
         self.wrap_pending = false;
         self.row_wrapped.fill(false);
         self.scrollback.clear();
+        self.saved_private_cursor = None;
+    }
+
+    fn save_private_cursor(&mut self) {
+        self.saved_private_cursor = Some(SavedCursor {
+            cursor: self.cursor,
+            cursor_visible: self.cursor_visible,
+            style: self.style,
+        });
+    }
+
+    fn restore_private_cursor(&mut self) {
+        let Some(saved_cursor) = self.saved_private_cursor.take() else {
+            return;
+        };
+        self.cursor = CursorPosition {
+            column: saved_cursor.cursor.column.min(self.columns - 1),
+            row: saved_cursor.cursor.row.min(self.rows - 1),
+        };
+        self.cursor_visible = saved_cursor.cursor_visible;
+        self.style = saved_cursor.style;
+        self.wrap_pending = false;
+    }
+
+    fn enter_alternate_screen(&mut self) {
+        if self.alternate_screen.is_some() {
+            return;
+        }
+
+        self.alternate_screen = Some(SavedScreen {
+            columns: self.columns,
+            rows: self.rows,
+            cursor: self.cursor,
+            saved_cursor: self.saved_cursor,
+            cursor_visible: self.cursor_visible,
+            wrap_pending: self.wrap_pending,
+            style: self.style,
+            cells: self.cells.clone(),
+            row_wrapped: self.row_wrapped.clone(),
+            scrollback: self.scrollback.clone(),
+        });
+        self.cells = vec![Cell::default(); usize::from(self.columns) * usize::from(self.rows)];
+        self.row_wrapped.fill(false);
+        self.scrollback.clear();
+        self.cursor = CursorPosition::default();
+        self.cursor_visible = true;
+        self.style = Style::default();
+        self.wrap_pending = false;
+    }
+
+    fn exit_alternate_screen(&mut self) {
+        let Some(saved_screen) = self.alternate_screen.take() else {
+            return;
+        };
+        let columns = self.columns;
+        let rows = self.rows;
+
+        self.columns = saved_screen.columns;
+        self.rows = saved_screen.rows;
+        self.cursor = saved_screen.cursor;
+        self.saved_cursor = saved_screen.saved_cursor;
+        self.cursor_visible = saved_screen.cursor_visible;
+        self.wrap_pending = saved_screen.wrap_pending;
+        self.style = saved_screen.style;
+        self.cells = saved_screen.cells;
+        self.row_wrapped = saved_screen.row_wrapped;
+        self.scrollback = saved_screen.scrollback;
+
+        if self.columns != columns || self.rows != rows {
+            self.resize(columns, rows);
+        }
     }
 
     fn cell_index(&self, column: u16, row: u16) -> usize {
@@ -580,8 +676,33 @@ impl Perform for Performer<'_> {
             'm' => Self::apply_sgr(self, params),
             'h' | 'l' if intermediates == [b'?'] => {
                 for parameter in params.iter().filter_map(|values| values.first().copied()) {
-                    if parameter == 25 {
-                        self.state.cursor_visible = action == 'h';
+                    let enabled = action == 'h';
+                    match parameter {
+                        25 => self.state.cursor_visible = enabled,
+                        1047 => {
+                            if enabled {
+                                self.state.enter_alternate_screen();
+                            } else {
+                                self.state.exit_alternate_screen();
+                            }
+                        }
+                        1048 => {
+                            if enabled {
+                                self.state.save_private_cursor();
+                            } else {
+                                self.state.restore_private_cursor();
+                            }
+                        }
+                        1049 => {
+                            if enabled {
+                                self.state.save_private_cursor();
+                                self.state.enter_alternate_screen();
+                            } else {
+                                self.state.exit_alternate_screen();
+                                self.state.restore_private_cursor();
+                            }
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -923,5 +1044,76 @@ mod tests {
             .filter_map(|column| wide.cell(column, 0).map(|cell| cell.character))
             .collect();
         assert_eq!(text, "abcdefghij");
+    }
+
+    #[test]
+    fn alternate_screen_restores_primary_screen_and_scrollback() {
+        let mut terminal = TerminalSession::new(
+            TerminalLimits {
+                max_columns: 20,
+                max_rows: 2,
+                max_scrollback_rows: 8,
+            },
+            20,
+            2,
+        );
+        terminal.process_bytes(b"normal\r\nsecond\r\nthird");
+        let primary = terminal.snapshot();
+
+        terminal.process_bytes(b"\x1b[?1049halternate\x1b[?25l");
+        let alternate = terminal.snapshot();
+        assert_eq!(alternate.cell(0, 0).map(|cell| cell.character), Some('a'));
+        assert_eq!(alternate.scrollback_rows, 0);
+        assert!(!alternate.cursor_visible);
+
+        terminal.process_bytes(b"\x1b[?1049l");
+        assert_eq!(terminal.snapshot(), primary);
+    }
+
+    #[test]
+    fn alternate_screen_resize_restores_primary_at_new_size() {
+        let mut terminal = TerminalSession::new(
+            TerminalLimits {
+                max_columns: 20,
+                max_rows: 8,
+                max_scrollback_rows: 8,
+            },
+            10,
+            4,
+        );
+        terminal.process_bytes(b"primary text");
+        terminal.process_bytes(b"\x1b[?1049halt");
+        terminal.resize(6, 3);
+        terminal.process_bytes(b"\x1b[?1049l");
+
+        let snapshot = terminal.snapshot();
+        assert_eq!((snapshot.columns, snapshot.rows), (6, 3));
+        let text: String = (0..6)
+            .filter_map(|column| snapshot.cell(column, 0).map(|cell| cell.character))
+            .collect();
+        assert_eq!(text, "primar");
+    }
+
+    #[test]
+    fn alternate_screen_1047_restores_the_primary_cursor() {
+        let mut terminal = session();
+        terminal.process_bytes(b"primary\x1b[1;4H");
+        let primary_cursor = terminal.snapshot().cursor;
+
+        terminal.process_bytes(b"\x1b[?1047halt\x1b[10;10H\x1b[?1047l");
+        assert_eq!(terminal.snapshot().cursor, primary_cursor);
+    }
+
+    #[test]
+    fn private_cursor_mode_restores_cursor_and_style() {
+        let mut terminal = session();
+        terminal.process_bytes(b"\x1b[3;5H\x1b[31m\x1b[?1048h\x1b[1;1H\x1b[0m\x1b[?1048lX");
+
+        let snapshot = terminal.snapshot();
+        assert_eq!(snapshot.cursor, CursorPosition { column: 5, row: 2 });
+        assert_eq!(
+            snapshot.cell(4, 2).map(|cell| cell.foreground),
+            Some(Color::Indexed(1))
+        );
     }
 }

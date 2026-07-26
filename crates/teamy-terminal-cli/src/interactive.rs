@@ -797,17 +797,8 @@ fn terminal_input_key(
     text: Option<&str>,
     modifiers: ModifiersState,
 ) -> Result<Option<Vec<u8>>> {
-    if modifiers.control_key() {
-        let modified_arrow = match key {
-            Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[1;5A".to_vec()),
-            Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[1;5B".to_vec()),
-            Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[1;5C".to_vec()),
-            Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[1;5D".to_vec()),
-            _ => None,
-        };
-        if modified_arrow.is_some() {
-            return Ok(modified_arrow);
-        }
+    if let Some(sequence) = modified_navigation_sequence(key, modifiers) {
+        return Ok(Some(sequence));
     }
     if modifiers.control_key() && matches!(key, Key::Named(NamedKey::Backspace)) {
         // PowerShell/PSReadLine and common Unix line disciplines use Ctrl+W
@@ -832,7 +823,11 @@ fn terminal_input_key(
                     .wrap_err("failed to read text from the system clipboard")?;
                 return Ok(Some(text.into_bytes()));
             }
-            _ => {}
+            _ => {
+                if let Some(byte) = control_character_byte(character) {
+                    return Ok(Some(vec![byte]));
+                }
+            }
         }
     }
     let bytes = match key {
@@ -859,6 +854,77 @@ fn terminal_input_key(
     }
 }
 
+fn control_character_byte(character: &str) -> Option<u8> {
+    let mut characters = character.chars();
+    let character = characters.next()?.to_ascii_lowercase();
+    if characters.next().is_some() {
+        return None;
+    }
+    if character.is_ascii_lowercase() {
+        return Some(character as u8 - b'a' + 1);
+    }
+    match character {
+        '@' | ' ' => Some(0),
+        '[' => Some(0x1b),
+        '\\' => Some(0x1c),
+        ']' => Some(0x1d),
+        '^' => Some(0x1e),
+        '_' => Some(0x1f),
+        '?' => Some(0x7f),
+        _ => None,
+    }
+}
+
+fn modified_navigation_sequence(key: &Key, modifiers: ModifiersState) -> Option<Vec<u8>> {
+    let modifier = 1
+        + if modifiers.shift_key() { 1 } else { 0 }
+        + if modifiers.alt_key() { 2 } else { 0 }
+        + if modifiers.control_key() { 4 } else { 0 }
+        + if modifiers.super_key() { 8 } else { 0 };
+    let has_modifier = modifiers.shift_key()
+        || modifiers.alt_key()
+        || modifiers.control_key()
+        || modifiers.super_key();
+    if !has_modifier {
+        return None;
+    }
+
+    if matches!(key, Key::Named(NamedKey::Tab))
+        && modifiers.shift_key()
+        && !modifiers.alt_key()
+        && !modifiers.control_key()
+        && !modifiers.super_key()
+    {
+        return Some(b"\x1b[Z".to_vec());
+    }
+
+    let (final_byte, tilde_code) = match key {
+        Key::Named(NamedKey::ArrowUp) => (Some('A'), None),
+        Key::Named(NamedKey::ArrowDown) => (Some('B'), None),
+        Key::Named(NamedKey::ArrowRight) => (Some('C'), None),
+        Key::Named(NamedKey::ArrowLeft) => (Some('D'), None),
+        Key::Named(NamedKey::Home) => (Some('H'), None),
+        Key::Named(NamedKey::End) => (Some('F'), None),
+        Key::Named(NamedKey::Insert) => (None, Some(2)),
+        Key::Named(NamedKey::Delete) => (None, Some(3)),
+        Key::Named(NamedKey::PageUp) => (None, Some(5)),
+        Key::Named(NamedKey::PageDown) => (None, Some(6)),
+        _ => return None,
+    };
+
+    if let Some(final_byte) = final_byte {
+        Some(format!("\x1b[1;{modifier}{final_byte}").into_bytes())
+    } else {
+        Some(
+            format!(
+                "\x1b[{};{modifier}~",
+                tilde_code.expect("modified tilde key has a sequence number")
+            )
+            .into_bytes(),
+        )
+    }
+}
+
 fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
     let bytes = match key {
         ControlKey::Character { text } | ControlKey::Paste { text } => text.as_bytes().to_vec(),
@@ -880,6 +946,17 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
         ControlKey::CtrlArrowDown => b"\x1b[1;5B".to_vec(),
         ControlKey::CtrlArrowRight => b"\x1b[1;5C".to_vec(),
         ControlKey::CtrlArrowLeft => b"\x1b[1;5D".to_vec(),
+        ControlKey::CtrlHome => b"\x1b[1;5H".to_vec(),
+        ControlKey::CtrlEnd => b"\x1b[1;5F".to_vec(),
+        ControlKey::CtrlDelete => b"\x1b[3;5~".to_vec(),
+        ControlKey::CtrlPageUp => b"\x1b[5;5~".to_vec(),
+        ControlKey::CtrlPageDown => b"\x1b[6;5~".to_vec(),
+        ControlKey::CtrlCharacter { character } => {
+            let Some(byte) = control_character_byte(&character.to_string()) else {
+                eyre::bail!("unsupported control character: {character:?}")
+            };
+            vec![byte]
+        }
         ControlKey::CtrlC => vec![0x03],
         ControlKey::CtrlD => vec![0x04],
         ControlKey::CtrlZ => vec![0x1a],
@@ -916,6 +993,27 @@ mod tests {
                 .expect("Ctrl+D mapping should not fail"),
             Some(vec![0x04])
         );
+        for (value, expected) in [("b", 0x02), ("e", 0x05), ("h", 0x08), ("q", 0x11)] {
+            assert_eq!(
+                terminal_input_key(&character(value), None, ModifiersState::CONTROL)
+                    .expect("ordinary Ctrl+letter mapping should not fail"),
+                Some(vec![expected])
+            );
+        }
+        assert_eq!(
+            terminal_input_key(
+                &character("B"),
+                None,
+                ModifiersState::CONTROL.union(ModifiersState::SHIFT)
+            )
+            .expect("Ctrl+Shift+letter mapping should not fail"),
+            Some(vec![0x02])
+        );
+        assert_eq!(
+            terminal_input_key(&character("?"), None, ModifiersState::CONTROL)
+                .expect("Ctrl+question-mark mapping should not fail"),
+            Some(vec![0x7f])
+        );
         assert_eq!(
             terminal_input_key(
                 &Key::Named(NamedKey::Backspace),
@@ -923,6 +1021,15 @@ mod tests {
                 ModifiersState::CONTROL
             )
             .expect("Ctrl+Backspace mapping should not fail"),
+            Some(vec![0x17])
+        );
+        assert_eq!(
+            terminal_input_key(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ModifiersState::CONTROL.union(ModifiersState::SHIFT)
+            )
+            .expect("Ctrl+Shift+Backspace mapping should not fail"),
             Some(vec![0x17])
         );
         assert_eq!(
@@ -988,6 +1095,35 @@ mod tests {
             )
             .expect("Ctrl+Right mapping should not fail"),
             Some(b"\x1b[1;5C".to_vec())
+        );
+        let ctrl_shift = ModifiersState::CONTROL.union(ModifiersState::SHIFT);
+        for (key, expected) in [
+            (NamedKey::ArrowLeft, b"\x1b[1;6D".as_slice()),
+            (NamedKey::ArrowRight, b"\x1b[1;6C".as_slice()),
+            (NamedKey::Home, b"\x1b[1;6H".as_slice()),
+            (NamedKey::End, b"\x1b[1;6F".as_slice()),
+            (NamedKey::Delete, b"\x1b[3;6~".as_slice()),
+            (NamedKey::PageUp, b"\x1b[5;6~".as_slice()),
+            (NamedKey::PageDown, b"\x1b[6;6~".as_slice()),
+        ] {
+            assert_eq!(
+                terminal_input_key(&Key::Named(key), None, ctrl_shift)
+                    .expect("Ctrl+Shift navigation mapping should not fail"),
+                Some(expected.to_vec())
+            );
+        }
+        assert_eq!(
+            terminal_input_key(&Key::Named(NamedKey::Tab), None, ModifiersState::SHIFT)
+                .expect("Shift+Tab mapping should not fail"),
+            Some(b"\x1b[Z".to_vec())
+        );
+        assert_eq!(
+            control_key_bytes(&ControlKey::CtrlHome).expect("Ctrl+Home should encode"),
+            b"\x1b[1;5H".to_vec()
+        );
+        assert_eq!(
+            control_key_bytes(&ControlKey::CtrlDelete).expect("Ctrl+Delete should encode"),
+            b"\x1b[3;5~".to_vec()
         );
         assert_eq!(
             terminal_input_key(
