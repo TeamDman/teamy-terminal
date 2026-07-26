@@ -16,6 +16,7 @@ ash-window.workspace = true
 eyre.workspace = true
 raw-window-handle.workspace = true
 teamy-terminal-font.workspace = true
+teamy-terminal-frame.workspace = true
 winit.workspace = true
 
 [lints]

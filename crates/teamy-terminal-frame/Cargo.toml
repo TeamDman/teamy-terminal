@@ -1,0 +1,18 @@
+[package]
+name = "teamy-terminal-frame"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+readme.workspace = true
+repository.workspace = true
+keywords.workspace = true
+categories.workspace = true
+description = "Bounded portable terminal frame packets"
+
+[dependencies]
+eyre.workspace = true
+png.workspace = true
+
+[lints]
+workspace = true

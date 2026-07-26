@@ -25,8 +25,9 @@ cargo run -- --version
 ```
 
 The deterministic PTY smoke uses `pwsh.exe -NoProfile` and round-trips a
-bounded `1..1000` sequence. Portable frame encoding, off-screen readback, and
-SFM integration remain outside the standalone interactive MVP.
+bounded `1..1000` sequence. `render-fixture --format png` produces a
+deterministic portable frame artifact without requiring a window, Vulkan
+surface, Minecraft, or a native GPU handle; SFM integration remains deferred.
 
 The interactive build enables the correctness-tested `dirty_rendering` path by
 default, so ordinary `cargo run` redraws changed cells through the cached

@@ -2988,6 +2988,7 @@ dependencies = [
  "teamy-terminal-control",
  "teamy-terminal-core",
  "teamy-terminal-font",
+ "teamy-terminal-frame",
  "teamy-terminal-pty",
  "teamy-terminal-renderer",
  "tokio",
@@ -3032,6 +3033,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "teamy-terminal-frame"
+version = "0.1.0"
+dependencies = [
+ "eyre",
+ "png",
+]
+
+[[package]]
 name = "teamy-terminal-pty"
 version = "0.1.0"
 dependencies = [
@@ -3049,6 +3058,7 @@ dependencies = [
  "eyre",
  "raw-window-handle",
  "teamy-terminal-font",
+ "teamy-terminal-frame",
  "winit",
 ]
 

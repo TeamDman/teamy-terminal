@@ -15,6 +15,9 @@ use raw_window_handle::HasDisplayHandle;
 use raw_window_handle::HasWindowHandle;
 use std::ffi::CString;
 use teamy_terminal_font::RasterizedFrame;
+use teamy_terminal_frame::FrameCompression;
+use teamy_terminal_frame::FrameKind;
+use teamy_terminal_frame::FramePacket;
 use winit::window::Window;
 
 struct SwapchainState {
@@ -54,6 +57,82 @@ impl PixelRect {
     #[must_use]
     pub const fn full(width: u32, height: u32) -> Self {
         Self::new(0, 0, width, height)
+    }
+}
+
+/// A renderer-neutral, CPU-visible frame independent of a presentable window.
+///
+/// This is the readback seam used by portable consumers and deterministic
+/// fixtures. The interactive Vulkan presenter remains a separate type and does
+/// not expose native image or surface handles through this API.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct OffscreenFrame {
+    frame: RasterizedFrame,
+}
+
+impl OffscreenFrame {
+    /// Create a zero-filled RGBA8 off-screen frame.
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        let pixels = usize::try_from(width)
+            .ok()
+            .and_then(|width| width.checked_mul(usize::try_from(height).ok()?))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| eyre::eyre!("off-screen frame byte length overflows"))?;
+        Self::from_rasterized(RasterizedFrame {
+            width,
+            height,
+            pixels: vec![0; pixels],
+        })
+    }
+
+    /// Adopt a CPU-visible RGBA8 frame as an off-screen readback.
+    pub fn from_rasterized(frame: RasterizedFrame) -> Result<Self> {
+        let expected = usize::try_from(frame.width)
+            .ok()
+            .and_then(|width| width.checked_mul(usize::try_from(frame.height).ok()?))
+            .and_then(|pixels| pixels.checked_mul(4))
+            .ok_or_else(|| eyre::eyre!("off-screen frame byte length overflows"))?;
+        if frame.pixels.len() != expected {
+            return Err(eyre::eyre!(
+                "off-screen frame has {} bytes, expected {expected}",
+                frame.pixels.len()
+            ));
+        }
+        Ok(Self { frame })
+    }
+
+    /// Return the CPU-visible RGBA8 readback.
+    #[must_use]
+    pub const fn readback(&self) -> &RasterizedFrame {
+        &self.frame
+    }
+
+    /// Encode the complete readback as a portable packet.
+    pub fn full_packet(&self, sequence: u64, compression: FrameCompression) -> Result<FramePacket> {
+        FramePacket::full_rgba(
+            sequence,
+            self.frame.width,
+            self.frame.height,
+            &self.frame.pixels,
+            compression,
+        )
+    }
+
+    /// Encode one dirty tile from the complete readback.
+    pub fn dirty_packet(
+        &self,
+        sequence: u64,
+        tile: FrameKind,
+        compression: FrameCompression,
+    ) -> Result<FramePacket> {
+        FramePacket::dirty_rgba(
+            sequence,
+            self.frame.width,
+            self.frame.height,
+            &self.frame.pixels,
+            tile,
+            compression,
+        )
     }
 }
 
@@ -1133,5 +1212,44 @@ mod tests {
         );
         assert_eq!(regions[0].buffer_offset, 0);
         assert!(validate_pixel_rect(PixelRect::new(3, 1, 2, 1), 4, 2).is_err());
+    }
+
+    #[test]
+    fn offscreen_frame_encodes_full_and_dirty_packets() {
+        let frame = RasterizedFrame {
+            width: 4,
+            height: 3,
+            pixels: (0_u8..48).collect(),
+        };
+        let offscreen = OffscreenFrame::from_rasterized(frame).expect("frame should be valid");
+        let full = offscreen
+            .full_packet(11, FrameCompression::Raw)
+            .expect("full packet should encode");
+        assert_eq!(full.descriptor.width, 4);
+        assert_eq!(full.descriptor.height, 3);
+        assert_eq!(full.bytes().len(), 48);
+        let dirty = offscreen
+            .dirty_packet(
+                12,
+                FrameKind::DirtyTile {
+                    x: 1,
+                    y: 1,
+                    width: 2,
+                    height: 2,
+                },
+                FrameCompression::Png,
+            )
+            .expect("dirty PNG should encode");
+        dirty.validate().expect("dirty PNG should validate");
+    }
+
+    #[test]
+    fn offscreen_frame_rejects_invalid_readback_size() {
+        let result = OffscreenFrame::from_rasterized(RasterizedFrame {
+            width: 2,
+            height: 2,
+            pixels: vec![0; 3],
+        });
+        assert!(result.is_err());
     }
 }

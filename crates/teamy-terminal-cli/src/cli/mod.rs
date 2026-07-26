@@ -2,6 +2,7 @@ pub mod global_args;
 pub mod invoke;
 pub mod list;
 pub mod output;
+pub mod render_fixture;
 
 use crate::cli::global_args::GlobalArgs;
 use crate::cli::output::CliOutput;
@@ -37,6 +38,8 @@ pub struct Cli {
 pub enum Command {
     /// List registered Teamy Terminal instances.
     List(list::ListArgs),
+    /// Render a deterministic terminal frame fixture to a portable artifact.
+    RenderFixture(render_fixture::RenderFixtureArgs),
     /// Invoke an action on a registered Teamy Terminal instance.
     Invoke(invoke::InvokeArgs),
 }
@@ -69,6 +72,7 @@ impl Command {
     fn invoke(self) -> eyre::Result<CliOutput> {
         match self {
             Self::List(args) => args.invoke(),
+            Self::RenderFixture(args) => args.invoke(),
             Self::Invoke(args) => args.invoke(),
         }
     }

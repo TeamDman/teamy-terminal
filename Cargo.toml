@@ -4,6 +4,7 @@ members = [
     "crates/teamy-terminal-core",
     "crates/teamy-terminal-control",
     "crates/teamy-terminal-font",
+    "crates/teamy-terminal-frame",
     "crates/teamy-terminal-pty",
     "crates/teamy-terminal-renderer",
     "crates/teamy-terminal-cli",
@@ -28,6 +29,7 @@ documentation = "https://github.com/TeamDman/teamy-terminal"
 teamy-terminal-core = { path = "crates/teamy-terminal-core" }
 teamy-terminal-control = { path = "crates/teamy-terminal-control" }
 teamy-terminal-font = { path = "crates/teamy-terminal-font" }
+teamy-terminal-frame = { path = "crates/teamy-terminal-frame" }
 teamy-terminal-pty = { path = "crates/teamy-terminal-pty" }
 teamy-terminal-renderer = { path = "crates/teamy-terminal-renderer" }
 

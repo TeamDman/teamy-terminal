@@ -62,7 +62,8 @@ Vulkan, or this repository.
 ### In scope
 
 - A Cargo workspace containing teamy-terminal-core, teamy-terminal-font,
-  teamy-terminal-pty, teamy-terminal-renderer, and teamy-terminal-cli.
+  teamy-terminal-frame, teamy-terminal-pty, teamy-terminal-renderer, and
+  teamy-terminal-cli.
 - Terminal state, VT/control-byte handling, bounded scrollback, cursor/style,
   selection, damage, resize, input events, snapshots, and deterministic replay.
 - A PowerShell PTY adapter used for the interactive shell and its bounded
@@ -510,7 +511,7 @@ cancellation after constructing the PTY/window/Vulkan path. Forcing an invalid
 the captured window proof shows the embedded-font frame and profile prompt.
 There is no CPU-rendering fallback.
 
-### [ ] 3.3 Add off-screen readback and portable frame encoding
+### [x] 3.3 Add off-screen readback and portable frame encoding
 
 **Work:** Add an off-screen target and CPU-visible readback independent of a
 presentable window. Expose sequence, dimensions, stride, format, full-frame or
@@ -527,6 +528,17 @@ cargo test -p teamy-terminal-renderer frame -- --nocapture
 **Completion criteria:** A deterministic PNG and bounded frame bytes can be
 validated without Minecraft or a native GPU shared handle; resize and dirty
 region behavior are tested.
+
+**Completion notes:** Added the renderer-free `teamy-terminal-frame` crate with
+bounded RGBA8/BGRA8 metadata, sequence numbers, full-frame/dirty-tile kinds,
+raw and PNG payloads, and strict dimension/stride/byte validation. The
+renderer exposes `OffscreenFrame` as the CPU-visible readback seam without
+leaking a native window or GPU handle. Frame and renderer tests cover raw
+metadata, tight dirty-tile packing, PNG validation, malformed bounds, and
+independent frame dimensions. The CLI command
+`cargo run -p teamy-terminal-cli -- render-fixture --format png` writes a
+deterministic 400x228 PNG fixture; the generated artifact was visually checked
+and its packet metadata reports sequence 1, RGBA8 stride 1600, and 6351 bytes.
 
 ### [~] 3.4 Wire the interactive `cargo run` MVP
 

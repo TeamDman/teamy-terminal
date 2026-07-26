@@ -37,6 +37,7 @@ facet-pretty.workspace = true
 figue.workspace = true
 teamy-terminal-core.workspace = true
 teamy-terminal-font.workspace = true
+teamy-terminal-frame.workspace = true
 teamy-terminal-pty.workspace = true
 teamy-terminal-renderer.workspace = true
 winit.workspace = true
