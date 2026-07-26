@@ -29,7 +29,9 @@ and clipboard copy are complete. The remaining standalone gate is live
 verification of prompt/command input, ANSI output, clipboard paste, resize,
 Ctrl+C interruption/copy, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift
 navigation, Ctrl+wheel zoom, alternate-screen restoration, and clean shell
-exit. Prompt/command-range metadata remains an open Phase 2.1 core item.
+exit. Prompt/command-range metadata is now covered by OSC 133 parsing and
+interactive PowerShell shell integration; it still needs bridge-consumer use
+in the later SFM slice.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -381,9 +383,9 @@ fixtures. `cargo test -p teamy-terminal-core` passes. Its only dependencies
 are `vte` and `unicode-width`; it imports no renderer, window, CUDA,
 Minecraft, or process-hosting dependency.
 
-## Phase 2 — Terminal core and headless proof [~]
+## Phase 2 — Terminal core and headless proof [x]
 
-### [~] 2.1 Define the terminal state and input contract
+### [x] 2.1 Define the terminal state and input contract
 
 **Work:** Implement bounded columns/rows/scrollback, cells and styles, cursor,
 selection, damage, deterministic resize, text/key/mouse events, prompt and
@@ -406,9 +408,13 @@ visible-grid selection, bounded selected-text extraction, selection clearing
 on resize/alternate-screen transitions, and deterministic snapshots. The CLI
 adds bounded mouse selection, visible selection highlighting, selection-aware
 damage invalidation, and Ctrl+C/Ctrl+Shift+C clipboard copy; Ctrl+C remains
-the PTY interrupt path when no selection is active. Prompt and command-range
-metadata are not implemented yet. Process-free transcript replay is covered
-separately by Phase 2.3.
+the PTY interrupt path when no selection is active. OSC 133 A/B/C/D markers
+publish bounded prompt and command ranges plus the reported exit status, and
+interactive PowerShell startup emits the same markers while deterministic
+`-NoProfile` tests remain unchanged. Process-free transcript replay is
+covered separately by Phase 2.3. The core, CLI, and PTY focused suites pass
+with 13, 14, and 3 tests respectively, including the OSC 133 and selection
+boundaries.
 
 ### [x] 2.2 Implement the PTY adapter and prove bounded PowerShell 1..1000 input
 
@@ -1069,12 +1075,14 @@ sfm-propagate-changes.exe test run
 canonical compile/tests pass before any version propagation.
 
 **Current boundary:** The reviewed Facet/Vox source-of-truth extension is
-committed at `35461380d` on `teamy/vox-java-terminal-contract`, based on the
-earlier reviewed boundary `144382fd5`. It adds frame kind/stride/tile bounds,
-cursor, selection, mouse button state, and capability flags, with generated
-Java 17 sources and a passing focused generator compile. It is not yet a
-published or SFM-consumed pin; broad `test-java` remains environment-limited
-by the installed JBR 17.0.6 `Cannot close compiler resources` failure.
+committed at `858e64cdc` on `teamy/vox-java-terminal-contract`, based on the
+earlier reviewed boundaries `144382fd5` and `35461380d`. It carries frame
+kind/stride/tile bounds, cursor, selection, mouse button state, capability
+flags, and OSC 133 prompt/command metadata, with generated Java 17 sources.
+Rust schema tests, codegen freshness, and the focused generator compile pass.
+It is not yet a published or SFM-consumed pin; broad `test-java` remains
+environment-limited by the installed JBR 17.0.6 `Cannot close compiler
+resources` failure.
 
 ### [ ] 4.3 Prove the optional frame consumer boundary
 

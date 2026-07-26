@@ -1342,6 +1342,7 @@ mod tests {
             cells: vec![teamy_terminal_core::Cell::default(); 2],
             scrollback_rows: 0,
             selection: None,
+            prompt: teamy_terminal_core::PromptMetadata::default(),
         };
         let current = teamy_terminal_core::TerminalSnapshot {
             columns: 3,
@@ -1351,6 +1352,7 @@ mod tests {
             cells: vec![teamy_terminal_core::Cell::default(); 3],
             scrollback_rows: 0,
             selection: None,
+            prompt: teamy_terminal_core::PromptMetadata::default(),
         };
 
         let (regions, full_refresh) = damage_regions(Some(&previous), &current);
@@ -1391,6 +1393,7 @@ mod tests {
             cells: cells.clone(),
             scrollback_rows: 0,
             selection: None,
+            prompt: teamy_terminal_core::PromptMetadata::default(),
         };
         let current = teamy_terminal_core::TerminalSnapshot {
             columns: 8,
@@ -1400,6 +1403,7 @@ mod tests {
             cells,
             scrollback_rows: 0,
             selection: None,
+            prompt: teamy_terminal_core::PromptMetadata::default(),
         };
 
         let (regions, full_refresh) = damage_regions(Some(&previous), &current);
@@ -1441,6 +1445,7 @@ mod tests {
             cells: vec![teamy_terminal_core::Cell::default(); 2],
             scrollback_rows: 0,
             selection: None,
+            prompt: teamy_terminal_core::PromptMetadata::default(),
         };
 
         let (regions, full_refresh) = damage_regions(None, &current);

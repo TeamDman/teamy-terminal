@@ -74,6 +74,26 @@ impl SelectionRange {
     }
 }
 
+/// An inclusive-start, exclusive-end range in the visible terminal grid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct TerminalRange {
+    /// The first cell in the range.
+    pub start: CursorPosition,
+    /// The cell immediately after the range.
+    pub end: CursorPosition,
+}
+
+/// Shell-integration metadata associated with the latest prompt and command.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct PromptMetadata {
+    /// The latest OSC 133 prompt range, when a shell reported one.
+    pub prompt_range: Option<TerminalRange>,
+    /// The latest OSC 133 command/input-and-output range, when completed.
+    pub command_range: Option<TerminalRange>,
+    /// The exit status reported by the latest OSC 133 D marker.
+    pub command_status: Option<i32>,
+}
+
 /// The colour carried by a terminal cell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Color {
@@ -133,6 +153,8 @@ pub struct TerminalSnapshot {
     pub scrollback_rows: usize,
     /// The active visible-grid selection, if any.
     pub selection: Option<SelectionRange>,
+    /// The latest shell prompt and command markers.
+    pub prompt: PromptMetadata,
 }
 
 impl TerminalSnapshot {
@@ -230,6 +252,9 @@ struct TerminalState {
     row_wrapped: Vec<bool>,
     scrollback: VecDeque<TerminalRow>,
     selection: Option<SelectionRange>,
+    prompt: PromptMetadata,
+    prompt_start: Option<CursorPosition>,
+    command_start: Option<CursorPosition>,
     responses: VecDeque<Vec<u8>>,
     alternate_screen: Option<SavedScreen>,
     saved_private_cursor: Option<SavedCursor>,
@@ -252,6 +277,9 @@ impl TerminalState {
             row_wrapped: vec![false; usize::from(rows)],
             scrollback: VecDeque::new(),
             selection: None,
+            prompt: PromptMetadata::default(),
+            prompt_start: None,
+            command_start: None,
             responses: VecDeque::new(),
             alternate_screen: None,
             saved_private_cursor: None,
@@ -265,6 +293,7 @@ impl TerminalState {
             return;
         }
         self.selection = None;
+        self.clear_prompt_metadata();
 
         let old_columns = self.columns;
         let old_rows = self.rows;
@@ -349,6 +378,7 @@ impl TerminalState {
         self.row_wrapped.fill(false);
         self.scrollback.clear();
         self.selection = None;
+        self.clear_prompt_metadata();
         self.saved_private_cursor = None;
     }
 
@@ -391,6 +421,7 @@ impl TerminalState {
             scrollback: self.scrollback.clone(),
         });
         self.selection = None;
+        self.clear_prompt_metadata();
         self.cells = vec![Cell::default(); usize::from(self.columns) * usize::from(self.rows)];
         self.row_wrapped.fill(false);
         self.scrollback.clear();
@@ -407,6 +438,7 @@ impl TerminalState {
         let columns = self.columns;
         let rows = self.rows;
         self.selection = None;
+        self.clear_prompt_metadata();
 
         self.columns = saved_screen.columns;
         self.rows = saved_screen.rows;
@@ -460,6 +492,42 @@ impl TerminalState {
         Some(text)
     }
 
+    fn clear_prompt_metadata(&mut self) {
+        self.prompt = PromptMetadata::default();
+        self.prompt_start = None;
+        self.command_start = None;
+    }
+
+    fn prompt_marker_start(&mut self) {
+        self.prompt = PromptMetadata::default();
+        self.prompt_start = Some(self.cursor);
+        self.command_start = None;
+    }
+
+    fn prompt_marker_end(&mut self) {
+        if let Some(start) = self.prompt_start.take() {
+            self.prompt.prompt_range = Some(TerminalRange {
+                start,
+                end: self.cursor,
+            });
+            self.command_start = Some(self.cursor);
+        }
+    }
+
+    fn command_marker_start(&mut self) {
+        self.command_start = Some(self.cursor);
+    }
+
+    fn command_marker_end(&mut self, status: Option<i32>) {
+        if let Some(start) = self.command_start.take() {
+            self.prompt.command_range = Some(TerminalRange {
+                start,
+                end: self.cursor,
+            });
+        }
+        self.prompt.command_status = status;
+    }
+
     fn cell_index(&self, column: u16, row: u16) -> usize {
         usize::from(row) * usize::from(self.columns) + usize::from(column)
     }
@@ -467,6 +535,7 @@ impl TerminalState {
     fn line_feed(&mut self, wrapped: bool) {
         self.wrap_pending = false;
         if self.cursor.row + 1 >= self.rows {
+            self.clear_prompt_metadata();
             let line = TerminalRow {
                 cells: self.cells[..usize::from(self.columns)].to_vec(),
                 wrapped: self.row_wrapped[0],
@@ -573,6 +642,16 @@ impl TerminalState {
 
     fn response(&mut self, bytes: Vec<u8>) {
         self.responses.push_back(bytes);
+    }
+
+    fn osc133(&mut self, marker: &[u8], status: Option<i32>) {
+        match marker {
+            b"A" => self.prompt_marker_start(),
+            b"B" => self.prompt_marker_end(),
+            b"C" => self.command_marker_start(),
+            b"D" => self.command_marker_end(status),
+            _ => {}
+        }
     }
 }
 
@@ -805,6 +884,20 @@ impl Perform for Performer<'_> {
             'c' => self.state.response(b"\x1b[?1;2c".to_vec()),
             _ => {}
         }
+    }
+
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.first().copied() != Some(b"133") {
+            return;
+        }
+        let Some(marker) = params.get(1).copied() else {
+            return;
+        };
+        let status = params
+            .get(2)
+            .and_then(|value| std::str::from_utf8(value).ok())
+            .and_then(|value| value.parse::<i32>().ok());
+        self.state.osc133(marker, status);
     }
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
@@ -1043,6 +1136,7 @@ impl TerminalSession {
             cells: self.state.cells.clone(),
             scrollback_rows: self.state.scrollback.len(),
             selection: self.state.selection,
+            prompt: self.state.prompt,
         }
     }
 
@@ -1211,6 +1305,44 @@ mod tests {
         terminal.begin_selection(CursorPosition::default());
         terminal.process_bytes(b"\x1b[?1049halt\x1b[?1049l");
         assert_eq!(terminal.selection(), None);
+    }
+
+    #[test]
+    fn osc133_markers_publish_prompt_command_range_and_status() {
+        let mut terminal = session();
+        terminal.process_bytes(
+            b"\x1b]133;A\x07PS \x1b]133;B\x07Get-Process\x1b]133;C\x07output\x1b]133;D;7\x07",
+        );
+
+        assert_eq!(
+            terminal.snapshot().prompt,
+            PromptMetadata {
+                prompt_range: Some(TerminalRange {
+                    start: CursorPosition { column: 0, row: 0 },
+                    end: CursorPosition { column: 3, row: 0 },
+                }),
+                command_range: Some(TerminalRange {
+                    start: CursorPosition { column: 14, row: 0 },
+                    end: CursorPosition { column: 20, row: 0 },
+                }),
+                command_status: Some(7),
+            }
+        );
+    }
+
+    #[test]
+    fn osc133_power_shell_markers_infer_command_start_after_prompt() {
+        let mut terminal = session();
+        terminal.process_bytes(b"\x1b]133;A\x07PS \x1b]133;B\x07echo ok\x1b]133;D;0\x07");
+
+        assert_eq!(
+            terminal.snapshot().prompt.command_range,
+            Some(TerminalRange {
+                start: CursorPosition { column: 3, row: 0 },
+                end: CursorPosition { column: 10, row: 0 },
+            })
+        );
+        assert_eq!(terminal.snapshot().prompt.command_status, Some(0));
     }
 
     #[test]

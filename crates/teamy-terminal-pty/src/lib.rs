@@ -23,6 +23,8 @@ use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
 use std::time::Duration;
 
+const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"$global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
+
 /// Initial terminal dimensions used before a window reports its real size.
 pub const DEFAULT_COLUMNS: u16 = 120;
 /// Initial terminal dimensions used before a window reports its real size.
@@ -88,8 +90,26 @@ impl PtyConfig {
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "teamy-terminal");
         command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
+        if !self.no_profile && is_pwsh_shell(&self.shell) {
+            command.env("TEAMY_SHELL_INTEGRATION", "osc133-pwsh-prompt");
+            command.arg("-NoExit");
+            command.arg("-Command");
+            command.arg(TEAMY_PWSH_OSC133_BOOTSTRAP);
+        }
         command
     }
+}
+
+fn is_pwsh_shell(shell: &str) -> bool {
+    std::path::Path::new(shell)
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| {
+            matches!(
+                name.to_ascii_lowercase().as_str(),
+                "pwsh" | "pwsh.exe" | "powershell" | "powershell.exe"
+            )
+        })
 }
 
 /// A process exit notification.
@@ -320,6 +340,15 @@ mod tests {
         let test = test_command.get_argv();
         assert!(!interactive.iter().any(|argument| argument == "-NoProfile"));
         assert!(test.iter().any(|argument| argument == "-NoProfile"));
+        assert!(interactive.iter().any(|argument| argument == "-NoExit"));
+        assert!(interactive.iter().any(|argument| argument == "-Command"));
+        assert!(interactive
+            .iter()
+            .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
+        assert!(!test.iter().any(|argument| argument == "-NoExit"));
+        assert!(!test
+            .iter()
+            .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
     }
 
     #[cfg(windows)]
