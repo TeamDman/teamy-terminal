@@ -616,24 +616,13 @@ impl InteractiveApplication {
         &self,
         position: winit::dpi::PhysicalPosition<f64>,
     ) -> Option<CursorPosition> {
-        if !position.x.is_finite()
-            || !position.y.is_finite()
-            || position.x < 0.0
-            || position.y < 0.0
-        {
-            return None;
-        }
-        let cell_width = f64::from(self.font.cell_width());
-        let cell_height = f64::from(self.font.cell_height());
-        if cell_width <= 0.0 || cell_height <= 0.0 {
-            return None;
-        }
-        let column = (position.x / cell_width).floor() as u16;
-        let row = (position.y / cell_height).floor() as u16;
-        if column >= self.terminal.columns() || row >= self.terminal.rows() {
-            return None;
-        }
-        Some(CursorPosition { column, row })
+        terminal_cell_at_position(
+            position,
+            self.font.cell_width(),
+            self.font.cell_height(),
+            self.terminal.columns(),
+            self.terminal.rows(),
+        )
     }
 
     fn update_selection_from_position(
@@ -793,6 +782,30 @@ fn wheel_zoom_direction(delta: &MouseScrollDelta) -> Option<f32> {
     } else {
         None
     }
+}
+
+fn terminal_cell_at_position(
+    position: winit::dpi::PhysicalPosition<f64>,
+    cell_width: u32,
+    cell_height: u32,
+    columns: u16,
+    rows: u16,
+) -> Option<CursorPosition> {
+    if !position.x.is_finite()
+        || !position.y.is_finite()
+        || position.x < 0.0
+        || position.y < 0.0
+        || cell_width == 0
+        || cell_height == 0
+    {
+        return None;
+    }
+    let column = (position.x / f64::from(cell_width)).floor() as u16;
+    let row = (position.y / f64::from(cell_height)).floor() as u16;
+    if column >= columns || row >= rows {
+        return None;
+    }
+    Some(CursorPosition { column, row })
 }
 
 #[cfg(feature = "extended_observability")]
@@ -1188,6 +1201,40 @@ mod tests {
     }
 
     #[test]
+    fn mouse_positions_map_to_bounded_terminal_cells() {
+        assert_eq!(
+            terminal_cell_at_position(
+                winit::dpi::PhysicalPosition::new(31.9, 47.9),
+                16,
+                24,
+                4,
+                3,
+            ),
+            Some(teamy_terminal_core::CursorPosition { column: 1, row: 1 })
+        );
+        assert_eq!(
+            terminal_cell_at_position(
+                winit::dpi::PhysicalPosition::new(64.0, 0.0),
+                16,
+                24,
+                4,
+                3,
+            ),
+            None
+        );
+        assert_eq!(
+            terminal_cell_at_position(
+                winit::dpi::PhysicalPosition::new(-1.0, 0.0),
+                16,
+                24,
+                4,
+                3,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn navigation_and_text_keys_use_pty_sequences() {
         assert_eq!(
             terminal_input_key(
@@ -1310,6 +1357,26 @@ mod tests {
 
         assert!(full_refresh);
         assert_eq!(regions, vec![CellRect::full(3, 1)]);
+    }
+
+    #[cfg(feature = "dirty_rendering")]
+    #[test]
+    fn damage_regions_force_full_refresh_after_selection_changes() {
+        let mut terminal = teamy_terminal_core::TerminalSession::new(
+            teamy_terminal_core::TerminalLimits::default(),
+            4,
+            2,
+        );
+        terminal.process_bytes(b"abcd\r\nefgh");
+        let previous = terminal.snapshot();
+        terminal.begin_selection(teamy_terminal_core::CursorPosition::default());
+        terminal.update_selection(teamy_terminal_core::CursorPosition { column: 2, row: 1 });
+        let current = terminal.snapshot();
+
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+
+        assert!(full_refresh);
+        assert_eq!(regions, vec![CellRect::full(4, 2)]);
     }
 
     #[cfg(feature = "dirty_rendering")]
