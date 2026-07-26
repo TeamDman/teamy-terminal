@@ -120,6 +120,25 @@ struct Style {
     inverse: bool,
 }
 
+#[derive(Clone, Debug)]
+struct TerminalRow {
+    cells: Vec<Cell>,
+    /// Whether this row is a continuation of the logical row above it.
+    wrapped: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ReflowUnit {
+    cell: Cell,
+    width: usize,
+    continuation: Option<Cell>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct LogicalLine {
+    units: Vec<ReflowUnit>,
+}
+
 impl Style {
     const fn cell(self, character: char) -> Cell {
         Cell {
@@ -143,7 +162,8 @@ struct TerminalState {
     wrap_pending: bool,
     style: Style,
     cells: Vec<Cell>,
-    scrollback: VecDeque<Vec<Cell>>,
+    row_wrapped: Vec<bool>,
+    scrollback: VecDeque<TerminalRow>,
     responses: VecDeque<Vec<u8>>,
 }
 
@@ -161,6 +181,7 @@ impl TerminalState {
             wrap_pending: false,
             style: Style::default(),
             cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
+            row_wrapped: vec![false; usize::from(rows)],
             scrollback: VecDeque::new(),
             responses: VecDeque::new(),
         }
@@ -173,21 +194,77 @@ impl TerminalState {
             return;
         }
 
-        let old_cells = std::mem::take(&mut self.cells);
         let old_columns = self.columns;
         let old_rows = self.rows;
+        let old_scrollback_len = self.scrollback.len();
+        let source_cursor = (
+            old_scrollback_len + usize::from(self.cursor.row),
+            usize::from(self.cursor.column),
+        );
+        let mut source_rows = self.scrollback.iter().cloned().collect::<Vec<_>>();
+        source_rows.extend((0..usize::from(old_rows)).map(|row| {
+            TerminalRow {
+                cells: self.cells
+                    [row * usize::from(old_columns)..(row + 1) * usize::from(old_columns)]
+                    .to_vec(),
+                wrapped: self.row_wrapped[row],
+            }
+        }));
+
+        let (mut reflowed, cursor) = reflow_rows(&source_rows, columns, source_cursor);
+        let target_rows = usize::from(rows);
+        while reflowed.len() < target_rows {
+            reflowed.push(TerminalRow {
+                cells: Vec::new(),
+                wrapped: false,
+            });
+        }
+        let maximum_rows = self.limits.max_scrollback_rows.saturating_add(target_rows);
+        let dropped_rows = reflowed.len().saturating_sub(maximum_rows);
+        if dropped_rows > 0 {
+            reflowed.drain(..dropped_rows);
+        }
+
         self.columns = columns;
         self.rows = rows;
-        self.cells = vec![Cell::default(); usize::from(columns) * usize::from(rows)];
-        for row in 0..usize::from(rows.min(old_rows)) {
-            for column in 0..usize::from(columns.min(old_columns)) {
-                let old_index = row * usize::from(old_columns) + column;
-                let new_index = row * usize::from(columns) + column;
-                self.cells[new_index] = old_cells[old_index];
-            }
+        self.scrollback.clear();
+        let cursor_global_row = cursor.map_or_else(
+            || reflowed.len().saturating_sub(1),
+            |(row, _)| row.saturating_sub(dropped_rows),
+        );
+        let visible_start = cursor_global_row
+            .saturating_sub(target_rows.saturating_sub(1))
+            .min(reflowed.len().saturating_sub(target_rows));
+        self.scrollback
+            .extend(reflowed[..visible_start].iter().cloned());
+        self.cells = vec![Cell::default(); target_rows * usize::from(columns)];
+        self.row_wrapped = vec![false; target_rows];
+        for (row, source) in reflowed[visible_start..visible_start + target_rows]
+            .iter()
+            .enumerate()
+        {
+            let destination =
+                &mut self.cells[row * usize::from(columns)..(row + 1) * usize::from(columns)];
+            destination[..source.cells.len()].copy_from_slice(&source.cells);
+            self.row_wrapped[row] = source.wrapped;
         }
-        self.cursor.column = self.cursor.column.min(columns - 1);
-        self.cursor.row = self.cursor.row.min(rows - 1);
+
+        let cursor_row = cursor
+            .map_or_else(
+                || target_rows.saturating_sub(1),
+                |(row, _)| {
+                    row.saturating_sub(dropped_rows)
+                        .saturating_sub(visible_start)
+                },
+            )
+            .min(target_rows.saturating_sub(1));
+        let cursor_column = cursor
+            .map_or(0, |(_, column)| column)
+            .min(usize::from(columns).saturating_sub(1));
+        self.cursor = CursorPosition {
+            column: u16::try_from(cursor_column).expect("resized cursor column fits in u16"),
+            row: u16::try_from(cursor_row).expect("resized cursor row fits in u16"),
+        };
         self.wrap_pending = false;
     }
 
@@ -197,6 +274,7 @@ impl TerminalState {
         self.saved_cursor = CursorPosition::default();
         self.style = Style::default();
         self.wrap_pending = false;
+        self.row_wrapped.fill(false);
         self.scrollback.clear();
     }
 
@@ -204,10 +282,13 @@ impl TerminalState {
         usize::from(row) * usize::from(self.columns) + usize::from(column)
     }
 
-    fn line_feed(&mut self) {
+    fn line_feed(&mut self, wrapped: bool) {
         self.wrap_pending = false;
         if self.cursor.row + 1 >= self.rows {
-            let line = self.cells[..usize::from(self.columns)].to_vec();
+            let line = TerminalRow {
+                cells: self.cells[..usize::from(self.columns)].to_vec(),
+                wrapped: self.row_wrapped[0],
+            };
             if self.limits.max_scrollback_rows > 0 {
                 self.scrollback.push_back(line);
                 while self.scrollback.len() > self.limits.max_scrollback_rows {
@@ -218,8 +299,12 @@ impl TerminalState {
             self.cells.copy_within(columns.., 0);
             let last_row = self.cells.len() - columns;
             self.cells[last_row..].fill(Cell::default());
+            self.row_wrapped.copy_within(1.., 0);
+            let last_row = self.row_wrapped.len() - 1;
+            self.row_wrapped[last_row] = wrapped;
         } else {
             self.cursor.row += 1;
+            self.row_wrapped[usize::from(self.cursor.row)] = wrapped;
         }
     }
 
@@ -228,9 +313,13 @@ impl TerminalState {
             let columns = usize::from(self.columns);
             let mut line = vec![Cell::default(); columns];
             line.copy_from_slice(&self.cells[self.cells.len() - columns..]);
+            let last_wrapped = *self.row_wrapped.last().unwrap_or(&false);
             let before_last_row = self.cells.len() - columns;
             self.cells.copy_within(..before_last_row, columns);
             self.cells[..columns].copy_from_slice(&line);
+            let row_count = self.row_wrapped.len();
+            self.row_wrapped.copy_within(..row_count - 1, 1);
+            self.row_wrapped[0] = last_wrapped;
         } else {
             self.cursor.row -= 1;
         }
@@ -239,13 +328,13 @@ impl TerminalState {
     fn put_char(&mut self, character: char) {
         if self.wrap_pending {
             self.cursor.column = 0;
-            self.line_feed();
+            self.line_feed(true);
         }
         let width = u16::try_from(character.width().unwrap_or(1).clamp(1, 2))
             .expect("clamped Unicode width fits in u16");
         if width == 2 && self.cursor.column + 1 >= self.columns {
             self.cursor.column = 0;
-            self.line_feed();
+            self.line_feed(true);
         }
         let index = self.cell_index(self.cursor.column, self.cursor.row);
         self.cells[index] = self.style.cell(character);
@@ -267,6 +356,7 @@ impl TerminalState {
             1 => self.cells[..=cursor].fill(Cell::default()),
             2 | 3 => {
                 self.cells.fill(Cell::default());
+                self.row_wrapped.fill(false);
                 if mode == 3 {
                     self.scrollback.clear();
                 }
@@ -283,7 +373,10 @@ impl TerminalState {
                 .fill(Cell::default()),
             1 => self.cells[row_start..=row_start + usize::from(self.cursor.column)]
                 .fill(Cell::default()),
-            2 => self.cells[row_start..row_end].fill(Cell::default()),
+            2 => {
+                self.cells[row_start..row_end].fill(Cell::default());
+                self.row_wrapped[usize::from(self.cursor.row)] = false;
+            }
             _ => {}
         }
     }
@@ -393,7 +486,7 @@ impl Perform for Performer<'_> {
 
     fn execute(&mut self, byte: u8) {
         match byte {
-            b'\n' | 0x0b | 0x0c => self.state.line_feed(),
+            b'\n' | 0x0b | 0x0c => self.state.line_feed(false),
             b'\r' => {
                 self.state.cursor.column = 0;
                 self.state.wrap_pending = false;
@@ -515,7 +608,7 @@ impl Perform for Performer<'_> {
                 .move_cursor(self.state.saved_cursor.column, self.state.saved_cursor.row),
             b'c' => self.state.clear(),
             b'D' | b'E' => {
-                self.state.line_feed();
+                self.state.line_feed(false);
                 if byte == b'E' {
                     self.state.cursor.column = 0;
                 }
@@ -524,6 +617,122 @@ impl Perform for Performer<'_> {
             _ => {}
         }
     }
+}
+
+fn reflow_rows(
+    source_rows: &[TerminalRow],
+    new_columns: u16,
+    source_cursor: (usize, usize),
+) -> (Vec<TerminalRow>, Option<(usize, usize)>) {
+    let columns = usize::from(new_columns.max(1));
+    let mut logical_lines = Vec::<LogicalLine>::new();
+    let mut cursor_anchor = None;
+
+    for (row_index, row) in source_rows.iter().enumerate() {
+        if !row.wrapped || logical_lines.is_empty() {
+            logical_lines.push(LogicalLine::default());
+        }
+        let line_index = logical_lines.len() - 1;
+        let line = logical_lines
+            .last_mut()
+            .expect("a logical line was just created");
+        let line_width = line.units.iter().map(|unit| unit.width).sum::<usize>();
+        let last_content = if row.wrapped {
+            row.cells.len()
+        } else {
+            row.cells
+                .iter()
+                .rposition(|cell| *cell != Cell::default())
+                .map_or(0, |index| index + 1)
+        };
+        let mut row_width = 0;
+
+        for column in 0..last_content {
+            let cell = row.cells[column];
+            if column > 0 && is_wide_continuation(row.cells[column - 1], cell) {
+                continue;
+            }
+            let width = cell.character.width().unwrap_or(1).clamp(1, 2);
+            if source_cursor.0 == row_index && source_cursor.1 == column {
+                cursor_anchor = Some((line_index, line_width + row_width));
+            }
+            let continuation = if width == 2 {
+                row.cells.get(column + 1).copied()
+            } else {
+                None
+            };
+            line.units.push(ReflowUnit {
+                cell,
+                width,
+                continuation,
+            });
+            row_width += width;
+            if source_cursor.0 == row_index && source_cursor.1 == column + 1 && width == 2 {
+                cursor_anchor = Some((line_index, line_width + row_width));
+            }
+        }
+
+        if source_cursor.0 == row_index && cursor_anchor.is_none() {
+            cursor_anchor = Some((line_index, line_width + row_width));
+        }
+    }
+
+    let mut output = Vec::new();
+    let mut destination_cursor = None;
+    for (line_index, line) in logical_lines.iter().enumerate() {
+        let line_width = line.units.iter().map(|unit| unit.width).sum::<usize>();
+        let output_start = output.len();
+        let mut output_cells = Vec::new();
+        let mut output_row = 0;
+        for unit in &line.units {
+            let unit_width = unit.width.min(columns);
+            if !output_cells.is_empty() && output_cells.len() + unit_width > columns {
+                output.push(TerminalRow {
+                    cells: std::mem::take(&mut output_cells),
+                    wrapped: output_row > 0,
+                });
+                output_row += 1;
+            }
+            output_cells.push(unit.cell);
+            if unit_width == 2 {
+                let continuation = unit.continuation.unwrap_or_else(|| {
+                    let mut continuation = unit.cell;
+                    continuation.character = ' ';
+                    continuation
+                });
+                output_cells.push(continuation);
+            }
+        }
+        output.push(TerminalRow {
+            cells: std::mem::take(&mut output_cells),
+            wrapped: output_row > 0,
+        });
+
+        if let Some((cursor_line, cursor_offset)) = cursor_anchor
+            && cursor_line == line_index
+        {
+            let offset = cursor_offset.min(line_width);
+            let (row_offset, column) =
+                if line_width > 0 && offset == line_width && offset % columns == 0 {
+                    (output_row, columns - 1)
+                } else {
+                    (offset / columns, offset % columns)
+                };
+            destination_cursor = Some((output_start + row_offset, column));
+        }
+    }
+
+    (output, destination_cursor)
+}
+
+fn is_wide_continuation(previous: Cell, current: Cell) -> bool {
+    previous.character.width().is_some_and(|width| width >= 2)
+        && current.character == ' '
+        && current.foreground == previous.foreground
+        && current.background == previous.background
+        && current.bold == previous.bold
+        && current.underline == previous.underline
+        && current.inverse == previous.inverse
 }
 
 /// A renderer-free, bounded terminal session.
@@ -605,7 +814,10 @@ impl TerminalSession {
         let count = rows.min(self.state.limits.max_scrollback_rows);
         self.state.scrollback.resize(
             count,
-            vec![Cell::default(); usize::from(self.state.columns)],
+            TerminalRow {
+                cells: vec![Cell::default(); usize::from(self.state.columns)],
+                wrapped: false,
+            },
         );
     }
 }
@@ -685,5 +897,31 @@ mod tests {
         let snapshot = terminal.snapshot();
         assert_eq!(snapshot.cell(0, 0).map(|cell| cell.character), Some('a'));
         assert_eq!(snapshot.cell(2, 0).map(|cell| cell.character), Some('c'));
+    }
+
+    #[test]
+    fn resize_reflows_and_restores_content_hidden_by_a_narrow_viewport() {
+        let mut terminal = TerminalSession::new(
+            TerminalLimits {
+                max_columns: 20,
+                max_rows: 10,
+                max_scrollback_rows: 128,
+            },
+            10,
+            4,
+        );
+        terminal.process_bytes(b"abcdefghij");
+
+        terminal.resize(5, 4);
+        let narrow = terminal.snapshot();
+        assert_eq!(narrow.cell(0, 0).map(|cell| cell.character), Some('a'));
+        assert_eq!(narrow.cell(0, 1).map(|cell| cell.character), Some('f'));
+
+        terminal.resize(10, 4);
+        let wide = terminal.snapshot();
+        let text: String = (0..10)
+            .filter_map(|column| wide.cell(column, 0).map(|cell| cell.character))
+            .collect();
+        assert_eq!(text, "abcdefghij");
     }
 }

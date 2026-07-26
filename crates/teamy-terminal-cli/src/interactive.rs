@@ -36,6 +36,8 @@ use winit::window::WindowId;
 
 const INITIAL_WINDOW_WIDTH: u32 = 1280;
 const INITIAL_WINDOW_HEIGHT: u32 = 720;
+const MAX_PTY_DRAIN_EVENTS_PER_TURN: usize = 32;
+const MAX_PTY_DRAIN_BYTES_PER_TURN: usize = 512 * 1024;
 static EVENT_LOOP_LOGGED: Once = Once::new();
 static PTY_DRAIN_LOGGED: Once = Once::new();
 static CONTROL_DRAIN_LOGGED: Once = Once::new();
@@ -60,6 +62,7 @@ struct InteractiveApplication {
     renderer: Option<VulkanRenderer>,
     modifiers: ModifiersState,
     dirty: bool,
+    resize_pending: bool,
     failure: Option<String>,
     control_server: Option<ControlServer>,
     control_calls: Option<Receiver<ControlCall>>,
@@ -79,6 +82,7 @@ impl InteractiveApplication {
             renderer: None,
             modifiers: ModifiersState::default(),
             dirty: true,
+            resize_pending: false,
             failure: None,
             control_server: None,
             control_calls: None,
@@ -163,7 +167,14 @@ impl InteractiveApplication {
     }
 
     fn drain_pty(&mut self, event_loop: &ActiveEventLoop) {
+        let mut drained_events = 0;
+        let mut drained_bytes = 0;
         while self.session.is_some() {
+            if drained_events >= MAX_PTY_DRAIN_EVENTS_PER_TURN
+                || drained_bytes >= MAX_PTY_DRAIN_BYTES_PER_TURN
+            {
+                break;
+            }
             let event = match self
                 .session
                 .as_ref()
@@ -179,6 +190,7 @@ impl InteractiveApplication {
             };
             match event {
                 PtyEvent::Output(bytes) => {
+                    drained_bytes = drained_bytes.saturating_add(bytes.len());
                     self.terminal.process_bytes(&bytes);
                     let responses: Vec<Vec<u8>> = self.terminal.drain_responses().collect();
                     if let Some(session) = self.session.as_ref() {
@@ -206,6 +218,7 @@ impl InteractiveApplication {
                     return;
                 }
             }
+            drained_events += 1;
         }
     }
 
@@ -314,6 +327,23 @@ impl InteractiveApplication {
         if !self.dirty {
             return;
         }
+        if self.resize_pending {
+            let Some(window) = self.window.as_ref() else {
+                return;
+            };
+            let Some(renderer) = self.renderer.as_mut() else {
+                return;
+            };
+            if let Err(error) = renderer.recreate(window) {
+                self.fail(error, event_loop);
+                return;
+            }
+            self.resize_pending = false;
+            if let Err(error) = self.resize_terminal() {
+                self.fail(error, event_loop);
+                return;
+            }
+        }
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
@@ -324,17 +354,8 @@ impl InteractiveApplication {
             Ok(needs_recreate) => {
                 self.dirty = false;
                 if needs_recreate {
-                    let Some(window) = self.window.as_ref() else {
-                        return;
-                    };
-                    if let Err(error) = renderer
-                        .recreate(window)
-                        .and_then(|()| self.resize_terminal())
-                    {
-                        self.fail(error, event_loop);
-                    } else {
-                        self.dirty = true;
-                    }
+                    self.resize_pending = true;
+                    self.dirty = true;
                 }
             }
             Err(error) => self.fail(error, event_loop),
@@ -382,14 +403,8 @@ impl ApplicationHandler for InteractiveApplication {
                 event_loop.exit();
             }
             WindowEvent::Resized(size) if size.width > 0 && size.height > 0 => {
-                if let Some(renderer) = self.renderer.as_mut()
-                    && let Some(window) = self.window.as_ref()
-                    && let Err(error) = renderer
-                        .recreate(window)
-                        .and_then(|()| self.resize_terminal())
-                {
-                    self.fail(error, event_loop);
-                }
+                self.resize_pending = true;
+                self.dirty = true;
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::KeyboardInput { event, .. } => self.input(&event, event_loop),
