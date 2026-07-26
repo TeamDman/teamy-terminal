@@ -1,5 +1,6 @@
 # Core fixtures
 
-Deterministic terminal transcripts and snapshots will live here as the core
-contract grows. Phase 1.3 keeps the directory present without introducing a
-process or renderer dependency.
+Deterministic terminal transcripts and snapshots live here as the renderer-free
+core contract. The CLI replay test consumes the transcript fixtures without
+launching a process and compares the resulting snapshot to an independent
+expected FNV-1a hash.

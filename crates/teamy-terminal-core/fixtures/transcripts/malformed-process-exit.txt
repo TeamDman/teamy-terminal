@@ -1,0 +1,13 @@
+# Teamy Terminal replay fixture v1
+size 8 2 2
+write 1b5d7469746c65074f4b
+event process-exit 7 false
+event cancelled
+expect columns 8
+expect rows 2
+expect cursor 2 0
+expect cursor-visible true
+expect scrollback 0
+expect process-exit 7 false
+expect cancelled true
+expect hash eda326e29c600d4e

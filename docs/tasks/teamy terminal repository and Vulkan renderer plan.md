@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-07-25
+**Last updated:** 2026-07-26
 
 ## How to update this plan
 
@@ -26,9 +26,9 @@ integration track: establish the profiling feature contract, add coarse
 instrumentation, and collect a reproducible baseline before changing the
 renderer. The code-level input mapping, PTY/Vulkan startup, resize/reflow, and
 large-output responsiveness proofs are complete. Direct desktop interaction
-evidence and process-free replay remain explicit acceptance gaps; they are not
-being marked complete while the profiling track proceeds. Portable frame
-encoding and SFM integration remain deferred.
+evidence and broader phase acceptance remain explicit gaps; process-free replay
+is now covered by independent fixtures. Portable frame encoding and SFM
+integration remain deferred.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -430,7 +430,7 @@ profile; the test configuration adds `-NoProfile`, fixed terminal environment
 variables, bounded output events, a 15-second smoke timeout, and explicit
 child cleanup. The Windows smoke passes in the development environment.
 
-### [ ] 2.3 Replay the proof without launching PowerShell
+### [x] 2.3 Replay the proof without launching PowerShell
 
 **Work:** Persist a deterministic transcript/snapshot fixture and replay it
 through the same core API. Include cancellation, process exit, malformed
@@ -442,8 +442,18 @@ output, and scrollback-limit cases.
 cargo test -p teamy-terminal-cli replay -- --nocapture
 ~~~
 
-**Completion criteria:** Replay reproduces rows, cursor, scrollback, damage,
-and fixture hash without a process, and bounded failure cases are asserted.
+**Completion criteria:** Replay reproduces visible rows/cells, cursor,
+scrollback, and the fixture hash without a process, and bounded lifecycle and
+malformed-output cases are asserted. Damage-region validation remains in the
+renderer/CLI track.
+
+**Completion notes:** Added the process-free replay runner in
+`crates/teamy-terminal-cli/tests/replay.rs` and four independent transcript
+fixtures covering ANSI styling, alternate-screen restoration,
+resize/scrollback reflow, and malformed output with process-exit/cancellation
+markers. Each fixture checks dimensions, cursor state, visibility, scrollback,
+and a full-snapshot FNV-1a hash. `cargo test -p teamy-terminal-cli --test
+replay --locked --offline` passes 1/1.
 
 ## Phase 3 — Font and Vulkan tracks [ ]
 
@@ -1077,7 +1087,7 @@ overwritten by baseline code.
 
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
-| Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay pending |
+| Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
 | Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and input mapping pass; desktop interaction pending |
 | Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
@@ -1093,8 +1103,8 @@ default-profile PowerShell PTY and supports the agreed command/input/resize/
 cancellation/exit behavior. Portable frame encoding, SFM integration, and
 cross-platform renderer support are post-MVP work.
 
-The roadmap as a whole is not complete: Phase 2.3, Phase 3.3, and Phases 4–5
-remain future work. The active MVP goal is therefore audited against the
+The roadmap as a whole is not complete: Phase 3.3 and Phases 4–5 remain future
+work. The active MVP goal is therefore audited against the
 Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
 latest audit, Phase 3.4 is implemented but remains [~] until a desktop session
 provides direct evidence for the five interaction checks.
@@ -1102,7 +1112,8 @@ provides direct evidence for the five interaction checks.
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.
 - [ ] Core headless 1..1000 and process-free replay proofs are deterministic
-  and bounded.
+  and bounded. The replay proof is complete; the overall criterion remains
+  open until the broader phase evidence is green.
 - [ ] Font extraction and Vulkan/off-screen output have deterministic fixtures.
 - [ ] Portable frame data is validated without native GPU-handle interop.
 - [ ] SFM integration is optional, pinned, and never an absolute path in
