@@ -21,14 +21,13 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Execute Phase 3.5 as the active performance and Windows
-integration track: establish the profiling feature contract, add coarse
-instrumentation, and collect a reproducible baseline before changing the
-renderer. The code-level input mapping, PTY/Vulkan startup, resize/reflow, and
-large-output responsiveness proofs are complete. Direct desktop interaction
-evidence and broader phase acceptance remain explicit gaps; process-free replay
-is now covered by independent fixtures. Portable frame encoding and SFM
-integration remain deferred.
+**Next slice:** Close Phase 3.4 with a direct desktop interaction proof, then
+begin Phase 4's optional SFM integration. The code-level input mapping,
+PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
+contract, and portable frame encoding are complete. The remaining standalone
+gate is live verification of prompt/command input, ANSI output, clipboard
+paste, resize, Ctrl+C interruption, Ctrl navigation, Ctrl+Shift navigation,
+Ctrl+wheel zoom, alternate-screen restoration, and clean shell exit.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -276,7 +275,7 @@ The compatibility initializer copied the reviewed scaffold. Metadata and
 nightly formatting passed. The SFM document now points to this authoritative
 plan instead of duplicating it.
 
-## Phase 1 — Workspace foundation [~]
+## Phase 1 — Workspace foundation [x]
 
 ### [x] 1.1 Convert the single package into the five-crate workspace
 
@@ -401,8 +400,12 @@ and deterministic snapshot equality.
 
 **Completion notes:** The MVP core covers ordinary text, VT/control input,
 cursor/style transitions, bounded scrollback, resize, cursor reports, and
-deterministic snapshots. Selection, damage reporting, mouse events, and
-process-free transcript replay remain outside the current interactive slice.
+deterministic snapshots. Selection, damage reporting, and mouse events remain
+outside the current interactive slice; process-free transcript replay is
+covered separately by Phase 2.3.
+The first SFM bridge does not require selection or mouse events, so clipboard
+copy remains a later terminal-UX task; Ctrl+C continues to mean PTY interrupt
+when no selection model is active.
 
 ### [x] 2.2 Implement the PTY adapter and prove bounded PowerShell 1..1000 input
 
@@ -456,7 +459,7 @@ markers. Each fixture checks dimensions, cursor state, visibility, scrollback,
 and a full-snapshot FNV-1a hash. `cargo test -p teamy-terminal-cli --test
 replay --locked --offline` passes 1/1.
 
-## Phase 3 — Font and Vulkan tracks [ ]
+## Phase 3 — Font and Vulkan tracks [~]
 
 These are intentionally parallel: the renderer may use a temporary fake glyph
 source while the font seam is finalized. Each track must cite the source seam
@@ -482,7 +485,10 @@ renderer-consumable text frame pass without Teamy Studio dependencies.
 **Completion notes:** The font crate embeds the official Caskaydia Cove Nerd
 Font Mono regular face and preserves its license. `fontdue` rasterizes cached
 glyphs into bounded RGBA frames with terminal palette, bold, underline, and
-inverse handling; its render test passes independently.
+inverse handling; its render test passes independently. `fontdue` is CPU
+rasterization: it produces CPU-owned RGBA pixels, while Vulkan only uploads and
+presents those completed pixels. A future glyph/rasterization path, such as the
+slug algorithm work from Teamy Studio, is outside this handoff.
 
 ### [x] 3.2 Build the ash Vulkan presentation boundary
 
@@ -560,8 +566,12 @@ cargo run
 ~~~
 
 Manually verify a prompt, a simple command such as `echo TEAMY_TERMINAL_OK`,
-ANSI output, paste, resize, Ctrl+C, Ctrl+wheel font scaling, and clean shell
-exit.
+ANSI output, clipboard paste, resize, Ctrl+C interruption, Ctrl+A,
+Ctrl+Backspace, Ctrl+Arrow navigation, Ctrl+Shift navigation, Ctrl+wheel font
+scaling, alternate-screen entry/restore using `ratatui-key-debug`, and clean
+shell exit. Ctrl+C is the PTY interrupt path in the current MVP; clipboard copy
+requires the selection/mouse model that remains deferred under Phase 2.1 and
+must not be claimed as implemented by this proof.
 
 **Completion criteria:** `cargo run` opens a usable Vulkan terminal window and
 the user can run ordinary shell commands through the default-profile
@@ -588,7 +598,7 @@ font metrics/cache, invalidates the cached frame, reflows the terminal, and
 resizes the PTY. Automated direction/bounds tests pass; direct live-window
 verification remains part of the desktop interaction gate.
 
-## Phase 3.5 — Profiling contract and Windows presentation polish [~]
+## Phase 3.5 — Profiling contract and Windows presentation polish [x]
 
 This phase is the performance and integration follow-up to the interactive
 MVP. teamy-profiler is the golden execution harness; teamy-rust-cli is the
@@ -620,14 +630,13 @@ decoder and winit icon construction are covered by a focused CLI test, while
 the Windows executable resource and taskbar icon remain sourced from the
 existing `main.ico` resource.
 
-### [~] 3.5.2 Make Tracy and tracing-subscriber feature selection explicit
+### [x] 3.5.2 Make Tracy and tracing-subscriber feature selection explicit
 
-**Completion notes:** This is the current implementation focus. The existing
-CLI exposes only a `tracy` feature; the Cloud Terrastodon reference and the
-local `add-tracy-spans` guidance support adding a separate
-`extended_observability` feature, with `tracy` enabling both the detailed
-instrumentation and the Tracy transport. The current teamy-profiler dry-run
-and live-capture contract are recorded below.
+**Completion notes:** The Teamy Terminal profiling feature contract is complete
+for the current handoff scope. The CLI exposes `extended_observability` for
+detailed spans and `tracy` as the transport feature, with explicit subscriber
+capabilities and profiling-only log filtering. The current teamy-profiler
+dry-run and live-capture contract are recorded below.
 
 The first implementation slice now adds `extended_observability`, makes
 `tracy` imply it, disables direct `tracing-subscriber` defaults, filters
@@ -642,14 +651,13 @@ green because the existing randomized `cli_fuzzing` coverage test found zero
 samples for several command paths after 128,000 attempts; this is recorded as
 an existing test-harness issue, not a compile or instrumentation failure.
 
-The feature graph still shows `tracing-subscriber` default features arriving
-through pinned `teamy-cancellation` (`figue` enables its
-`tracing-subscriber` feature, whose dependency does not yet set
-`default-features = false`). This item remains in progress until that
-transitive feature leak is either fixed upstream or explicitly accepted as a
-documented exception.
+The Teamy Terminal and teamy-rust-cli feature graphs no longer include
+`tracing-subscriber` default features through teamy-cancellation. The dedicated
+teamy-mft repair branch is also clean. Cloud Terrastodon's older remote
+teamy-mft chain remains deliberately outside this handoff; no new Cloud
+changes are required for the SFM integration.
 
-#### [~] 3.5.2.a Repair teamy-cancellation's tracing feature boundary
+#### [x] 3.5.2.a Repair teamy-cancellation's tracing feature boundary
 
 **Work:** Update the local `G:\Programming\Repos\teamy-cancellation`
 checkout so its optional `tracing-subscriber` dependency uses
@@ -658,8 +666,9 @@ only subscriber capability used by `StopAfterLayer`. Keep its Facet/Figue pin
 at the compatible `23ad4dcd0` revision. Add or retain a focused feature-graph
 check and run the crate's all-feature tests. After the repair is reviewed,
 propagate the resulting teamy-cancellation revision (or a release containing
-it) to teamy-rust-cli, teamy-terminal, and Cloud Terrastodon; do not leave
-consumers on mixed Facet or tracing-subscriber contracts.
+it) to teamy-rust-cli and teamy-terminal; do not leave those consumers on mixed
+Facet or tracing-subscriber contracts. Cloud Terrastodon is explicitly
+excluded from this handoff.
 
 **Validation:** From teamy-cancellation, run `cargo tree -e features -i
 tracing-subscriber`, `cargo test --all-features --locked`, and the repository
@@ -667,11 +676,12 @@ quality gate. Then rerun the same feature-graph audit and locked focused
 checks in each consumer, including the template's Facet-bound compile and
 the teamy-profiler dry-runs.
 
-**Completion criteria:** No consumer's resolved dependency graph reaches
-`tracing-subscriber feature "default"` through teamy-cancellation; the
+**Completion criteria:** No in-scope consumer's resolved dependency graph
+reaches `tracing-subscriber feature "default"` through teamy-cancellation; the
 template compiles without duplicate incompatible Facet traits; all updated
 pins are recorded in lockfiles; and the existing profiling manifests remain
-unchanged apart from their source revision metadata.
+unchanged apart from their source revision metadata. Cloud propagation remains
+an explicit later task.
 
 **Completion notes:** The local repair is implemented and committed in
 `G:\Programming\Repos\teamy-cancellation` as `7c77848`
@@ -721,6 +731,8 @@ The teamy-mft all-feature integration test still fails in the existing
 and dependency-boundary compile succeeds, so that failure is not attributed to
 this repair.
 
+#### [x] 3.5.2.c Audit and lock the application profiling feature graph
+
 **Work:** Audit the full dependency graph, including teamy-cancellation, so
 the application does not accidentally re-enable tracing-subscriber default
 features through a transitive dependency. Use default-features = false and an
@@ -758,7 +770,12 @@ build has the explicitly selected Tracy capabilities; and the dependency graph
 does not silently acquire the default tracing-subscriber/tracing-tracy feature
 sets through teamy-cancellation or another shared crate.
 
-### [~] 3.5.3 Instrument the performance-critical terminal path
+**Completion notes:** Teamy Terminal's default, Tracy, and
+extended-observability builds were checked with isolated target directories.
+The application graph uses only the explicitly selected subscriber and Tracy
+capabilities.
+
+### [x] 3.5.3 Instrument the performance-critical terminal path
 
 **Completion notes:** Coarse Tracy spans and the frame marker are present, and
 the extended-observability path now emits bounded frame statistics for visible
@@ -850,11 +867,12 @@ Stale images must receive a full refresh; this
 preserves correctness even when it limits the upload benefit. Cursor, scroll,
 wide-glyph, style, resize, occlusion, and full-refresh invalidation remain
 acceptance requirements. The explicit fallback evidence and repeated matched
-captures are now complete. The next implementation slice should determine
-whether the swapchain/presentation strategy can safely reuse a current-revision
-image, or whether partial-upload optimization requires a different persistent
-render target; do not weaken the stale-image full-refresh rule. Do not accept
-a cell-diff-only change that still clears/rasterizes/uploads the full frame.
+captures are now complete. Further persistent-render-target or partial-upload
+investigation is deferred; it must not weaken the stale-image full-refresh rule
+and is not a pre-SFM requirement. The accepted performance boundary for this
+plan is CPU dirty-cell rasterization with correctness-first full-upload
+fallback when the rotating MAILBOX image is stale. Do not accept a cell-diff-
+only change that still clears/rasterizes/uploads the full frame.
 
 **Work:** Add low-overhead, Tracy-visible spans around PTY draining and output
 batching, VT parsing/core reflow, font fallback/rasterization, host frame
@@ -902,7 +920,7 @@ remains usable without Tracy, profiling overhead is not hidden by accidental
 logging fan-out, and no optimization is accepted without a matching
 correctness proof and comparable capture.
 
-### [~] 3.5.4 Synchronize the template and profiler source of truth
+### [x] 3.5.4 Synchronize the template and profiler source of truth
 
 **Work:** Update teamy-rust-cli so its Cargo.toml, logging module,
 run-profiler.ps1, and README explicitly document the profiling contract:
