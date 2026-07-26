@@ -74,6 +74,7 @@ pub enum ControlKey {
     Delete,
     PageUp,
     PageDown,
+    CtrlA,
     CtrlC,
     CtrlD,
     CtrlZ,
@@ -158,6 +159,7 @@ fn parse_named_key(spec: &str) -> Option<ControlKey> {
         "delete" | "del" => ControlKey::Delete,
         "pageup" => ControlKey::PageUp,
         "pagedown" => ControlKey::PageDown,
+        "ctrl+a" => ControlKey::CtrlA,
         "ctrl+c" => ControlKey::CtrlC,
         "ctrl+d" => ControlKey::CtrlD,
         "ctrl+z" => ControlKey::CtrlZ,
@@ -403,6 +405,7 @@ fn control_key_to_wire(key: &ControlKey) -> String {
         ControlKey::Delete => "delete".to_owned(),
         ControlKey::PageUp => "page-up".to_owned(),
         ControlKey::PageDown => "page-down".to_owned(),
+        ControlKey::CtrlA => "ctrl-a".to_owned(),
         ControlKey::CtrlC => "ctrl-c".to_owned(),
         ControlKey::CtrlD => "ctrl-d".to_owned(),
         ControlKey::CtrlZ => "ctrl-z".to_owned(),
@@ -436,6 +439,7 @@ fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
         "delete" => Ok(ControlKey::Delete),
         "page-up" => Ok(ControlKey::PageUp),
         "page-down" => Ok(ControlKey::PageDown),
+        "ctrl-a" => Ok(ControlKey::CtrlA),
         "ctrl-c" => Ok(ControlKey::CtrlC),
         "ctrl-d" => Ok(ControlKey::CtrlD),
         "ctrl-z" => Ok(ControlKey::CtrlZ),
@@ -554,6 +558,10 @@ mod tests {
                     text: "i".to_owned()
                 },
             ]
+        );
+        assert_eq!(
+            parse_key_sequence("ctrl+a").expect("Ctrl+A chord should parse"),
+            vec![ControlKey::CtrlA]
         );
         assert_eq!(
             parse_key_sequence("ctrl+c").expect("control chord should parse"),

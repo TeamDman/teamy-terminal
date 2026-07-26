@@ -807,6 +807,7 @@ fn terminal_input_key(
         && let Key::Character(character) = key
     {
         match character.as_str().to_ascii_lowercase().as_str() {
+            "a" => return Ok(Some(vec![0x01])),
             "c" => return Ok(Some(vec![0x03])),
             "d" => return Ok(Some(vec![0x04])),
             "z" => return Ok(Some(vec![0x1a])),
@@ -862,6 +863,7 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
         ControlKey::Delete => b"\x1b[3~".to_vec(),
         ControlKey::PageUp => b"\x1b[5~".to_vec(),
         ControlKey::PageDown => b"\x1b[6~".to_vec(),
+        ControlKey::CtrlA => vec![0x01],
         ControlKey::CtrlC => vec![0x03],
         ControlKey::CtrlD => vec![0x04],
         ControlKey::CtrlZ => vec![0x1a],
@@ -883,6 +885,11 @@ mod tests {
 
     #[test]
     fn control_keys_use_terminal_control_bytes() {
+        assert_eq!(
+            terminal_input_key(&character("a"), None, ModifiersState::CONTROL)
+                .expect("Ctrl+A mapping should not fail"),
+            Some(vec![0x01])
+        );
         assert_eq!(
             terminal_input_key(&character("c"), None, ModifiersState::CONTROL)
                 .expect("Ctrl+C mapping should not fail"),
