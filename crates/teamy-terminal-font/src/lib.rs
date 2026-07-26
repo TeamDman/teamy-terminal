@@ -305,6 +305,7 @@ impl TerminalFont {
                         u32::from(column),
                         u32::from(row),
                         cell,
+                        snapshot.is_selected(column, row),
                     );
                 }
             }
@@ -340,6 +341,7 @@ impl TerminalFont {
         column: u32,
         row: u32,
         cell: Cell,
+        selected: bool,
     ) {
         let mut foreground = color(cell.foreground, false);
         let mut background = color(cell.background, true);
@@ -348,6 +350,10 @@ impl TerminalFont {
         }
         if cell.inverse {
             std::mem::swap(&mut foreground, &mut background);
+        }
+        if selected {
+            background = [70, 100, 170, 255];
+            foreground = [255, 255, 255, 255];
         }
         let x = column * self.cell_width;
         let y = row * self.cell_height;
@@ -723,6 +729,23 @@ mod tests {
         font.render_cells(&second, &mut cached, &[CellRect::new(0, 0, 2, 1)]);
 
         assert_eq!(cached, expected);
+    }
+
+    #[test]
+    fn selected_cells_receive_a_visible_highlight() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 2, 1);
+        terminal.process_bytes(b"A");
+        let unselected = font.render(&terminal.snapshot(), 64, 32);
+
+        terminal.begin_selection(teamy_terminal_core::CursorPosition::default());
+        let selected = font.render(&terminal.snapshot(), 64, 32);
+
+        assert_ne!(selected, unselected);
+        assert!(selected
+            .pixels
+            .chunks_exact(4)
+            .any(|pixel| pixel == [70, 100, 170, 255]));
     }
 
     #[test]

@@ -40,6 +40,40 @@ pub struct CursorPosition {
     pub row: u16,
 }
 
+/// A visible-grid text selection owned by the terminal session.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct SelectionRange {
+    /// The cell where the selection started.
+    pub anchor: CursorPosition,
+    /// The cell currently extended by the selection.
+    pub focus: CursorPosition,
+}
+
+impl SelectionRange {
+    /// Return the ordered inclusive endpoints of this selection.
+    #[must_use]
+    pub const fn ordered(self) -> (CursorPosition, CursorPosition) {
+        if self.anchor.row < self.focus.row
+            || (self.anchor.row == self.focus.row
+                && self.anchor.column <= self.focus.column)
+        {
+            (self.anchor, self.focus)
+        } else {
+            (self.focus, self.anchor)
+        }
+    }
+
+    /// Return whether a visible cell is included in this linear selection.
+    #[must_use]
+    pub const fn contains(self, position: CursorPosition) -> bool {
+        let (start, end) = self.ordered();
+        (position.row > start.row
+            || (position.row == start.row && position.column >= start.column))
+            && (position.row < end.row
+                || (position.row == end.row && position.column <= end.column))
+    }
+}
+
 /// The colour carried by a terminal cell.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub enum Color {
@@ -97,6 +131,8 @@ pub struct TerminalSnapshot {
     pub cells: Vec<Cell>,
     /// Number of retained scrollback rows.
     pub scrollback_rows: usize,
+    /// The active visible-grid selection, if any.
+    pub selection: Option<SelectionRange>,
 }
 
 impl TerminalSnapshot {
@@ -108,6 +144,14 @@ impl TerminalSnapshot {
         }
         let index = usize::from(row) * usize::from(self.columns) + usize::from(column);
         self.cells.get(index).copied()
+    }
+
+    /// Return whether a visible cell is selected.
+    #[must_use]
+    pub fn is_selected(&self, column: u16, row: u16) -> bool {
+        self.selection.is_some_and(|selection| {
+            selection.contains(CursorPosition { column, row })
+        })
     }
 }
 
@@ -185,6 +229,7 @@ struct TerminalState {
     cells: Vec<Cell>,
     row_wrapped: Vec<bool>,
     scrollback: VecDeque<TerminalRow>,
+    selection: Option<SelectionRange>,
     responses: VecDeque<Vec<u8>>,
     alternate_screen: Option<SavedScreen>,
     saved_private_cursor: Option<SavedCursor>,
@@ -206,6 +251,7 @@ impl TerminalState {
             cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
             row_wrapped: vec![false; usize::from(rows)],
             scrollback: VecDeque::new(),
+            selection: None,
             responses: VecDeque::new(),
             alternate_screen: None,
             saved_private_cursor: None,
@@ -218,6 +264,7 @@ impl TerminalState {
         if columns == self.columns && rows == self.rows {
             return;
         }
+        self.selection = None;
 
         let old_columns = self.columns;
         let old_rows = self.rows;
@@ -301,6 +348,7 @@ impl TerminalState {
         self.wrap_pending = false;
         self.row_wrapped.fill(false);
         self.scrollback.clear();
+        self.selection = None;
         self.saved_private_cursor = None;
     }
 
@@ -342,6 +390,7 @@ impl TerminalState {
             row_wrapped: self.row_wrapped.clone(),
             scrollback: self.scrollback.clone(),
         });
+        self.selection = None;
         self.cells = vec![Cell::default(); usize::from(self.columns) * usize::from(self.rows)];
         self.row_wrapped.fill(false);
         self.scrollback.clear();
@@ -357,6 +406,7 @@ impl TerminalState {
         };
         let columns = self.columns;
         let rows = self.rows;
+        self.selection = None;
 
         self.columns = saved_screen.columns;
         self.rows = saved_screen.rows;
@@ -372,6 +422,42 @@ impl TerminalState {
         if self.columns != columns || self.rows != rows {
             self.resize(columns, rows);
         }
+    }
+
+    fn clamp_position(&self, position: CursorPosition) -> CursorPosition {
+        CursorPosition {
+            column: position.column.min(self.columns.saturating_sub(1)),
+            row: position.row.min(self.rows.saturating_sub(1)),
+        }
+    }
+
+    fn selected_text(&self) -> Option<String> {
+        let selection = self.selection?;
+        let (start, end) = selection.ordered();
+        let mut text = String::new();
+        for row in start.row..=end.row {
+            let first_column = if row == start.row { start.column } else { 0 };
+            let last_column = if row == end.row {
+                end.column
+            } else {
+                self.columns.saturating_sub(1)
+            };
+            let row_start = usize::from(row) * usize::from(self.columns);
+            let row_end = row_start + usize::from(self.columns);
+            let cells = &self.cells[row_start..row_end];
+            let mut line = cells[usize::from(first_column)..=usize::from(last_column)]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            while line.ends_with(' ') {
+                let _ = line.pop();
+            }
+            text.push_str(&line);
+            if row != end.row {
+                text.push('\n');
+            }
+        }
+        Some(text)
     }
 
     fn cell_index(&self, column: u16, row: u16) -> usize {
@@ -911,6 +997,41 @@ impl TerminalSession {
         self.state.resize(columns, rows);
     }
 
+    /// Begin a visible-grid selection at a bounded cell position.
+    pub fn begin_selection(&mut self, anchor: CursorPosition) {
+        let anchor = self.state.clamp_position(anchor);
+        self.state.selection = Some(SelectionRange {
+            anchor,
+            focus: anchor,
+        });
+    }
+
+    /// Extend the active selection to a bounded cell position.
+    pub fn update_selection(&mut self, focus: CursorPosition) {
+        let focus = self.state.clamp_position(focus);
+        let Some(selection) = self.state.selection.as_mut() else {
+            return;
+        };
+        selection.focus = focus;
+    }
+
+    /// Clear any active selection.
+    pub fn clear_selection(&mut self) {
+        self.state.selection = None;
+    }
+
+    /// Return the current visible-grid selection.
+    #[must_use]
+    pub const fn selection(&self) -> Option<SelectionRange> {
+        self.state.selection
+    }
+
+    /// Return selected visible text with trailing row padding removed.
+    #[must_use]
+    pub fn selected_text(&self) -> Option<String> {
+        self.state.selected_text()
+    }
+
     /// Return a deterministic copy of the current visible state.
     #[must_use]
     pub fn snapshot(&self) -> TerminalSnapshot {
@@ -921,6 +1042,7 @@ impl TerminalSession {
             cursor_visible: self.state.cursor_visible,
             cells: self.state.cells.clone(),
             scrollback_rows: self.state.scrollback.len(),
+            selection: self.state.selection,
         }
     }
 
@@ -1044,6 +1166,51 @@ mod tests {
             .filter_map(|column| wide.cell(column, 0).map(|cell| cell.character))
             .collect();
         assert_eq!(text, "abcdefghij");
+    }
+
+    #[test]
+    fn visible_selection_clamps_and_extracts_text_without_padding() {
+        let mut terminal = TerminalSession::new(
+            TerminalLimits {
+                max_columns: 20,
+                max_rows: 4,
+                max_scrollback_rows: 8,
+            },
+            8,
+            2,
+        );
+        terminal.process_bytes(b"alpha\r\nbeta");
+        terminal.begin_selection(CursorPosition { column: 1, row: 0 });
+        terminal.update_selection(CursorPosition {
+            column: 99,
+            row: 99,
+        });
+
+        let selection = terminal.selection().expect("selection should be active");
+        assert_eq!(selection.anchor, CursorPosition { column: 1, row: 0 });
+        assert_eq!(selection.focus, CursorPosition { column: 7, row: 1 });
+        assert!(selection.contains(CursorPosition { column: 2, row: 0 }));
+        assert!(selection.contains(CursorPosition { column: 7, row: 1 }));
+        assert!(!selection.contains(CursorPosition { column: 0, row: 0 }));
+        assert_eq!(terminal.selected_text().as_deref(), Some("lpha\nbeta"));
+        assert_eq!(terminal.snapshot().selection, Some(selection));
+
+        terminal.clear_selection();
+        assert_eq!(terminal.selected_text(), None);
+        assert_eq!(terminal.snapshot().selection, None);
+    }
+
+    #[test]
+    fn resize_and_alternate_screen_clear_visible_selection() {
+        let mut terminal = session();
+        terminal.process_bytes(b"selection");
+        terminal.begin_selection(CursorPosition::default());
+        terminal.resize(40, 12);
+        assert_eq!(terminal.selection(), None);
+
+        terminal.begin_selection(CursorPosition::default());
+        terminal.process_bytes(b"\x1b[?1049halt\x1b[?1049l");
+        assert_eq!(terminal.selection(), None);
     }
 
     #[test]

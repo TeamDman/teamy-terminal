@@ -18,6 +18,7 @@ use teamy_terminal_control::ControlServer;
 use teamy_terminal_control::InstanceInfo;
 use teamy_terminal_core::TerminalLimits;
 use teamy_terminal_core::TerminalSession;
+use teamy_terminal_core::CursorPosition;
 #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
 use teamy_terminal_core::TerminalSnapshot;
 #[cfg(feature = "dirty_rendering")]
@@ -36,6 +37,7 @@ use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::ElementState;
 use winit::event::KeyEvent;
+use winit::event::MouseButton;
 use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
@@ -110,6 +112,8 @@ struct InteractiveApplication {
     window: Option<Window>,
     renderer: Option<VulkanRenderer>,
     modifiers: ModifiersState,
+    selecting: bool,
+    last_cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     dirty: bool,
     resize_pending: bool,
     #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
@@ -135,6 +139,8 @@ impl InteractiveApplication {
             window: None,
             renderer: None,
             modifiers: ModifiersState::default(),
+            selecting: false,
+            last_cursor_position: None,
             dirty: true,
             resize_pending: false,
             #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
@@ -573,6 +579,24 @@ impl InteractiveApplication {
         if event.state != ElementState::Pressed {
             return;
         }
+        let is_c = match &event.logical_key {
+            Key::Character(character) => character.as_str().eq_ignore_ascii_case("c"),
+            _ => false,
+        };
+        if self.modifiers.control_key()
+            && is_c
+            && (self.modifiers.shift_key() || self.terminal.selection().is_some())
+        {
+            match self.copy_selection() {
+                Ok(true) => return,
+                Ok(false) if self.modifiers.shift_key() => return,
+                Ok(false) => {}
+                Err(error) => {
+                    self.fail(error, event_loop);
+                    return;
+                }
+            }
+        }
         let bytes = match terminal_input(event, self.modifiers) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return,
@@ -586,6 +610,53 @@ impl InteractiveApplication {
         {
             self.fail(error, event_loop);
         }
+    }
+
+    fn terminal_cell_at(
+        &self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) -> Option<CursorPosition> {
+        if !position.x.is_finite()
+            || !position.y.is_finite()
+            || position.x < 0.0
+            || position.y < 0.0
+        {
+            return None;
+        }
+        let cell_width = f64::from(self.font.cell_width());
+        let cell_height = f64::from(self.font.cell_height());
+        if cell_width <= 0.0 || cell_height <= 0.0 {
+            return None;
+        }
+        let column = (position.x / cell_width).floor() as u16;
+        let row = (position.y / cell_height).floor() as u16;
+        if column >= self.terminal.columns() || row >= self.terminal.rows() {
+            return None;
+        }
+        Some(CursorPosition { column, row })
+    }
+
+    fn update_selection_from_position(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<f64>,
+    ) {
+        if let Some(cell) = self.terminal_cell_at(position) {
+            self.terminal.update_selection(cell);
+            self.dirty = true;
+        }
+    }
+
+    fn copy_selection(&mut self) -> Result<bool> {
+        let Some(text) = self.terminal.selected_text() else {
+            return Ok(false);
+        };
+        let mut clipboard = Clipboard::new().wrap_err("failed to open the system clipboard")?;
+        clipboard
+            .set_text(text)
+            .wrap_err("failed to copy terminal selection to the system clipboard")?;
+        self.terminal.clear_selection();
+        self.dirty = true;
+        Ok(true)
     }
 }
 
@@ -614,6 +685,43 @@ impl ApplicationHandler for InteractiveApplication {
                 self.dirty = true;
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
+            WindowEvent::CursorMoved { position, .. } => {
+                self.last_cursor_position = Some(position);
+                if self.selecting {
+                    self.update_selection_from_position(position);
+                }
+            }
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } => match state {
+                ElementState::Pressed => {
+                    if let Some(position) = self.last_cursor_position
+                        && let Some(cell) = self.terminal_cell_at(position)
+                    {
+                        self.terminal.begin_selection(cell);
+                        self.selecting = true;
+                        self.dirty = true;
+                    }
+                }
+                ElementState::Released => {
+                    if self.selecting {
+                        if let Some(position) = self.last_cursor_position {
+                            self.update_selection_from_position(position);
+                        }
+                        self.selecting = false;
+                        if self
+                            .terminal
+                            .selection()
+                            .is_some_and(|selection| selection.anchor == selection.focus)
+                        {
+                            self.terminal.clear_selection();
+                        }
+                        self.dirty = true;
+                    }
+                }
+            },
             WindowEvent::MouseWheel { delta, .. } if self.modifiers.control_key() => {
                 if let Some(direction) = wheel_zoom_direction(&delta)
                     && let Err(error) = self.adjust_font_size(direction)
@@ -719,6 +827,9 @@ fn damage_regions(
         return (vec![CellRect::full(current.columns, current.rows)], true);
     };
     if previous.columns != current.columns || previous.rows != current.rows {
+        return (vec![CellRect::full(current.columns, current.rows)], true);
+    }
+    if previous.selection != current.selection {
         return (vec![CellRect::full(current.columns, current.rows)], true);
     }
 
@@ -1183,6 +1294,7 @@ mod tests {
             cursor_visible: false,
             cells: vec![teamy_terminal_core::Cell::default(); 2],
             scrollback_rows: 0,
+            selection: None,
         };
         let current = teamy_terminal_core::TerminalSnapshot {
             columns: 3,
@@ -1191,6 +1303,7 @@ mod tests {
             cursor_visible: false,
             cells: vec![teamy_terminal_core::Cell::default(); 3],
             scrollback_rows: 0,
+            selection: None,
         };
 
         let (regions, full_refresh) = damage_regions(Some(&previous), &current);
@@ -1210,6 +1323,7 @@ mod tests {
             cursor_visible: true,
             cells: cells.clone(),
             scrollback_rows: 0,
+            selection: None,
         };
         let current = teamy_terminal_core::TerminalSnapshot {
             columns: 8,
@@ -1218,6 +1332,7 @@ mod tests {
             cursor_visible: true,
             cells,
             scrollback_rows: 0,
+            selection: None,
         };
 
         let (regions, full_refresh) = damage_regions(Some(&previous), &current);
@@ -1258,6 +1373,7 @@ mod tests {
             cursor_visible: true,
             cells: vec![teamy_terminal_core::Cell::default(); 2],
             scrollback_rows: 0,
+            selection: None,
         };
 
         let (regions, full_refresh) = damage_regions(None, &current);
