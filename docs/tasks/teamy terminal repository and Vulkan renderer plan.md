@@ -31,7 +31,9 @@ Ctrl+C interruption/copy, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift
 navigation, Ctrl+wheel zoom, alternate-screen restoration, and clean shell
 exit. Prompt/command-range metadata is now covered by OSC 133 parsing and
 interactive PowerShell shell integration; it still needs bridge-consumer use
-in the later SFM slice.
+in the later SFM slice. The control plane now also exposes
+`invoke get-content`, a bounded visible-grid text probe that complements
+`invoke screenshot` for deterministic desktop checks.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -598,7 +600,12 @@ clipboard behavior; the bounded `-NoProfile` PTY smoke covers command input
 and successful exit. A desktop input probe was attempted with both `SendKeys`
 and native `SendInput`, but this session rejected synthetic keystrokes, so
 direct manual command/paste/resize/Ctrl+C/selection/exit evidence remains the
-only open MVP check.
+only open MVP check. The control-plane probe is now stronger: a rebuilt live
+window produced prompt/ANSI/resize screenshots and a successful
+`invoke get-content` response, but `Start-Sleep -Seconds 30` continued for its
+full duration after `invoke ... send-keys ctrl+c`. The Windows ConPTY interrupt
+path therefore remains an explicit open correctness issue; `get-content` does
+not substitute for fixing and manually verifying that behavior.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal
