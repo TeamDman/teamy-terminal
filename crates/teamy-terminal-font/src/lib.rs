@@ -8,7 +8,10 @@
 //! graphics API.
 
 use eyre::Result;
-use fontdb::{Database, Family, Query, Source as FontSource};
+use fontdb::Database;
+use fontdb::Family;
+use fontdb::Query;
+use fontdb::Source as FontSource;
 use fontdue::Font;
 use fontdue::FontSettings;
 use num_traits::ToPrimitive;
@@ -45,6 +48,45 @@ pub struct RasterizedFrame {
     pub height: u32,
     /// Premultiplied-independent RGBA8 pixels in row-major order.
     pub pixels: Vec<u8>,
+}
+
+/// A rectangular range of terminal cells to refresh in a cached frame.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CellRect {
+    /// Zero-based left column.
+    pub column: u16,
+    /// Zero-based top row.
+    pub row: u16,
+    /// Number of columns covered by the rectangle.
+    pub columns: u16,
+    /// Number of rows covered by the rectangle.
+    pub rows: u16,
+}
+
+impl CellRect {
+    /// Construct a cell rectangle.
+    #[must_use]
+    pub const fn new(column: u16, row: u16, columns: u16, rows: u16) -> Self {
+        Self {
+            column,
+            row,
+            columns,
+            rows,
+        }
+    }
+
+    /// Cover the complete visible terminal grid.
+    #[must_use]
+    pub const fn full(columns: u16, rows: u16) -> Self {
+        Self::new(0, 0, columns, rows)
+    }
+
+    fn contains(self, column: u16, row: u16) -> bool {
+        u32::from(column) >= u32::from(self.column)
+            && u32::from(row) >= u32::from(self.row)
+            && u32::from(column) < u32::from(self.column) + u32::from(self.columns)
+            && u32::from(row) < u32::from(self.row) + u32::from(self.rows)
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -187,47 +229,106 @@ impl TerminalFont {
         for pixel in pixels.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[30, 30, 30, 255]);
         }
-
-        let max_columns = (width / self.cell_width).min(u32::from(snapshot.columns));
-        let max_rows = (height / self.cell_height).min(u32::from(snapshot.rows));
-        for row in 0..max_rows {
-            for column in 0..max_columns {
-                let column = u16::try_from(column).expect("rendered column fits in u16");
-                let row = u16::try_from(row).expect("rendered row fits in u16");
-                let Some(cell) = snapshot.cell(column, row) else {
-                    continue;
-                };
-                if is_wide_character_continuation(snapshot, column, row, cell) {
-                    continue;
-                }
-                self.draw_cell(
-                    &mut pixels,
-                    width,
-                    height,
-                    u32::from(column),
-                    u32::from(row),
-                    cell,
-                );
-            }
-        }
-        if snapshot.cursor_visible
-            && u32::from(snapshot.cursor.column) < max_columns
-            && u32::from(snapshot.cursor.row) < max_rows
-        {
-            let x = u32::from(snapshot.cursor.column) * self.cell_width;
-            let y = u32::from(snapshot.cursor.row) * self.cell_height;
-            let cursor_color = [210, 210, 210, 190];
-            for cursor_y in y..(y + self.cell_height).min(height) {
-                for cursor_x in x..(x + 2).min(width) {
-                    put_pixel(&mut pixels, width, cursor_x, cursor_y, cursor_color);
-                }
-            }
-        }
-
-        RasterizedFrame {
+        let mut frame = RasterizedFrame {
             width,
             height,
             pixels,
+        };
+        self.render_cells(
+            snapshot,
+            &mut frame,
+            &[CellRect::full(snapshot.columns, snapshot.rows)],
+        );
+        frame
+    }
+
+    /// Refresh selected cell rectangles in an existing cached frame.
+    ///
+    /// The caller must expand damage around wide glyphs and cursor movement
+    /// when necessary. Pixels outside `regions` are preserved, which makes the
+    /// method suitable for a cached-frame dirty-rectangle prototype.
+    pub fn render_cells(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        frame: &mut RasterizedFrame,
+        regions: &[CellRect],
+    ) {
+        let max_columns = (frame.width / self.cell_width).min(u32::from(snapshot.columns));
+        let max_rows = (frame.height / self.cell_height).min(u32::from(snapshot.rows));
+        for region in regions.iter().copied() {
+            let first_column = u32::from(region.column).min(max_columns);
+            let first_row = u32::from(region.row).min(max_rows);
+            let last_column = first_column
+                .saturating_add(u32::from(region.columns))
+                .min(max_columns);
+            let last_row = first_row
+                .saturating_add(u32::from(region.rows))
+                .min(max_rows);
+            if first_column >= last_column || first_row >= last_row {
+                continue;
+            }
+
+            let pixel_left = first_column.saturating_mul(self.cell_width);
+            let pixel_top = first_row.saturating_mul(self.cell_height);
+            let pixel_right = last_column.saturating_mul(self.cell_width).min(frame.width);
+            let pixel_bottom = last_row.saturating_mul(self.cell_height).min(frame.height);
+            for y in pixel_top..pixel_bottom {
+                let row_start = (usize::try_from(y).unwrap_or(0)
+                    * usize::try_from(frame.width).unwrap_or(0)
+                    + usize::try_from(pixel_left).unwrap_or(0))
+                    * 4;
+                let row_end = (usize::try_from(y).unwrap_or(0)
+                    * usize::try_from(frame.width).unwrap_or(0)
+                    + usize::try_from(pixel_right).unwrap_or(0))
+                    * 4;
+                if let Some(row) = frame.pixels.get_mut(row_start..row_end) {
+                    for pixel in row.chunks_exact_mut(4) {
+                        pixel.copy_from_slice(&[30, 30, 30, 255]);
+                    }
+                }
+            }
+
+            for row in first_row..last_row {
+                for column in first_column..last_column {
+                    let column = u16::try_from(column).expect("rendered column fits in u16");
+                    let row = u16::try_from(row).expect("rendered row fits in u16");
+                    let Some(cell) = snapshot.cell(column, row) else {
+                        continue;
+                    };
+                    if is_wide_character_continuation(snapshot, column, row, cell) {
+                        continue;
+                    }
+                    self.draw_cell(
+                        &mut frame.pixels,
+                        frame.width,
+                        frame.height,
+                        u32::from(column),
+                        u32::from(row),
+                        cell,
+                    );
+                }
+            }
+
+            if snapshot.cursor_visible
+                && region.contains(snapshot.cursor.column, snapshot.cursor.row)
+                && u32::from(snapshot.cursor.column) < max_columns
+                && u32::from(snapshot.cursor.row) < max_rows
+            {
+                let x = u32::from(snapshot.cursor.column) * self.cell_width;
+                let y = u32::from(snapshot.cursor.row) * self.cell_height;
+                let cursor_color = [210, 210, 210, 190];
+                for cursor_y in y..(y + self.cell_height).min(frame.height) {
+                    for cursor_x in x..(x + 2).min(frame.width) {
+                        put_pixel(
+                            &mut frame.pixels,
+                            frame.width,
+                            cursor_x,
+                            cursor_y,
+                            cursor_color,
+                        );
+                    }
+                }
+            }
         }
     }
 
@@ -606,6 +707,22 @@ mod tests {
         assert_eq!(frame.pixels.len(), 64 * 32 * 4);
         assert_eq!(frame, repeat);
         assert!(frame.pixels.chunks_exact(4).any(|pixel| pixel[0] > 30));
+    }
+
+    #[test]
+    fn dirty_cell_render_matches_a_full_render() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 1);
+        terminal.process_bytes(b"\x1b[?25lABCD");
+        let first = terminal.snapshot();
+        let mut cached = font.render(&first, 64, 32);
+
+        terminal.process_bytes(b"\rZ");
+        let second = terminal.snapshot();
+        let expected = font.render(&second, 64, 32);
+        font.render_cells(&second, &mut cached, &[CellRect::new(0, 0, 2, 1)]);
+
+        assert_eq!(cached, expected);
     }
 
     #[test]

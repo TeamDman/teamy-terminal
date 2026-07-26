@@ -21,12 +21,24 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Complete the remaining interactive MVP acceptance checks for
-command input, paste, resize, Ctrl+C, and clean exit; fix any issues exposed by
-that runtime pass. The code-level input mapping and PTY/Vulkan startup proofs
-are complete; a desktop session that accepts synthetic input is still needed
-for the final end-to-end interaction evidence. Portable frame encoding and SFM
-integration remain deferred.
+**Next slice:** Execute Phase 3.5 as the active performance and Windows
+integration track: establish the profiling feature contract, add coarse
+instrumentation, and collect a reproducible baseline before changing the
+renderer. The code-level input mapping, PTY/Vulkan startup, resize/reflow, and
+large-output responsiveness proofs are complete. Direct desktop interaction
+evidence and process-free replay remain explicit acceptance gaps; they are not
+being marked complete while the profiling track proceeds. Portable frame
+encoding and SFM integration remain deferred.
+
+The first profiling evidence pass is now complete enough to make the renderer
+decision: retain the full-frame baseline, and validate the opt-in
+`dirty_rendering` prototype against it. The capture observed a low
+changed-cell ratio while the current path still rasterized and uploaded the
+whole frame; a naive changed-cell loop without cached frame storage and
+swapchain-safe partial upload is not an acceptable optimization. The candidate
+now has a successful 40-second GUI capture with generated output and explicit
+800x450/1600x900 resizes; the stale registry entry from an earlier instance
+remains visible but does not prevent new windows from launching.
 
 ## Purpose
 
@@ -191,6 +203,10 @@ Close each row in the completion notes of the work item that resolves it.
 | Reference | Location/command | Use |
 | --- | --- | --- |
 | CLI template | G:\Programming\Repos\teamy-rust-cli\Cargo.toml, src/lib.rs, check-all.ps1 | Baseline CLI, metadata, lint, logging, cancellation, and test conventions. |
+| Profiling harness | G:\Programming\Repos\teamy-profiler\README.md, src/cli/run/cargo/run_cargo_cli.rs | Golden teamy-profiler run cargo workflow: explicit Cargo features, Tracy Capture launch, target logs, capture artifacts, manifest, and top-span post-processing. |
+| Profiling template contract | G:\Programming\Repos\teamy-rust-cli\README.md, run-profiler.ps1, Cargo.toml, src/logging_init.rs | Source-of-truth project setup for the optional tracy feature, explicit tracing-subscriber/tracing-tracy feature selection, and the project wrapper used by active repositories. |
+| Active profiling reference | D:\Repos\Azure\Cloud-Terrastodon\README.md, run-profiler.ps1, crates/tracing, Cargo.toml | Existing consumer workflow and tracing-layer separation to reconcile with the template rather than copy blindly. |
+| Span-placement guidance | G:\Programming\Repos\skills\.github\skills\add-tracy-spans\SKILL.md | Coarse-versus-hot-span gating, bounded fields, stable names, frame markers, and capture-driven iteration. |
 | Microsoft Terminal PTY artifacts | G:\Programming\Repos\microsoft-terminal | Reference for the future prebuilt ConPTY/OpenConsole artifact set; the MVP uses unmodified portable-pty/system ConPTY and does not vendor or package these binaries. |
 | Vulkan API/examples | G:\Programming\Repos\ash (ash 0.38.0+1.4.352) | Verify raw loader, extension, pointer-chain, synchronization, and validation usage. |
 | Working Vulkan application | G:\Programming\Repos\cursor-latency at 6c07705 | Reuse the proven ash/ash-window/winit application seam. |
@@ -326,6 +342,18 @@ Every direct Facet/Figue dependency and the lockfile now resolves to
 The complete script passes, as do the explicit locked workspace checks.
 Build.rs, resources, structured logging, cancellation, and Windows handling are
 CLI-scoped.
+
+The teamy-profiler dry-run contract for the terminal was verified with:
+
+~~~powershell
+cargo run --locked -- run cargo --project G:\Programming\Repos\teamy-terminal --bin teamy-terminal --profile release --feature tracy --dry-run
+~~~
+
+It produced the expected release target, explicit tracy feature, and
+timestamped .tracy, .ansi.log, .logs.ndjson, .top-spans.csv, and
+.profile-run.json artifact paths. A live capture was then completed through
+the local `C:\Program Files\bin\tracy-capture.exe` installation; the
+resulting evidence is recorded under Phase 3.5.3.
 
 ### [x] 1.3 Establish renderer-free core and fixture layout
 
@@ -527,6 +555,408 @@ bounded `-NoProfile` PTY smoke covers command input and successful exit. A
 desktop input probe was attempted with both `SendKeys` and native
 `SendInput`, but this session rejected synthetic keystrokes, so direct manual
 command/paste/resize/Ctrl+C/exit evidence remains the only open MVP check.
+
+## Phase 3.5 — Profiling contract and Windows presentation polish [~]
+
+This phase is the performance and integration follow-up to the interactive
+MVP. teamy-profiler is the golden execution harness; teamy-rust-cli is the
+golden project template; active repositories such as teamy-terminal and Cloud
+Terrastodon must consume that contract rather than independently invent
+profiling conventions.
+
+### [ ] 3.5.1 Set the native window icon
+
+**Work:** Keep the existing Windows resource embedding for the executable,
+taskbar, and file identity, and additionally decode the existing
+crates/teamy-terminal-cli/resources/main.png into the RGBA data required by
+winit::window::Icon. Pass that icon through Window::default_attributes() so
+the actual Vulkan window receives the same icon as the taskbar/resource
+identity.
+
+**Validation:** Build the Windows binary, launch the Vulkan window, and verify
+the icon in the title bar, task switcher, taskbar, and executable properties.
+The resource icon and the winit window icon must be sourced from the same
+checked-in asset family.
+
+**Completion criteria:** The visible window icon is correct without changing
+the existing taskbar/resource behavior, and icon loading failure is an
+actionable startup error rather than a silent missing icon.
+
+### [~] 3.5.2 Make Tracy and tracing-subscriber feature selection explicit
+
+**Completion notes:** This is the current implementation focus. The existing
+CLI exposes only a `tracy` feature; the Cloud Terrastodon reference and the
+local `add-tracy-spans` guidance support adding a separate
+`extended_observability` feature, with `tracy` enabling both the detailed
+instrumentation and the Tracy transport. The current teamy-profiler dry-run
+and live-capture contract are recorded below.
+
+The first implementation slice now adds `extended_observability`, makes
+`tracy` imply it, disables direct `tracing-subscriber` defaults, filters
+`tracy.frame_mark` from human/JSON logs, and adds coarse spans for window
+creation, resize, PTY processing, frame rasterization, and upload/present.
+The capture path is live: `teamy-profiler` was fast-forwarded to `9e2379a`,
+`tracy-capture.exe` was discovered at `C:\Program Files\bin`, and a release
+capture completed with a machine-readable manifest and top-span CSV. Default
+and Tracy feature builds pass with isolated target directories. CLI library
+tests pass 3/3 and terminal-core tests pass 5/5. The full workspace test is not
+green because the existing randomized `cli_fuzzing` coverage test found zero
+samples for several command paths after 128,000 attempts; this is recorded as
+an existing test-harness issue, not a compile or instrumentation failure.
+
+The feature graph still shows `tracing-subscriber` default features arriving
+through pinned `teamy-cancellation` (`figue` enables its
+`tracing-subscriber` feature, whose dependency does not yet set
+`default-features = false`). This item remains in progress until that
+transitive feature leak is either fixed upstream or explicitly accepted as a
+documented exception.
+
+#### [~] 3.5.2.a Repair teamy-cancellation's tracing feature boundary
+
+**Work:** Update the local `G:\Programming\Repos\teamy-cancellation`
+checkout so its optional `tracing-subscriber` dependency uses
+`default-features = false` and an explicit `registry` capability, which is the
+only subscriber capability used by `StopAfterLayer`. Keep its Facet/Figue pin
+at the compatible `23ad4dcd0` revision. Add or retain a focused feature-graph
+check and run the crate's all-feature tests. After the repair is reviewed,
+propagate the resulting teamy-cancellation revision (or a release containing
+it) to teamy-rust-cli, teamy-terminal, and Cloud Terrastodon; do not leave
+consumers on mixed Facet or tracing-subscriber contracts.
+
+**Validation:** From teamy-cancellation, run `cargo tree -e features -i
+tracing-subscriber`, `cargo test --all-features --locked`, and the repository
+quality gate. Then rerun the same feature-graph audit and locked focused
+checks in each consumer, including the template's Facet-bound compile and
+the teamy-profiler dry-runs.
+
+**Completion criteria:** No consumer's resolved dependency graph reaches
+`tracing-subscriber feature "default"` through teamy-cancellation; the
+template compiles without duplicate incompatible Facet traits; all updated
+pins are recorded in lockfiles; and the existing profiling manifests remain
+unchanged apart from their source revision metadata.
+
+**Completion notes:** The local repair is implemented and committed in
+`G:\Programming\Repos\teamy-cancellation` as `7c77848`
+(`fix: keep tracing-subscriber defaults opt-in`). Its feature graph now shows
+only `tracing-subscriber`'s `registry` capability. All-feature tests pass
+(9 unit tests and 3 integration tests), as do clippy, the all-feature build,
+examples, and subscriber-only tests. The repository ignores its Cargo.lock,
+so consumer lockfiles capture the published revision. `7c77848` is now
+published; teamy-rust-cli and teamy-terminal resolve it and their local
+feature graphs no longer include `tracing-subscriber default`. Cloud
+Terrastodon still receives an older registry `teamy-cancellation` through its
+remote `teamy-mft@42e6e21` dependency, which is tracked by the follow-up item
+below. Its earlier profiling-contract edits remain preserved; updating its
+dependency pins is explicitly deferred from this slice.
+
+#### [x] 3.5.2.b Repair teamy-mft's transitive profiling pins
+
+**Work:** Update `G:\Programming\Repos\teamy-mft` so its direct
+`tracing-subscriber` dependency uses `default-features = false` with the
+explicit `ansi`, `env-filter`, `fmt`, `json`, and `registry` capabilities, and
+so it consumes the published `teamy-cancellation@7c77848` revision rather than
+registry `0.2.0`. Preserve its existing Facet `5fd9cfaa` integration and the
+three unpublished commits already present on its local `main` branch.
+
+**Validation:** Run teamy-mft's all-feature check and
+`cargo tree -e features -i tracing-subscriber --all-features`. Publish only a
+dedicated repair branch that excludes unrelated unpublished `main` commits.
+Cloud Terrastodon propagation is explicitly deferred from this slice.
+
+**Completion criteria:** A fresh checkout of the dedicated teamy-mft repair
+branch resolves the published teamy-cancellation revision, no dependency path
+in teamy-mft reaches `tracing-subscriber feature "default"`, and the branch
+contains no unrelated unpublished `main` commits. Cloud propagation remains a
+separate future task.
+
+**Completion notes:** The dedicated repair branch is published as
+`teamy-mft/profiling-dependency-repair` at `a74639b`
+(`fix: align profiling dependencies`), based directly on remote `main` and
+excluding the four commits on the local `main`. Its all-feature check passes
+and its feature graph contains only the explicit subscriber capabilities. The
+full library/integration test suite still encounters the existing Figue/Vox
+API failures, which are unrelated to this dependency repair. Cloud remains on
+its prior `teamy-mft@42e6e21` pin by deliberate scope.
+The teamy-mft all-feature integration test still fails in the existing
+`vox_daemon_log_channel` test because the pinned Vox API no longer provides
+`TransportMode`, `NoopClient`, and the older builder signatures; the library
+and dependency-boundary compile succeeds, so that failure is not attributed to
+this repair.
+
+**Work:** Audit the full dependency graph, including teamy-cancellation, so
+the application does not accidentally re-enable tracing-subscriber default
+features through a transitive dependency. Use default-features = false and an
+explicit feature list for tracing-subscriber and tracing-tracy; retain only
+the formatter, registry, environment-filter, JSON, and Tracy capabilities
+actually used by the project. Keep the application tracy feature opt-in and
+ensure normal builds do not link the Tracy layer.
+
+Adopt the Cloud Terrastodon layering pattern rather than making `tracy` carry
+every observability decision: add an `extended_observability` feature for
+high-frequency diagnostic spans and frame markers, and define `tracy` as the
+transport layer that enables `extended_observability` plus
+`tracing-tracy`. Keep allocation profiling, if ever needed, as a separate
+explicit feature. This lets ordinary builds retain useful coarse spans while
+avoiding the creation cost of detailed render/terminal spans.
+
+Keep human stderr/NDJSON filters independent from the Tracy filter. Tracy must
+receive the intended trace-level spans, while ordinary output excludes
+profiling-only markers such as tracy.frame_mark where appropriate. Add tests
+for the fixed Tracy filter and a feature-graph check that makes accidental
+default-feature reintroduction visible.
+
+**Validation:**
+
+~~~powershell
+cargo tree -e features -i tracing-subscriber
+cargo tree -e features -i tracing-tracy
+cargo test --workspace --all-features --locked
+cargo build --workspace --no-default-features --locked
+cargo build -p teamy-terminal-cli --features tracy --locked
+~~~
+
+**Completion criteria:** The default build has no Tracy layer; the profiling
+build has the explicitly selected Tracy capabilities; and the dependency graph
+does not silently acquire the default tracing-subscriber/tracing-tracy feature
+sets through teamy-cancellation or another shared crate.
+
+### [~] 3.5.3 Instrument the performance-critical terminal path
+
+**Completion notes:** Coarse Tracy spans and the frame marker are present, and
+the extended-observability path now emits bounded frame statistics for visible
+cells, changed cells, cursor changes, rasterized pixels, and actual uploaded
+bytes. A reproducible
+large-output/resize capture completed at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_21-28-47.profile-run.json`
+with the corresponding `.tracy`, `.logs.ndjson`, and `.top-spans.csv` artifacts.
+The 25-second release run used `extended_observability,tracy`, `--log-filter
+debug`, 500 generated PowerShell lines, and 800x450/1600x900 control resizes.
+It recorded 53 rendered frames over 4,736 visible cells at 1280x720, 1,840 at
+800x450, and 7,520 at 1600x900. Across all frames, 21,365 cells changed
+(403/frame, 8.56% of visible cells on average); 10 frames had zero changed
+cells. The current implementation nevertheless rasterized 48,801,600 pixels
+and uploaded/presented every rendered frame. Tracy top spans reported 80.1 ms
+in rasterization, 34.9 ms in upload/present, and 2.1 ms in PTY processing.
+This is diagnostic evidence, so the extended snapshot comparison is not yet a
+production performance claim.
+
+The opt-in prototype now adds `dirty_rendering`, cached-frame cell redraw with
+wide-glyph/cursor expansion, packed pixel rectangles, per-image frame
+revisions, image-indexed present semaphores, deferred fence reset, and full
+refresh fallbacks for stale swapchain images, resize, and cache loss. The
+swapchain recreation path passes the old swapchain handle to Vulkan before
+retiring it, preventing `ERROR_NATIVE_WINDOW_IN_USE_KHR` during replacement.
+Font, damage-region, pixel-equivalence, renderer-packing, CLI, and core tests
+pass. The controlled candidate capture at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_22-07-06.profile-run.json`
+completed with 136 frames, 24,947 changed cells (3.89% average), 6,780,670
+rasterized pixels, and 501,177,600 uploaded bytes. It exercised generated
+PowerShell output plus 800x450 and 1600x900 resizes; its top spans measured
+22.6 ms in rasterization, 69.6 ms in upload/present, and 2.0 ms in PTY
+processing. The per-image revision fallback required full uploads for 135 of
+136 frames (the resize frames were 1,440,000 and 5,760,000 bytes), so the
+capture validates the CPU dirty redraw and correctness-first swapchain policy
+but does not claim a partial-upload win under the rotating MAILBOX swapchain.
+The 25-second candidate capture at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_22-11-09.profile-run.json`
+also completed normally, but the second resize arrived after its cancellation
+window and is not used as the resize proof.
+
+An apples-to-apples 25-second comparison then ran the same bounded workload
+without resize or generated-output variability. The full-frame run at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_23-02-30.profile-run.json`
+and the dirty-rendering run at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_23-09-42.profile-run.json`
+both completed 13 frames with 61,568 visible-cell observations, 5,767 changed
+cells, 6 zero-change frames, and 6 cursor-change frames. Dirty rendering
+reduced rasterized pixels from 11,980,800 to 1,132,500 (90.55%), while
+uploaded bytes remained 47,923,200 in both runs. The top-span totals were
+24.3 ms versus 9.1 ms for rasterization, 6.6 ms versus 5.4 ms for frame
+construction, and 8.7 ms versus 10.2 ms for upload/present. The last timing is
+one capture and is not a performance claim, but the byte count is conclusive:
+the current revision-safe policy avoids unchanged glyph rasterization while
+still performing full-frame uploads on the rotating MAILBOX images. Both
+captures also contained zero `tracy.frame_mark` records in ANSI or NDJSON
+logs.
+
+The renderer then gained bounded `uploaded_full_refresh` and
+`uploaded_region_count` fields so the fallback reason is directly observable.
+A second matched pair at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_23-18-49.profile-run.json`
+and
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_23-20-31.profile-run.json`
+reproduced the same 13 frames, 5,767 changed cells, 11,980,800 versus
+1,132,500 rasterized pixels, and 47,923,200 uploaded bytes. The dirty capture
+requested 48 regions in total, but all 13 acquired images required a full
+refresh and submitted one full-frame upload region. This confirms that the
+current MAILBOX image rotation, not the cell-diff calculation, is preventing
+partial uploads in this workload.
+
+Decision: the apples-to-apples comparison confirms that the dirty-rectangle
+prototype is correctness-safe for the measured path and materially reduces
+host rasterization, but it remains opt-in because rotating swapchain images
+force conservative full uploads. It must continue to cache the previous frame
+and update/upload only affected rectangles when the acquired swapchain image
+has the current frame revision. Stale images must receive a full refresh; this
+preserves correctness even when it limits the upload benefit. Cursor, scroll,
+wide-glyph, style, resize, occlusion, and full-refresh invalidation remain
+acceptance requirements. The explicit fallback evidence and repeated matched
+captures are now complete. The next implementation slice should determine
+whether the swapchain/presentation strategy can safely reuse a current-revision
+image, or whether partial-upload optimization requires a different persistent
+render target; do not weaken the stale-image full-refresh rule. Do not accept
+a cell-diff-only change that still clears/rasterizes/uploads the full frame.
+
+**Work:** Add low-overhead, Tracy-visible spans around PTY draining and output
+batching, VT parsing/core reflow, font fallback/rasterization, host frame
+construction, Vulkan staging upload/present, swapchain recreation, and resize
+processing. Add a stable frame marker suitable for Tracy timelines without
+turning every cell or glyph into an unbounded span. Preserve useful target
+metadata in span names and fields so teamy-profiler tracy csv export can
+identify the expensive stage from a capture.
+
+The first explicit performance hypothesis is terminal damage handling: the
+current interactive path has one `dirty` gate, but a dirty frame snapshots the
+whole cell grid, rasterizes a whole RGBA frame, and uploads the whole staging
+buffer. Measure this before changing it; do not assume unchanged glyph repaint
+is the dominant cost. The `dirty_rendering` prototype is opt-in until the
+comparable GUI capture and correctness proof pass. Add bounded counters/fields
+for total cells, changed
+cells, dirty-rectangle count and area, rasterized pixels, glyph-cache hits and
+misses, uploaded bytes, frame presents, idle redraws, and resize/reflow time.
+Then compare a full-frame baseline with a correctness-preserving changed-cell
+or dirty-rectangle path. Cursor changes, style/background changes, scrolling,
+wide glyphs, resize, and forced full refresh must invalidate all affected cells.
+
+Follow `add-tracy-spans` when adding the instrumentation: use stable coarse
+phase spans for the user-visible pipeline, gate high-frequency render/cell/
+glyph detail behind `extended_observability`, avoid per-cell spans and dynamic
+fields that fragment Tracy statistics, and emit `tracy.frame_mark` only for
+the profiling/frame-marker path.
+
+**Validation:** Capture bounded startup, idle, steady-state output, large-output,
+cursor/input, and resize workloads through run-profiler.ps1. Inspect both Tracy
+and the generated top-span CSV, and retain a machine-readable manifest of the
+workload, window size, feature set, Tracy version, and source revision.
+Confirm that the capture contains the terminal process, target logs are
+retained, profiling markers do not pollute normal stderr/NDJSON output, and the
+damage counters distinguish unchanged-cell frames from genuinely changed
+frames. For any optimization, compare before/after captures using the same
+workload and report CPU time, rasterized pixels, upload bytes, presents, and
+frame latency rather than accepting a visual impression.
+
+**Completion criteria:** A repeatable capture identifies the dominant CPU and
+resize costs, establishes whether unchanged glyphs are being repainted, and
+supports a before/after decision for damage tracking. The instrumented path
+remains usable without Tracy, profiling overhead is not hidden by accidental
+logging fan-out, and no optimization is accepted without a matching
+correctness proof and comparable capture.
+
+### [~] 3.5.4 Synchronize the template and profiler source of truth
+
+**Work:** Update teamy-rust-cli so its Cargo.toml, logging module,
+run-profiler.ps1, and README explicitly document the profiling contract:
+
+- The template is an opinionated starting point for Teamy Rust CLI projects.
+- tracy is opt-in and tracing-tracy uses default-features = false with an
+  explicit capability list.
+- tracing-subscriber uses default-features = false with an explicit list, and
+  transitive dependencies must not restore defaults.
+- Human logs, structured logs, and Tracy are independently filtered layers.
+- run-profiler.ps1 delegates to teamy-profiler run cargo rather than inventing
+  a second capture workflow.
+- tracy-capture.exe is an external prerequisite; captures and manifests are
+  written to the repository tracy directory.
+- Active repositories should periodically compare their profiling setup to
+  this template and the profiler rather than silently diverging.
+
+Update teamy-profiler README to document the corresponding harness contract,
+including feature forwarding, release/debug selection, target-argument
+forwarding, capture elevation, artifact naming, automatic log-file injection,
+and top-span post-processing. Reconcile Cloud Terrastodon's existing tracing
+crate and README with these rules while preserving its project-specific
+features.
+
+**Validation:** A current template checkout and teamy-terminal both pass a
+teamy-profiler run cargo dry-run; their manifests show the expected
+target/features/artifacts; and README examples are executable with only
+project-specific command names changed. Re-run the same dry-run against Cloud
+Terrastodon to preserve its project-specific allocation feature.
+
+**Completion criteria:** The template README is the readable policy, the
+profiler README is the readable harness specification, and active projects can
+be audited against both without relying on memory or scattered code searches.
+The harness must also have an explicit, bounded Tracy Capture shutdown path;
+the current implementation waits for normal capture exit, records the shutdown
+status in the manifest, and kills the capture after its bounded timeout.
+
+**Completion notes:** The synchronization slice updated `teamy-rust-cli` and
+`teamy-profiler` Cargo feature declarations, logging filters, wrapper scripts,
+and README policy; added the explicit `ansi` capability required by the
+`.pretty()` formatter; and reconciled Cloud Terrastodon's tracing README and
+workspace dependency declaration while preserving its `tracy-alloc` workflow.
+`teamy-profiler` was pulled first and was already current at `9e2379a`.
+
+The profiler tests pass (10 tests), the Cloud tracing tests pass (2 tests),
+the terminal CLI all-feature check passes, and the template logging module
+passes nightly rustfmt. Dry-runs pass for the template, teamy-terminal, and
+Cloud Terrastodon. The first two manifests forward
+`extended_observability,tracy`; Cloud forwards `tracy,tracy-alloc`; all three
+produce the expected Tracy, ANSI, NDJSON, top-span CSV, and profile-run
+manifest paths. Existing captured runs also report normal Tracy Capture exit
+(`capture_shutdown_status: exited:exit code:0`); the old note claiming the
+capture remained alive is no longer current.
+
+The feature-graph audit is now clean for the template, teamy-terminal,
+teamy-profiler, and the dedicated teamy-mft repair branch: each resolves only
+the explicit subscriber capabilities. Cloud Terrastodon remains on its prior
+remote teamy-mft pin by deliberate scope, so its older transitive default is a
+deferred Cloud task rather than a reason to alter this slice. The template's
+Facet-bound library test and all-feature compile now pass after the pins were
+aligned; teamy-mft's unrelated existing Figue/Vox integration failures remain
+documented under Phase 3.5.2.
+
+### [x] 3.5.5 Establish and record a performance baseline
+
+**Work:** Use teamy-profiler and TracyCapture to capture bounded workloads for
+startup, steady-state output, large output, resize/reflow, and idle redraw.
+Store only reviewed manifests/top-span summaries in the repository; keep raw
+.tracy captures as local artifacts unless a capture is intentionally retained
+for regression analysis. Record the command, feature set, Tracy version,
+window dimensions, workload, and machine/runtime context.
+
+**Validation:** Each retained baseline can be opened in Tracy Profiler or
+summarized with teamy-profiler tracy csv export, and a later run can be
+compared without changing the capture command or feature policy.
+
+**Completion criteria:** We have a reproducible profiling command and a first
+baseline that tells us whether the next optimization should target PTY/core
+processing, font/frame construction, Vulkan upload/present, or resize/reflow.
+
+**Completion notes:** A fresh full-frame baseline completed at
+`G:\Programming\Repos\teamy-terminal\tracy\2026-07-25_23-02-30.profile-run.json`
+using release `extended_observability,tracy`,
+`--log-filter debug --stop-after-duration 25s`, and a 25.466-second target
+runtime. The manifest reports exit code 0, top-span post-processing `ok`, and
+`capture_shutdown_status: exited:exit code: 0`. Its 13 frame-stat records
+contained 6 zero-change frames, 5,767 changed cells, 11,980,800 rasterized
+pixels, and 47,923,200 uploaded bytes; the average changed-cell ratio was
+9.37%. The top-span CSV measured 208.1 ms in window creation, 24.3 ms in
+rasterization, 8.7 ms in upload/present, 6.6 ms in frame construction, and
+0.13 ms in PTY processing. Both ANSI and NDJSON logs contained zero
+`tracy.frame_mark` records.
+
+Together with the retained large-output/resize captures at
+`2026-07-25_21-28-47.profile-run.json` and the correctness-first dirty
+candidate at `2026-07-25_22-07-06.profile-run.json`, this establishes the
+next decision: unchanged frames are still repainting and uploading a full
+frame in the baseline, while the matched dirty capture reduces host
+rasterization by 90.55% but still uploads the full frame because the acquired
+MAILBOX images are stale. The bounded fallback counters and a fresh matched
+pair now prove that all 13 candidate frames took the full-refresh path. The
+next implementation slice should evaluate the swapchain/persistent-target
+design before attempting further partial-upload changes, while retaining the
+current CPU dirty-rendering result as the evidence-backed opt-in optimization.
 
 ## Phase 4 — Optional SFM integration [ ]
 

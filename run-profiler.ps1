@@ -16,6 +16,7 @@ if (-not $profiler) {
 	--project $PSScriptRoot `
 	--bin teamy-terminal `
 	--profile release `
+	--feature extended_observability `
 	--feature tracy `
 	-- @QueryArgs
 exit $LASTEXITCODE

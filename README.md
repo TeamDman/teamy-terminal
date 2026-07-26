@@ -28,6 +28,25 @@ The deterministic PTY smoke uses `pwsh.exe -NoProfile` and round-trips a
 bounded `1..1000` sequence. Portable frame encoding, off-screen readback, and
 SFM integration remain outside the standalone interactive MVP.
 
+## Profiling
+
+The `extended_observability` and `tracy` features are opt-in. The former owns
+bounded diagnostic spans and frame statistics; the latter enables it together
+with the explicitly configured Tracy transport. Human stderr, NDJSON, and
+Tracy use independent filters, and profiling-only frame markers are excluded
+from the human and structured logs.
+
+Run the shared release harness with:
+
+```powershell
+./run-profiler.ps1 --log-filter debug --stop-after-duration 25s
+```
+
+The wrapper delegates to `teamy-profiler run cargo` and retains the capture,
+logs, manifest, and top-span CSV under `tracy/`. `tracy-capture.exe` must be
+available on `PATH`; use the profiler's `--dry-run` option to inspect target
+features and artifact paths without launching a capture.
+
 ## Development
 
 Run the repository quality gate with:

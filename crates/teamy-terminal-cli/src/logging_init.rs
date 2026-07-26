@@ -5,12 +5,19 @@ use std::fs::File;
 use std::sync::Arc;
 use std::sync::Mutex;
 use teamy_cancellation::CancellationToken;
+use tracing::Metadata;
 use tracing::debug;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::Registry;
+use tracing_subscriber::filter::FilterExt;
+use tracing_subscriber::filter::filter_fn;
 use tracing_subscriber::fmt::writer::BoxMakeWriter;
 use tracing_subscriber::prelude::*;
 use tracing_subscriber::util::SubscriberInitExt;
+
+fn exclude_tracy_frame_mark(meta: &Metadata<'_>) -> bool {
+    meta.fields().field("tracy.frame_mark").is_none()
+}
 
 fn default_log_filter(global_args: &GlobalArgs) -> eyre::Result<EnvFilter> {
     if let Some(filter) = global_args.log_filter.as_ref() {
@@ -70,7 +77,7 @@ pub fn init_logging(
         .with_writer(std::io::stderr)
         .pretty()
         .without_time()
-        .with_filter(default_log_filter(global_args)?);
+        .with_filter(default_log_filter(global_args)?.and(filter_fn(exclude_tracy_frame_mark)));
     let subscriber = subscriber.with(stderr_layer);
     let subscriber = subscriber.with(
         global_args
@@ -106,7 +113,7 @@ pub fn init_logging(
             .with_target(false)
             .with_line_number(true)
             .with_writer(json_writer)
-            .with_filter(default_log_filter(global_args)?);
+            .with_filter(default_log_filter(global_args)?.and(filter_fn(exclude_tracy_frame_mark)));
         Some(json_layer)
     } else {
         None

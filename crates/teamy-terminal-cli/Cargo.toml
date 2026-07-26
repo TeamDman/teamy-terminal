@@ -50,7 +50,9 @@ windows = { version = "0.62.2", features = [
 
 [features]
 default = []
-tracy = ["dep:tracing-tracy"]
+extended_observability = []
+dirty_rendering = []
+tracy = ["extended_observability", "dep:tracing-tracy"]
 
 [build-dependencies]
 embed-resource.workspace = true

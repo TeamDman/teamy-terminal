@@ -21,7 +21,45 @@ struct SwapchainState {
     handle: vk::SwapchainKHR,
     extent: vk::Extent2D,
     images: Vec<vk::Image>,
+    image_revisions: Vec<Option<u64>>,
     swap_red_blue: bool,
+}
+
+/// A rectangular range of RGBA pixels to upload and present.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PixelRect {
+    /// Zero-based left coordinate.
+    pub x: u32,
+    /// Zero-based top coordinate.
+    pub y: u32,
+    /// Width in pixels.
+    pub width: u32,
+    /// Height in pixels.
+    pub height: u32,
+}
+
+impl PixelRect {
+    /// Construct a pixel rectangle.
+    #[must_use]
+    pub const fn new(x: u32, y: u32, width: u32, height: u32) -> Self {
+        Self {
+            x,
+            y,
+            width,
+            height,
+        }
+    }
+
+    /// Cover an entire frame.
+    #[must_use]
+    pub const fn full(width: u32, height: u32) -> Self {
+        Self::new(0, 0, width, height)
+    }
+}
+
+struct UploadRegion {
+    rect: PixelRect,
+    buffer_offset: vk::DeviceSize,
 }
 
 struct StagingBuffer {
@@ -43,11 +81,15 @@ pub struct VulkanRenderer {
     queue: vk::Queue,
     swapchain: SwapchainState,
     image_available: vk::Semaphore,
-    render_finished: vk::Semaphore,
+    render_finished: Vec<vk::Semaphore>,
     fence: vk::Fence,
     command_pool: vk::CommandPool,
     command_buffer: vk::CommandBuffer,
     staging: Option<StagingBuffer>,
+    current_frame_revision: u64,
+    last_upload_bytes: usize,
+    last_upload_full_refresh: bool,
+    last_upload_region_count: usize,
 }
 
 impl std::fmt::Debug for VulkanRenderer {
@@ -142,6 +184,7 @@ impl VulkanRenderer {
             surface,
             &swapchain_loader,
             queue_family_index,
+            vk::SwapchainKHR::null(),
         )?;
 
         let semaphore_info = vk::SemaphoreCreateInfo::default();
@@ -149,10 +192,7 @@ impl VulkanRenderer {
         // initialized.
         let image_available = unsafe { device.create_semaphore(&semaphore_info, None) }
             .wrap_err("failed to create Vulkan image-available semaphore")?;
-        // SAFETY: The device is valid and the semaphore create-info is fully
-        // initialized.
-        let render_finished = unsafe { device.create_semaphore(&semaphore_info, None) }
-            .wrap_err("failed to create Vulkan render-finished semaphore")?;
+        let render_finished = create_render_finished_semaphores(&device, swapchain.images.len())?;
         let fence_info = vk::FenceCreateInfo::default().flags(vk::FenceCreateFlags::SIGNALED);
         // SAFETY: The device is valid and the fence create-info is fully
         // initialized.
@@ -193,6 +233,10 @@ impl VulkanRenderer {
             command_pool,
             command_buffer,
             staging: None,
+            current_frame_revision: 0,
+            last_upload_bytes: 0,
+            last_upload_full_refresh: false,
+            last_upload_region_count: 0,
         })
     }
 
@@ -200,6 +244,25 @@ impl VulkanRenderer {
     #[must_use = "the extent is needed to size the next terminal frame"]
     pub const fn extent(&self) -> vk::Extent2D {
         self.swapchain.extent
+    }
+
+    /// Number of bytes uploaded by the most recent successful render call.
+    #[must_use]
+    pub const fn last_upload_bytes(&self) -> usize {
+        self.last_upload_bytes
+    }
+
+    /// Whether the most recent successful render copied a complete frame.
+    #[must_use]
+    pub const fn last_upload_was_full_refresh(&self) -> bool {
+        self.last_upload_full_refresh
+    }
+
+    /// Number of buffer-to-image regions submitted by the most recent
+    /// successful render.
+    #[must_use]
+    pub const fn last_upload_region_count(&self) -> usize {
+        self.last_upload_region_count
     }
 
     /// Upload and present one RGBA frame. Returns `true` when the swapchain
@@ -210,6 +273,35 @@ impl VulkanRenderer {
     /// Returns an error when the frame size, staging upload, command
     /// recording, queue submission, or presentation fails.
     pub fn render(&mut self, frame: &RasterizedFrame) -> Result<bool> {
+        let full = [PixelRect::full(frame.width, frame.height)];
+        self.render_regions(frame, &full, true)
+    }
+
+    /// Upload and present only the changed pixel rectangles in a cached frame.
+    ///
+    /// Each swapchain image is tracked independently. The first time an image
+    /// is acquired after creation or recreation, the complete frame is copied;
+    /// later acquisitions may copy only `regions` because the image already
+    /// contains the previous complete frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a region is invalid for the frame, staging upload,
+    /// command recording, queue submission, or presentation fails.
+    pub fn render_damage(
+        &mut self,
+        frame: &RasterizedFrame,
+        regions: &[PixelRect],
+    ) -> Result<bool> {
+        self.render_regions(frame, regions, false)
+    }
+
+    fn render_regions(
+        &mut self,
+        frame: &RasterizedFrame,
+        requested_regions: &[PixelRect],
+        force_full: bool,
+    ) -> Result<bool> {
         if frame.width != self.swapchain.extent.width
             || frame.height != self.swapchain.extent.height
         {
@@ -221,26 +313,92 @@ impl VulkanRenderer {
                 self.swapchain.extent.height
             ));
         }
-        let byte_count = vk::DeviceSize::try_from(frame.pixels.len())
-            .wrap_err("terminal frame is too large for a Vulkan staging buffer")?;
+        if frame.pixels.len()
+            != usize::try_from(frame.width)
+                .unwrap_or(0)
+                .saturating_mul(usize::try_from(frame.height).unwrap_or(0))
+                .saturating_mul(4)
+        {
+            return Err(eyre::eyre!(
+                "terminal frame pixel length does not match its extent"
+            ));
+        }
+        if !force_full && requested_regions.is_empty() {
+            return Ok(false);
+        }
         self.wait_for_frame()?;
+        let (image_index, suboptimal) = self.acquire_image()?;
+        if image_index == u32::MAX {
+            return Ok(true);
+        }
+        let image_index_usize = usize::try_from(image_index).expect("image index fits");
+        let current_revision = self.current_frame_revision;
+        let next_revision = current_revision.wrapping_add(1);
+        let full_refresh = force_full
+            || self
+                .swapchain
+                .image_revisions
+                .get(image_index_usize)
+                .copied()
+                .flatten()
+                != Some(current_revision);
+        let regions = if full_refresh {
+            vec![PixelRect::full(frame.width, frame.height)]
+        } else {
+            requested_regions.to_vec()
+        };
+        for region in &regions {
+            validate_pixel_rect(*region, frame.width, frame.height)?;
+        }
+
+        let mut transformed = None;
+        let mut packed = None;
+        let upload_regions = if full_refresh {
+            if self.swapchain.swap_red_blue {
+                let mut pixels = frame.pixels.clone();
+                for pixel in pixels.chunks_exact_mut(4) {
+                    pixel.swap(0, 2);
+                }
+                transformed = Some(pixels);
+            }
+            vec![UploadRegion {
+                rect: PixelRect::full(frame.width, frame.height),
+                buffer_offset: 0,
+            }]
+        } else {
+            let (pixels, upload_regions) =
+                pack_regions(frame, &regions, self.swapchain.swap_red_blue)?;
+            packed = Some(pixels);
+            upload_regions
+        };
+        let upload_bytes: &[u8] = if let Some(pixels) = transformed.as_deref() {
+            pixels
+        } else if let Some(pixels) = packed.as_deref() {
+            pixels
+        } else {
+            &frame.pixels
+        };
+        let byte_count = vk::DeviceSize::try_from(upload_bytes.len())
+            .wrap_err("terminal frame is too large for a Vulkan staging buffer")?;
         self.ensure_staging_buffer(byte_count)?;
         let staging = self
             .staging
             .as_ref()
             .ok_or_else(|| eyre::eyre!("Vulkan staging buffer was not created"))?;
-        if self.swapchain.swap_red_blue {
-            let mut pixels = frame.pixels.clone();
-            for pixel in pixels.chunks_exact_mut(4) {
-                pixel.swap(0, 2);
-            }
-            self.upload_frame(staging.memory, byte_count, &pixels)?;
-        } else {
-            self.upload_frame(staging.memory, byte_count, &frame.pixels)?;
+        self.upload_frame(staging.memory, byte_count, upload_bytes)?;
+        let upload_byte_count = upload_bytes.len();
+        self.record_copy_command(image_index, staging.buffer, &upload_regions, full_refresh)?;
+        let result = self.submit_and_present(image_index, suboptimal);
+        if result.is_ok()
+            && let Some(revision) = self.swapchain.image_revisions.get_mut(image_index_usize)
+        {
+            *revision = Some(next_revision);
+            self.current_frame_revision = next_revision;
+            self.last_upload_bytes = upload_byte_count;
+            self.last_upload_full_refresh = full_refresh;
+            self.last_upload_region_count = upload_regions.len();
         }
-        let (image_index, suboptimal) = self.acquire_image()?;
-        self.record_copy_command(image_index, staging.buffer)?;
-        self.submit_and_present(image_index, suboptimal)
+        result
     }
 
     /// Recreate the swapchain after a resize or an out-of-date presentation.
@@ -257,20 +415,41 @@ impl VulkanRenderer {
                 .device_wait_idle()
                 .wrap_err("failed waiting for Vulkan before swapchain recreation")?;
         };
-        // SAFETY: The device is idle and the old swapchain handle is owned by
-        // this renderer.
-        unsafe {
-            self.swapchain_loader
-                .destroy_swapchain(self.swapchain.handle, None);
-        };
-        self.swapchain = create_swapchain(
+        let new_swapchain = create_swapchain(
             window,
             self.physical_device,
             &self.surface_loader,
             self.surface,
             &self.swapchain_loader,
             self.queue_family_index,
+            self.swapchain.handle,
         )?;
+        let new_render_finished =
+            match create_render_finished_semaphores(&self.device, new_swapchain.images.len()) {
+                Ok(semaphores) => semaphores,
+                Err(error) => {
+                    // SAFETY: The new swapchain was created by this device and no
+                    // work has been submitted against it yet.
+                    unsafe {
+                        self.swapchain_loader
+                            .destroy_swapchain(new_swapchain.handle, None);
+                    };
+                    return Err(error);
+                }
+            };
+        let old_swapchain = self.swapchain.handle;
+        let old_render_finished = std::mem::replace(&mut self.render_finished, new_render_finished);
+        for semaphore in old_render_finished {
+            // SAFETY: The device is idle, so no present operation can still
+            // reference the old image-indexed semaphore.
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
+        // SAFETY: The device is idle and the old swapchain handle is owned by
+        // this renderer.
+        unsafe {
+            self.swapchain_loader.destroy_swapchain(old_swapchain, None);
+        };
+        self.swapchain = new_swapchain;
         Ok(())
     }
 
@@ -324,17 +503,16 @@ impl VulkanRenderer {
         }
     }
 
-    fn record_copy_command(&self, image_index: u32, staging_buffer: vk::Buffer) -> Result<()> {
+    fn record_copy_command(
+        &self,
+        image_index: u32,
+        staging_buffer: vk::Buffer,
+        regions: &[UploadRegion],
+        full_refresh: bool,
+    ) -> Result<()> {
         if image_index == u32::MAX {
             return Ok(());
         }
-        // SAFETY: The frame fence was waited and this command buffer belongs
-        // to the resettable command pool owned by the renderer.
-        unsafe {
-            self.device
-                .reset_fences(&[self.fence])
-                .wrap_err("failed to reset the Vulkan frame fence")?;
-        };
         // SAFETY: The command buffer is not pending after the frame fence was
         // waited and its pool was created with RESET_COMMAND_BUFFER.
         unsafe {
@@ -354,10 +532,26 @@ impl VulkanRenderer {
 
         let image = self.swapchain.images[usize::try_from(image_index).expect("image index fits")];
         let range = color_subresource_range();
+        let image_initialized = self.swapchain.image_revisions
+            [usize::try_from(image_index).expect("image index fits")]
+        .is_some();
+        let (old_layout, source_stage, source_access) = if image_initialized {
+            (
+                vk::ImageLayout::PRESENT_SRC_KHR,
+                vk::PipelineStageFlags::COLOR_ATTACHMENT_OUTPUT,
+                vk::AccessFlags::empty(),
+            )
+        } else {
+            (
+                vk::ImageLayout::UNDEFINED,
+                vk::PipelineStageFlags::TOP_OF_PIPE,
+                vk::AccessFlags::empty(),
+            )
+        };
         let to_transfer = vk::ImageMemoryBarrier::default()
-            .src_access_mask(vk::AccessFlags::empty())
+            .src_access_mask(source_access)
             .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE)
-            .old_layout(vk::ImageLayout::UNDEFINED)
+            .old_layout(old_layout)
             .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
             .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
             .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
@@ -368,7 +562,7 @@ impl VulkanRenderer {
         unsafe {
             self.device.cmd_pipeline_barrier(
                 self.command_buffer,
-                vk::PipelineStageFlags::TOP_OF_PIPE,
+                source_stage,
                 vk::PipelineStageFlags::TRANSFER,
                 vk::DependencyFlags::empty(),
                 &[],
@@ -376,19 +570,40 @@ impl VulkanRenderer {
                 std::slice::from_ref(&to_transfer),
             );
         };
-        let copy = vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .buffer_row_length(0)
-            .buffer_image_height(0)
-            .image_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .mip_level(0)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            )
-            .image_offset(vk::Offset3D { x: 0, y: 0, z: 0 })
-            .image_extent(self.swapchain.extent_to_3d());
+        let copies = regions
+            .iter()
+            .map(|region| {
+                let rect = region.rect;
+                let (buffer_row_length, buffer_image_height) = if full_refresh {
+                    (0, 0)
+                } else {
+                    (rect.width, rect.height)
+                };
+                Ok(vk::BufferImageCopy::default()
+                    .buffer_offset(region.buffer_offset)
+                    .buffer_row_length(buffer_row_length)
+                    .buffer_image_height(buffer_image_height)
+                    .image_subresource(
+                        vk::ImageSubresourceLayers::default()
+                            .aspect_mask(vk::ImageAspectFlags::COLOR)
+                            .mip_level(0)
+                            .base_array_layer(0)
+                            .layer_count(1),
+                    )
+                    .image_offset(vk::Offset3D {
+                        x: i32::try_from(rect.x)
+                            .wrap_err("dirty rectangle x exceeds Vulkan limits")?,
+                        y: i32::try_from(rect.y)
+                            .wrap_err("dirty rectangle y exceeds Vulkan limits")?,
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: rect.width,
+                        height: rect.height,
+                        depth: 1,
+                    }))
+            })
+            .collect::<Result<Vec<_>>>()?;
         // SAFETY: The staging buffer and image are valid transfer resources,
         // and the image is in TRANSFER_DST_OPTIMAL after the preceding barrier.
         unsafe {
@@ -397,7 +612,7 @@ impl VulkanRenderer {
                 staging_buffer,
                 image,
                 vk::ImageLayout::TRANSFER_DST_OPTIMAL,
-                std::slice::from_ref(&copy),
+                &copies,
             );
         };
         let to_present = vk::ImageMemoryBarrier::default()
@@ -437,13 +652,22 @@ impl VulkanRenderer {
         }
         let wait_semaphores = [self.image_available];
         let wait_stages = [vk::PipelineStageFlags::TRANSFER];
-        let signal_semaphores = [self.render_finished];
+        let signal_semaphores =
+            [self.render_finished[usize::try_from(image_index).expect("image index fits")]];
         let command_buffers = [self.command_buffer];
         let submit_info = [vk::SubmitInfo::default()
             .wait_semaphores(&wait_semaphores)
             .wait_dst_stage_mask(&wait_stages)
             .command_buffers(&command_buffers)
             .signal_semaphores(&signal_semaphores)];
+        // SAFETY: The frame fence was waited before recording this command
+        // buffer, and remains signaled until it is reset immediately before
+        // submission.
+        unsafe {
+            self.device
+                .reset_fences(&[self.fence])
+                .wrap_err("failed to reset the Vulkan frame fence")?;
+        };
         // SAFETY: The wait/signal semaphores, command buffer, queue, and fence
         // are all owned by this renderer and are in the states established by
         // the preceding acquire/record operations.
@@ -545,8 +769,10 @@ impl Drop for VulkanRenderer {
         unsafe { self.device.destroy_fence(self.fence, None) };
         // SAFETY: The device is idle and owns this semaphore.
         unsafe { self.device.destroy_semaphore(self.image_available, None) };
-        // SAFETY: The device is idle and owns this semaphore.
-        unsafe { self.device.destroy_semaphore(self.render_finished, None) };
+        for semaphore in self.render_finished.drain(..) {
+            // SAFETY: The device is idle and owns this semaphore.
+            unsafe { self.device.destroy_semaphore(semaphore, None) };
+        }
         // SAFETY: The device is idle and owns this swapchain.
         unsafe {
             self.swapchain_loader
@@ -559,6 +785,90 @@ impl Drop for VulkanRenderer {
         // SAFETY: The instance is the final Vulkan object being destroyed.
         unsafe { self.instance.destroy_instance(None) };
     }
+}
+
+fn validate_pixel_rect(rect: PixelRect, frame_width: u32, frame_height: u32) -> Result<()> {
+    let right = rect
+        .x
+        .checked_add(rect.width)
+        .ok_or_else(|| eyre::eyre!("dirty rectangle x extent overflows"))?;
+    let bottom = rect
+        .y
+        .checked_add(rect.height)
+        .ok_or_else(|| eyre::eyre!("dirty rectangle y extent overflows"))?;
+    if rect.width == 0 || rect.height == 0 || right > frame_width || bottom > frame_height {
+        return Err(eyre::eyre!(
+            "dirty rectangle {}x{}+{}+{} is outside frame {}x{}",
+            rect.width,
+            rect.height,
+            rect.x,
+            rect.y,
+            frame_width,
+            frame_height
+        ));
+    }
+    Ok(())
+}
+
+fn pack_regions(
+    frame: &RasterizedFrame,
+    regions: &[PixelRect],
+    swap_red_blue: bool,
+) -> Result<(Vec<u8>, Vec<UploadRegion>)> {
+    let mut pixels = Vec::new();
+    let mut upload_regions = Vec::with_capacity(regions.len());
+    for rect in regions.iter().copied() {
+        validate_pixel_rect(rect, frame.width, frame.height)?;
+        let buffer_offset = vk::DeviceSize::try_from(pixels.len())
+            .wrap_err("dirty rectangle staging offset exceeds Vulkan limits")?;
+        for row in rect.y..rect.y + rect.height {
+            let start = (usize::try_from(row).unwrap_or(0)
+                * usize::try_from(frame.width).unwrap_or(0)
+                + usize::try_from(rect.x).unwrap_or(0))
+                * 4;
+            let end = start + usize::try_from(rect.width).unwrap_or(0) * 4;
+            let source = frame
+                .pixels
+                .get(start..end)
+                .ok_or_else(|| eyre::eyre!("dirty rectangle row exceeds frame pixels"))?;
+            if swap_red_blue {
+                for pixel in source.chunks_exact(4) {
+                    pixels.extend_from_slice(&[pixel[2], pixel[1], pixel[0], pixel[3]]);
+                }
+            } else {
+                pixels.extend_from_slice(source);
+            }
+        }
+        upload_regions.push(UploadRegion {
+            rect,
+            buffer_offset,
+        });
+    }
+    Ok((pixels, upload_regions))
+}
+
+fn create_render_finished_semaphores(
+    device: &ash::Device,
+    image_count: usize,
+) -> Result<Vec<vk::Semaphore>> {
+    let info = vk::SemaphoreCreateInfo::default();
+    let mut semaphores = Vec::with_capacity(image_count);
+    for _ in 0..image_count {
+        // SAFETY: The device is live and the semaphore create-info is fully
+        // initialized.
+        match unsafe { device.create_semaphore(&info, None) } {
+            Ok(semaphore) => semaphores.push(semaphore),
+            Err(error) => {
+                for semaphore in semaphores {
+                    // SAFETY: The partially-created semaphore belongs to this
+                    // live device and has not been submitted.
+                    unsafe { device.destroy_semaphore(semaphore, None) };
+                }
+                return Err(error).wrap_err("failed to create Vulkan render-finished semaphore");
+            }
+        }
+    }
+    Ok(semaphores)
 }
 
 fn pick_physical_device(
@@ -629,6 +939,7 @@ fn create_swapchain(
     surface: vk::SurfaceKHR,
     swapchain_loader: &ash::khr::swapchain::Device,
     queue_family_index: u32,
+    old_swapchain: vk::SwapchainKHR,
 ) -> Result<SwapchainState> {
     // SAFETY: The physical device and surface are live handles from the same
     // Vulkan instance.
@@ -659,7 +970,15 @@ fn create_swapchain(
                     && format.color_space == vk::ColorSpaceKHR::SRGB_NONLINEAR
             })
         })
-        .unwrap_or(formats[0]);
+        .or_else(|| {
+            formats.iter().copied().find(|format| {
+                matches!(
+                    format.format,
+                    vk::Format::R8G8B8A8_UNORM | vk::Format::B8G8R8A8_UNORM
+                )
+            })
+        })
+        .ok_or_else(|| eyre::eyre!("the Vulkan surface has no supported RGBA8/BGRA8 format"))?;
     let swap_red_blue = matches!(
         format.format,
         vk::Format::B8G8R8A8_SRGB | vk::Format::B8G8R8A8_UNORM
@@ -680,6 +999,15 @@ fn create_swapchain(
     if capabilities.max_image_count != 0 {
         image_count = image_count.min(capabilities.max_image_count);
     }
+    let composite_alpha = [
+        vk::CompositeAlphaFlagsKHR::OPAQUE,
+        vk::CompositeAlphaFlagsKHR::PRE_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::POST_MULTIPLIED,
+        vk::CompositeAlphaFlagsKHR::INHERIT,
+    ]
+    .into_iter()
+    .find(|flag| capabilities.supported_composite_alpha.contains(*flag))
+    .ok_or_else(|| eyre::eyre!("the Vulkan surface has no supported composite-alpha mode"))?;
     let info = vk::SwapchainCreateInfoKHR::default()
         .surface(surface)
         .min_image_count(image_count)
@@ -691,20 +1019,35 @@ fn create_swapchain(
         .image_sharing_mode(vk::SharingMode::EXCLUSIVE)
         .queue_family_indices(std::slice::from_ref(&queue_family_index))
         .pre_transform(capabilities.current_transform)
-        .composite_alpha(vk::CompositeAlphaFlagsKHR::OPAQUE)
+        .composite_alpha(composite_alpha)
         .present_mode(present_mode)
-        .clipped(true);
+        .old_swapchain(old_swapchain)
+        .clipped(false);
     // SAFETY: The create-info references a live surface and supported device
     // capabilities.
-    let handle = unsafe { swapchain_loader.create_swapchain(&info, None) }
-        .wrap_err("failed to create the Vulkan swapchain")?;
+    let handle = match unsafe { swapchain_loader.create_swapchain(&info, None) } {
+        Ok(handle) => handle,
+        Err(error) => {
+            return Err(eyre::eyre!(
+                "failed to create the Vulkan swapchain: {error:?}; format={:?}, color_space={:?}, extent={}x{}, image_count={}, present_mode={:?}",
+                format.format,
+                format.color_space,
+                extent.width,
+                extent.height,
+                image_count,
+                present_mode
+            ));
+        }
+    };
     // SAFETY: The swapchain was successfully created by this loader.
     let images = unsafe { swapchain_loader.get_swapchain_images(handle) }
         .wrap_err("failed to get Vulkan swapchain images")?;
+    let image_revisions = vec![None; images.len()];
     Ok(SwapchainState {
         handle,
         extent,
         images,
+        image_revisions,
         swap_red_blue,
     })
 }
@@ -753,26 +1096,12 @@ fn find_memory_type(
     ))
 }
 
-trait SwapchainExtent3d {
-    fn extent_to_3d(&self) -> vk::Extent3D;
-}
-
-impl SwapchainExtent3d for SwapchainState {
-    fn extent_to_3d(&self) -> vk::Extent3D {
-        vk::Extent3D {
-            width: self.extent.width,
-            height: self.extent.height,
-            depth: 1,
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn extent_conversion_preserves_dimensions() {
+    fn swapchain_state_tracks_image_initialization() {
         let state = SwapchainState {
             handle: vk::SwapchainKHR::null(),
             extent: vk::Extent2D {
@@ -780,15 +1109,29 @@ mod tests {
                 height: 480,
             },
             images: Vec::new(),
+            image_revisions: Vec::new(),
             swap_red_blue: false,
         };
+        assert_eq!(state.extent.width, 640);
+        assert_eq!(state.extent.height, 480);
+        assert!(state.image_revisions.is_empty());
+    }
+
+    #[test]
+    fn packed_dirty_regions_use_tight_rows() {
+        let frame = RasterizedFrame {
+            width: 4,
+            height: 2,
+            pixels: (0_u8..32).collect(),
+        };
+        let (pixels, regions) = pack_regions(&frame, &[PixelRect::new(1, 0, 2, 2)], false)
+            .expect("the rectangle should fit the frame");
+
         assert_eq!(
-            state.extent_to_3d(),
-            vk::Extent3D {
-                width: 640,
-                height: 480,
-                depth: 1
-            }
+            pixels,
+            vec![4, 5, 6, 7, 8, 9, 10, 11, 20, 21, 22, 23, 24, 25, 26, 27]
         );
+        assert_eq!(regions[0].buffer_offset, 0);
+        assert!(validate_pixel_rect(PixelRect::new(3, 1, 2, 1), 4, 2).is_err());
     }
 }

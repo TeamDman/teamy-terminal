@@ -2955,7 +2955,7 @@ dependencies = [
 [[package]]
 name = "teamy-cancellation"
 version = "0.3.1"
-source = "git+https://github.com/TeamDman/teamy-cancellation.git?rev=2ba7fa5#2ba7fa5e9fc472238bc49e36723e0797c7344127"
+source = "git+https://github.com/TeamDman/teamy-cancellation.git?rev=7c77848#7c77848e759079e21f2039b25b147d780807725b"
 dependencies = [
  "arbitrary",
  "ctrlc",
