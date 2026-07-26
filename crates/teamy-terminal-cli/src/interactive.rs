@@ -797,6 +797,18 @@ fn terminal_input_key(
     text: Option<&str>,
     modifiers: ModifiersState,
 ) -> Result<Option<Vec<u8>>> {
+    if modifiers.control_key() {
+        let modified_arrow = match key {
+            Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[1;5A".to_vec()),
+            Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[1;5B".to_vec()),
+            Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[1;5C".to_vec()),
+            Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[1;5D".to_vec()),
+            _ => None,
+        };
+        if modified_arrow.is_some() {
+            return Ok(modified_arrow);
+        }
+    }
     if modifiers.control_key() && matches!(key, Key::Named(NamedKey::Backspace)) {
         // PowerShell/PSReadLine and common Unix line disciplines use Ctrl+W
         // (ETB) for backward-kill-word. Microsoft Terminal emits the same
@@ -864,6 +876,10 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
         ControlKey::PageUp => b"\x1b[5~".to_vec(),
         ControlKey::PageDown => b"\x1b[6~".to_vec(),
         ControlKey::CtrlA => vec![0x01],
+        ControlKey::CtrlArrowUp => b"\x1b[1;5A".to_vec(),
+        ControlKey::CtrlArrowDown => b"\x1b[1;5B".to_vec(),
+        ControlKey::CtrlArrowRight => b"\x1b[1;5C".to_vec(),
+        ControlKey::CtrlArrowLeft => b"\x1b[1;5D".to_vec(),
         ControlKey::CtrlC => vec![0x03],
         ControlKey::CtrlD => vec![0x04],
         ControlKey::CtrlZ => vec![0x1a],
@@ -955,6 +971,24 @@ mod tests {
 
     #[test]
     fn navigation_and_text_keys_use_pty_sequences() {
+        assert_eq!(
+            terminal_input_key(
+                &Key::Named(NamedKey::ArrowLeft),
+                None,
+                ModifiersState::CONTROL
+            )
+            .expect("Ctrl+Left mapping should not fail"),
+            Some(b"\x1b[1;5D".to_vec())
+        );
+        assert_eq!(
+            terminal_input_key(
+                &Key::Named(NamedKey::ArrowRight),
+                None,
+                ModifiersState::CONTROL
+            )
+            .expect("Ctrl+Right mapping should not fail"),
+            Some(b"\x1b[1;5C".to_vec())
+        );
         assert_eq!(
             terminal_input_key(
                 &Key::Named(NamedKey::ArrowLeft),
