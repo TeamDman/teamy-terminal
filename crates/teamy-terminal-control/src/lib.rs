@@ -111,6 +111,8 @@ pub enum ControlAction {
     Resize { width: u32, height: u32 },
     /// Encode the latest terminal frame as a PNG at the caller-resolved path.
     Screenshot { path: String },
+    /// Return the latest visible terminal grid as newline-separated text.
+    GetContent,
     /// Close the terminal window and its shell.
     Close,
 }
@@ -121,6 +123,8 @@ pub enum ControlAction {
 pub enum ControlResponse {
     /// The request completed successfully.
     Ok,
+    /// The latest visible terminal grid.
+    Content { text: String },
 }
 
 /// A request waiting to be applied by the owning winit application thread.
@@ -129,7 +133,7 @@ pub struct ControlCall {
     /// The decoded operation.
     pub operation: ControlAction,
     /// One-shot response channel back to the Vox service task.
-    pub responder: tokio::sync::oneshot::Sender<Result<(), String>>,
+    pub responder: tokio::sync::oneshot::Sender<Result<ControlResponse, String>>,
 }
 
 /// Parse the compact key syntax used by `teamy-terminal invoke ... send-keys`.
@@ -282,20 +286,29 @@ pub fn invoke(instance: &InstanceInfo, action: ControlAction) -> Result<ControlR
             .wait_for_service(REQUEST_TIMEOUT)
             .await
             .wrap_err("failed to connect to the Teamy Terminal control service")?;
-        let result = match action {
-            ControlAction::Ping => client.ping().await,
-            ControlAction::SendText { text } => client.send_text(text).await,
-            ControlAction::SendKeys { keys } => {
-                client
-                    .send_keys(keys.iter().map(control_key_to_wire).collect())
-                    .await
+        let response = match action {
+            ControlAction::GetContent => client
+                .get_content()
+                .await
+                .map(|text| ControlResponse::Content { text }),
+            action => {
+                let result = match action {
+                    ControlAction::Ping => client.ping().await,
+                    ControlAction::SendText { text } => client.send_text(text).await,
+                    ControlAction::SendKeys { keys } => {
+                        client
+                            .send_keys(keys.iter().map(control_key_to_wire).collect())
+                            .await
+                    }
+                    ControlAction::Resize { width, height } => client.resize(width, height).await,
+                    ControlAction::Screenshot { path } => client.screenshot(path).await,
+                    ControlAction::Close => client.close().await,
+                    ControlAction::GetContent => unreachable!("get-content was handled above"),
+                };
+                result.map(|()| ControlResponse::Ok)
             }
-            ControlAction::Resize { width, height } => client.resize(width, height).await,
-            ControlAction::Screenshot { path } => client.screenshot(path).await,
-            ControlAction::Close => client.close().await,
         };
-        result
-            .map(|()| ControlResponse::Ok)
+        response
             .map_err(|error| eyre::eyre!("target Teamy Terminal rejected the request: {error}"))
     })
 }
@@ -529,6 +542,7 @@ pub trait TerminalControl {
     async fn send_keys(&self, keys: Vec<String>) -> Result<(), String>;
     async fn resize(&self, width: u32, height: u32) -> Result<(), String>;
     async fn screenshot(&self, path: String) -> Result<(), String>;
+    async fn get_content(&self) -> Result<String, String>;
     async fn close(&self) -> Result<(), String>;
 }
 
@@ -538,7 +552,7 @@ struct TerminalControlService {
 }
 
 impl TerminalControlService {
-    async fn dispatch(&self, operation: ControlAction) -> Result<(), String> {
+    async fn dispatch(&self, operation: ControlAction) -> Result<ControlResponse, String> {
         tracing::debug!("Teamy Terminal Vox request reached the generated service dispatcher");
         let (responder, response) = tokio::sync::oneshot::channel();
         self.calls
@@ -555,11 +569,11 @@ impl TerminalControlService {
 
 impl TerminalControl for TerminalControlService {
     async fn ping(&self) -> Result<(), String> {
-        self.dispatch(ControlAction::Ping).await
+        self.dispatch(ControlAction::Ping).await.map(|_| ())
     }
 
     async fn send_text(&self, text: String) -> Result<(), String> {
-        self.dispatch(ControlAction::SendText { text }).await
+        self.dispatch(ControlAction::SendText { text }).await.map(|_| ())
     }
 
     async fn send_keys(&self, keys: Vec<String>) -> Result<(), String> {
@@ -567,19 +581,28 @@ impl TerminalControl for TerminalControlService {
             .into_iter()
             .map(control_key_from_wire)
             .collect::<Result<Vec<_>, _>>()?;
-        self.dispatch(ControlAction::SendKeys { keys }).await
+        self.dispatch(ControlAction::SendKeys { keys }).await.map(|_| ())
     }
 
     async fn resize(&self, width: u32, height: u32) -> Result<(), String> {
-        self.dispatch(ControlAction::Resize { width, height }).await
+        self.dispatch(ControlAction::Resize { width, height }).await.map(|_| ())
     }
 
     async fn screenshot(&self, path: String) -> Result<(), String> {
-        self.dispatch(ControlAction::Screenshot { path }).await
+        self.dispatch(ControlAction::Screenshot { path }).await.map(|_| ())
+    }
+
+    async fn get_content(&self) -> Result<String, String> {
+        match self.dispatch(ControlAction::GetContent).await? {
+            ControlResponse::Content { text } => Ok(text),
+            ControlResponse::Ok => Err(String::from(
+                "Teamy Terminal returned an empty get-content response",
+            )),
+        }
     }
 
     async fn close(&self) -> Result<(), String> {
-        self.dispatch(ControlAction::Close).await
+        self.dispatch(ControlAction::Close).await.map(|_| ())
     }
 }
 
@@ -600,7 +623,10 @@ mod tests {
         let instance = InstanceInfo::current("test");
         assert_eq!(instance.id, std::process::id());
         assert_eq!(instance.pid, std::process::id());
-        assert!(instance.endpoint.contains(&instance.id.to_string()));
+        // Vox maps the logical endpoint to a generated Windows named pipe, so
+        // the transport endpoint does not necessarily retain the PID text.
+        assert!(instance.endpoint.starts_with("local://"));
+        assert!(instance.endpoint.len() > "local://".len());
     }
 
     #[test]
@@ -677,7 +703,7 @@ mod tests {
             .expect("Vox should deliver a request to the application channel");
         assert_eq!(call.operation, ControlAction::Ping);
         call.responder
-            .send(Ok(()))
+            .send(Ok(ControlResponse::Ok))
             .expect("Vox request should still be awaiting a response");
         assert_eq!(
             client.join().expect("client thread should join").unwrap(),

@@ -1,7 +1,10 @@
 mod teamy_terminal_invoke_cli;
 
 pub mod close;
+pub mod get_content;
 pub mod paste;
+
+pub use get_content::GetContentArgs;
 pub mod ping;
 pub mod resize;
 pub mod screenshot;

@@ -14,6 +14,7 @@ use teamy_cancellation::CancellationToken;
 use teamy_terminal_control::ControlAction;
 use teamy_terminal_control::ControlCall;
 use teamy_terminal_control::ControlKey;
+use teamy_terminal_control::ControlResponse;
 use teamy_terminal_control::ControlServer;
 use teamy_terminal_control::InstanceInfo;
 use teamy_terminal_core::TerminalLimits;
@@ -356,32 +357,40 @@ impl InteractiveApplication {
         } = call;
         let should_exit = matches!(operation, ControlAction::Close);
         let result = match operation {
-            ControlAction::Ping => Ok(()),
+            ControlAction::Ping => Ok(ControlResponse::Ok),
             ControlAction::SendText { text } => self
                 .session
                 .as_ref()
                 .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))
-                .and_then(|session| session.write_input(text.as_bytes())),
-            ControlAction::SendKeys { keys } => self.write_control_keys(&keys),
+                .and_then(|session| session.write_input(text.as_bytes()))
+                .map(|()| ControlResponse::Ok),
+            ControlAction::SendKeys { keys } => self
+                .write_control_keys(&keys)
+                .map(|()| ControlResponse::Ok),
             ControlAction::Resize { width, height } => {
                 if width == 0 || height == 0 {
                     Err(eyre::eyre!("control resize dimensions must be non-zero"))
                 } else if let Some(window) = self.window.as_ref() {
                     let _ = window.request_inner_size(PhysicalSize::new(width, height));
-                    Ok(())
+                    Ok(ControlResponse::Ok)
                 } else {
                     Err(eyre::eyre!("terminal window is not initialized"))
                 }
             }
-            ControlAction::Screenshot { path } => self.write_screenshot(Path::new(&path)),
+            ControlAction::Screenshot { path } => self
+                .write_screenshot(Path::new(&path))
+                .map(|()| ControlResponse::Ok),
+            ControlAction::GetContent => Ok(ControlResponse::Content {
+                text: self.terminal.snapshot().visible_text(),
+            }),
             ControlAction::Close => {
                 if let Some(session) = self.session.as_ref() {
                     session
                         .kill()
                         .map_err(|error| eyre::eyre!("failed to close PowerShell: {error}"))
-                        .map(|()| ())
+                        .map(|()| ControlResponse::Ok)
                 } else {
-                    Ok(())
+                    Ok(ControlResponse::Ok)
                 }
             }
         };

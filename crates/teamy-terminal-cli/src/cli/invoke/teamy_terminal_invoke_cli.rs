@@ -1,4 +1,5 @@
 use crate::cli::invoke::close::CloseArgs;
+use crate::cli::invoke::get_content::GetContentArgs;
 use crate::cli::invoke::paste::PasteArgs;
 use crate::cli::invoke::ping::PingArgs;
 use crate::cli::invoke::resize::ResizeArgs;
@@ -36,6 +37,7 @@ pub enum InvokeAction {
     Resize(ResizeArgs),
     Screenshot(ScreenshotArgs),
     Close(CloseArgs),
+    GetContent(GetContentArgs),
 }
 
 impl InvokeArgs {
@@ -63,6 +65,7 @@ impl InvokeAction {
             Self::Screenshot(args) => Ok(ControlAction::Screenshot {
                 path: args.resolve_path()?.to_string_lossy().into_owned(),
             }),
+            Self::GetContent(_) => Ok(ControlAction::GetContent),
             Self::Close(_) => Ok(ControlAction::Close),
         }
     }

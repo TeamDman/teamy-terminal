@@ -175,6 +175,25 @@ impl TerminalSnapshot {
             selection.contains(CursorPosition { column, row })
         })
     }
+
+    /// Return the visible grid as newline-separated text without row padding.
+    #[must_use]
+    pub fn visible_text(&self) -> String {
+        let mut rows = Vec::with_capacity(usize::from(self.rows));
+        for row in 0..self.rows {
+            let start = usize::from(row) * usize::from(self.columns);
+            let end = start + usize::from(self.columns);
+            let mut text = self.cells[start..end]
+                .iter()
+                .map(|cell| cell.character)
+                .collect::<String>();
+            while text.ends_with(' ') {
+                let _ = text.pop();
+            }
+            rows.push(text);
+        }
+        rows.join("\n")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -1274,6 +1293,7 @@ mod tests {
             2,
         );
         terminal.process_bytes(b"alpha\r\nbeta");
+        assert_eq!(terminal.snapshot().visible_text(), "alpha\nbeta");
         terminal.begin_selection(CursorPosition { column: 1, row: 0 });
         terminal.update_selection(CursorPosition {
             column: 99,
