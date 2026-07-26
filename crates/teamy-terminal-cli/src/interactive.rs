@@ -3,6 +3,7 @@ use eyre::Context;
 use eyre::Result;
 use std::fs::File;
 use std::io::BufWriter;
+use std::io::Cursor;
 use std::path::Path;
 use std::sync::Once;
 use std::sync::mpsc::Receiver;
@@ -39,11 +40,13 @@ use winit::event_loop::EventLoop;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
+use winit::window::Icon;
 use winit::window::Window;
 use winit::window::WindowId;
 
 const INITIAL_WINDOW_WIDTH: u32 = 1280;
 const INITIAL_WINDOW_HEIGHT: u32 = 720;
+const WINDOW_ICON_PNG: &[u8] = include_bytes!("../resources/main.png");
 const MAX_PTY_DRAIN_EVENTS_PER_TURN: usize = 32;
 const MAX_PTY_DRAIN_BYTES_PER_TURN: usize = 512 * 1024;
 static EVENT_LOOP_LOGGED: Once = Once::new();
@@ -59,6 +62,33 @@ pub fn run(cancellation_token: &CancellationToken) -> Result<()> {
         .run_app(&mut application)
         .wrap_err("the terminal event loop failed")?;
     application.finish()
+}
+
+fn load_window_icon() -> Result<Icon> {
+    let mut decoder = png::Decoder::new(Cursor::new(WINDOW_ICON_PNG));
+    decoder.set_transformations(
+        png::Transformations::EXPAND | png::Transformations::ALPHA | png::Transformations::STRIP_16,
+    );
+    let mut reader = decoder
+        .read_info()
+        .wrap_err("failed to read the embedded terminal window icon")?;
+    let buffer_size = reader
+        .output_buffer_size()
+        .ok_or_else(|| eyre::eyre!("embedded terminal window icon is too large to decode"))?;
+    let mut rgba = vec![0; buffer_size];
+    let info = reader
+        .next_frame(&mut rgba)
+        .wrap_err("failed to decode the embedded terminal window icon")?;
+    if info.color_type != png::ColorType::Rgba || info.bit_depth != png::BitDepth::Eight {
+        eyre::bail!(
+            "embedded terminal window icon decoded as {:?}/{:?}, expected RGBA8",
+            info.color_type,
+            info.bit_depth
+        );
+    }
+    rgba.truncate(info.buffer_size());
+    Icon::from_rgba(rgba, info.width, info.height)
+        .map_err(|error| eyre::eyre!("failed to construct the terminal window icon: {error:?}"))
 }
 
 struct InteractiveApplication {
@@ -124,12 +154,14 @@ impl InteractiveApplication {
         if self.window.is_some() {
             return Ok(());
         }
+        let icon = load_window_icon()?;
         let attributes = Window::default_attributes()
             .with_title("Teamy Terminal — Vulkan")
             .with_inner_size(PhysicalSize::new(
                 INITIAL_WINDOW_WIDTH,
                 INITIAL_WINDOW_HEIGHT,
-            ));
+            ))
+            .with_window_icon(Some(icon));
         let window = event_loop
             .create_window(attributes)
             .wrap_err("failed to create the terminal window")?;
@@ -704,6 +736,12 @@ fn terminal_input_key(
     text: Option<&str>,
     modifiers: ModifiersState,
 ) -> Result<Option<Vec<u8>>> {
+    if modifiers.control_key() && matches!(key, Key::Named(NamedKey::Backspace)) {
+        // PowerShell/PSReadLine and common Unix line disciplines use Ctrl+W
+        // (ETB) for backward-kill-word. Microsoft Terminal emits the same
+        // byte for Ctrl+Backspace in a compatible prompt.
+        return Ok(Some(vec![0x17]));
+    }
     if modifiers.control_key()
         && let Key::Character(character) = key
     {
@@ -795,10 +833,24 @@ mod tests {
             Some(vec![0x04])
         );
         assert_eq!(
+            terminal_input_key(
+                &Key::Named(NamedKey::Backspace),
+                None,
+                ModifiersState::CONTROL
+            )
+            .expect("Ctrl+Backspace mapping should not fail"),
+            Some(vec![0x17])
+        );
+        assert_eq!(
             terminal_input_key(&character("v"), None, ModifiersState::SHIFT)
                 .expect("ordinary text mapping should not fail"),
             Some(b"v".to_vec())
         );
+    }
+
+    #[test]
+    fn embedded_window_icon_decodes_for_winit() {
+        load_window_icon().expect("the checked-in window icon should decode");
     }
 
     #[test]

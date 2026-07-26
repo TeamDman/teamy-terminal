@@ -556,6 +556,11 @@ desktop input probe was attempted with both `SendKeys` and native
 `SendInput`, but this session rejected synthetic keystrokes, so direct manual
 command/paste/resize/Ctrl+C/exit evidence remains the only open MVP check.
 
+Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
+byte used by PowerShell-compatible prompts, uses a black default terminal
+background so gray and white text remain visibly distinct, and keeps the
+existing ANSI palette values explicit and tested.
+
 ## Phase 3.5 — Profiling contract and Windows presentation polish [~]
 
 This phase is the performance and integration follow-up to the interactive
@@ -564,7 +569,7 @@ golden project template; active repositories such as teamy-terminal and Cloud
 Terrastodon must consume that contract rather than independently invent
 profiling conventions.
 
-### [ ] 3.5.1 Set the native window icon
+### [x] 3.5.1 Set the native window icon
 
 **Work:** Keep the existing Windows resource embedding for the executable,
 taskbar, and file identity, and additionally decode the existing
@@ -581,6 +586,12 @@ checked-in asset family.
 **Completion criteria:** The visible window icon is correct without changing
 the existing taskbar/resource behavior, and icon loading failure is an
 actionable startup error rather than a silent missing icon.
+
+**Completion notes:** The embedded `main.png` is decoded as bounded RGBA8 data
+and passed to `Window::default_attributes().with_window_icon(...)`. The
+decoder and winit icon construction are covered by a focused CLI test, while
+the Windows executable resource and taskbar icon remain sourced from the
+existing `main.ico` resource.
 
 ### [~] 3.5.2 Make Tracy and tracing-subscriber feature selection explicit
 

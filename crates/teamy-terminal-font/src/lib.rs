@@ -599,7 +599,7 @@ fn render_color_glyph(
 
 fn color(color: Color, is_background: bool) -> [u8; 4] {
     let [red, green, blue] = match color {
-        Color::Default if is_background => [30, 30, 30],
+        Color::Default if is_background => [0, 0, 0],
         Color::Default => [212, 212, 212],
         Color::Rgb(red, green, blue) => [red, green, blue],
         Color::Indexed(index) => palette(index),
@@ -733,5 +733,12 @@ mod tests {
         let question_mark = font.glyph('?');
         assert_eq!(missing.metrics, question_mark.metrics);
         assert_eq!(missing.bitmap, question_mark.bitmap);
+    }
+
+    #[test]
+    fn default_background_is_black_and_gray_is_distinct_from_white() {
+        assert_eq!(color(Color::Default, true), [0, 0, 0, 255]);
+        assert_eq!(color(Color::Indexed(8), false), [102, 102, 102, 255]);
+        assert_eq!(color(Color::Indexed(15), false), [255, 255, 255, 255]);
     }
 }
