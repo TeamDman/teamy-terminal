@@ -57,5 +57,8 @@ tracy = ["extended_observability", "dep:tracing-tracy"]
 [build-dependencies]
 embed-resource.workspace = true
 
+[dev-dependencies]
+portable-pty.workspace = true
+
 [lints]
 workspace = true
