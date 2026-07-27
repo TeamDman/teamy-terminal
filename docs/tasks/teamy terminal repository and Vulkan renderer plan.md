@@ -25,11 +25,13 @@ is only a pointer and must not duplicate plan content.
 Phase 3.4, then begin Phase 4's optional SFM integration. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, mouse selection,
-and clipboard copy are complete. The remaining standalone gate is live
-verification of prompt/command input, ANSI output, clipboard paste, resize,
-Ctrl+C interruption/copy, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift
-navigation, Ctrl+wheel zoom, alternate-screen restoration, and clean shell
-exit. Prompt/command-range metadata is now covered by OSC 133 parsing and
+and clipboard copy are complete. The elevated live control-plane gate now
+covers prompt/command input, ANSI output, deterministic paste, resize, Ctrl+C
+interruption, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift navigation,
+alternate-screen restoration, and clean shell close. The remaining native
+desktop gate is mouse selection/copy and Ctrl+wheel zoom; the direct OS input
+probe is not accepted by this desktop harness, so those checks still require
+an actual manual window session. Prompt/command-range metadata is now covered by OSC 133 parsing and
 interactive PowerShell shell integration; it still needs bridge-consumer use
 in the later SFM slice. The control plane now also exposes
 `invoke get-content`, a bounded visible-grid text probe that complements
@@ -615,12 +617,25 @@ It cannot run meaningfully under the Codex sandbox identity
 cannot deliver the resulting ConPTY console-control event; the elevated
 desktop run passes with `cargo test -p teamy-terminal-pty --lib -- --ignored`.
 `send-text` uses the same Win32 key-record encoding for text and Enter
-when that mode is active, while paste remains raw. A timing-aware live
+when that mode is active, while paste remains raw. A timing-aware elevated
 control-plane probe now passes: `invoke get-content` observes the running ping,
 the explicit `down:/wait:/up:` Ctrl+C sequence produces `Control-C` and a fresh
 prompt, and `invoke close` returns `Ok`. Closing also has a typed `windows-rs`
 fallback that enumerates the PTY process tree and terminates it through typed
 Win32 APIs; the fallback treats an already-exited child as successful.
+
+The same timing-aware desktop probe also passed deterministic `invoke paste`
+input, Ctrl+A as the profile's PSReadLine `SelectAll` binding, Ctrl+Backspace,
+Ctrl+Left/Right, Ctrl+Shift+Left replacement, and an 800x450 resize whose PNG
+IHDR matched the requested dimensions. The navigation wire aliases now accept
+the hyphenated names emitted by the control client (`arrow-left`, `page-up`,
+and peers), with a dedicated round-trip test. Launching
+`ratatui-key-debug` and sending its documented three-Esc exit sequence restored
+the pre-alternate-screen marker and then closed cleanly. A native desktop
+mouse probe requested a drag from the exact client coordinates but the cursor
+landed elsewhere and the clipboard retained its prior value, so it is recorded
+as rejected harness input rather than selection/copy evidence. Ctrl+wheel still
+has bounded/directional unit coverage but no accepted native desktop proof.
 
 The follow-up control-plane slice adds an intentionally literal
 `down:/up:/wait:` grammar, numeric-key coverage, manual-compatible generic
@@ -1175,7 +1190,7 @@ overwritten by baseline code.
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
 | Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
-| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and live Ctrl+C/close pass; remaining desktop interaction checks pending |
+| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and live keyboard/paste/resize/alternate-screen/Ctrl+C/close pass; native selection/zoom pending |
 | Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
@@ -1193,9 +1208,9 @@ cross-platform renderer support are post-MVP work.
 The roadmap as a whole is not complete: Phase 3.4 and Phases 4–5 remain future
 work. The active MVP goal is therefore audited against the
 Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
-latest audit, the Ctrl+C and close boundary is green, but Phase 3.4 remains
-[~] until a desktop session provides direct evidence for the remaining
-interaction checks.
+latest audit, the live keyboard/control boundary is green, but Phase 3.4
+remains [~] until a real desktop session provides direct evidence for native
+mouse selection/copy and Ctrl+wheel zoom.
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.

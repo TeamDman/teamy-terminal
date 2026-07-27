@@ -239,15 +239,15 @@ fn parse_physical_key(spec: &str) -> Option<ControlPhysicalKey> {
         "tab" => ControlPhysicalKey::Tab,
         "backspace" => ControlPhysicalKey::Backspace,
         "escape" | "esc" => ControlPhysicalKey::Escape,
-        "up" | "arrowup" => ControlPhysicalKey::ArrowUp,
-        "down" | "arrowdown" => ControlPhysicalKey::ArrowDown,
-        "right" | "arrowright" => ControlPhysicalKey::ArrowRight,
-        "left" | "arrowleft" => ControlPhysicalKey::ArrowLeft,
+        "up" | "arrowup" | "arrow-up" => ControlPhysicalKey::ArrowUp,
+        "down" | "arrowdown" | "arrow-down" => ControlPhysicalKey::ArrowDown,
+        "right" | "arrowright" | "arrow-right" => ControlPhysicalKey::ArrowRight,
+        "left" | "arrowleft" | "arrow-left" => ControlPhysicalKey::ArrowLeft,
         "home" => ControlPhysicalKey::Home,
         "end" => ControlPhysicalKey::End,
         "delete" | "del" => ControlPhysicalKey::Delete,
-        "pageup" => ControlPhysicalKey::PageUp,
-        "pagedown" => ControlPhysicalKey::PageDown,
+        "pageup" | "page-up" => ControlPhysicalKey::PageUp,
+        "pagedown" | "page-down" => ControlPhysicalKey::PageDown,
         _ if spec.chars().count() == 1 => ControlPhysicalKey::Character {
             text: spec.to_owned(),
         },
@@ -864,6 +864,24 @@ mod tests {
                 .expect("delay wire value should parse"),
             ControlKey::Delay { milliseconds: 1 }
         );
+    }
+
+    #[test]
+    fn physical_navigation_keys_round_trip_through_wire_names() {
+        for key in [
+            ControlPhysicalKey::ArrowUp,
+            ControlPhysicalKey::ArrowDown,
+            ControlPhysicalKey::ArrowLeft,
+            ControlPhysicalKey::ArrowRight,
+            ControlPhysicalKey::PageUp,
+            ControlPhysicalKey::PageDown,
+        ] {
+            let wire = physical_key_to_wire(&key);
+            assert_eq!(
+                physical_key_from_wire(&wire).expect("wire navigation key should parse"),
+                key
+            );
+        }
     }
 
     #[test]
