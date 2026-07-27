@@ -1,0 +1,21 @@
+[package]
+name = "teamy-terminal-vox-server"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace]
+
+[dependencies]
+arbitrary = { version = "1.4.1", features = ["derive"] }
+eyre = "0.6.12"
+facet = { git = "https://github.com/TeamDman/facet.git", rev = "aa75598dabb2138b18365cdf0d97ca94a34c5319", package = "facet" }
+figue = { git = "https://github.com/TeamDman/facet.git", rev = "aa75598dabb2138b18365cdf0d97ca94a34c5319", package = "figue", features = ["arbitrary"] }
+png = "0.18.1"
+spec-proto = { git = "https://github.com/TeamDman/facet.git", rev = "aa75598dabb2138b18365cdf0d97ca94a34c5319", package = "spec-proto" }
+teamy-terminal-core = { path = "../../crates/teamy-terminal-core" }
+teamy-terminal-font = { path = "../../crates/teamy-terminal-font" }
+teamy-terminal-pty = { path = "../../crates/teamy-terminal-pty" }
+tokio = { version = "1.49.0", features = ["full"] }
+tracing = "0.1.41"
+vox = { git = "https://github.com/TeamDman/facet.git", rev = "aa75598dabb2138b18365cdf0d97ca94a34c5319", package = "vox" }

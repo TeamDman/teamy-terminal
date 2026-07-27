@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-07-26
+**Last updated:** 2026-07-27
 
 ## How to update this plan
 
@@ -37,6 +37,11 @@ in the later SFM slice. The control plane now also exposes
 `invoke copy-selection`, `invoke zoom`, `invoke show`, and `invoke hide` now
 cover the corresponding app-owned behavior; `--hidden` creates a Vulkan-backed
 window without initially presenting it or adding a taskbar tab.
+The first Phase 4 bridge slice is now defined as Rust-authoritative terminal
+state plus bounded full-PNG snapshots: Rust owns the PTY, VT parsing, colors,
+scrollback, and rasterization; Java sends input/resize and displays the PNG.
+Dirty-cell/tile, unchanged-glyph, and GPU-sharing optimizations are deferred
+until the end-to-end correctness proof is captured.
 **Automation rendering decision:** `--hidden` is the supported near-term
 background mode. It still creates a native winit window, Vulkan surface, and
 swapchain so the production renderer path remains identical, but the window is
@@ -1147,19 +1152,58 @@ published or SFM-consumed pin; broad `test-java` remains environment-limited
 by the installed JBR 17.0.6 `Cannot close compiler resources` failure in the
 non-elevated environment, while the elevated package gate passes.
 
-### [ ] 4.3 Prove the optional frame consumer boundary
+### [x] 4.3 Prove the Rust-authoritative full-PNG endpoint
 
-**Work:** Coordinate with the SFM Vox plan to consume portable frame data while
-Java owns texture upload, clipping, GUI-scale/layout, stale-frame rejection,
-and fallback. Rust never sends a Minecraft panel or arbitrary UI instruction.
+**Work:** Keep the initial endpoint in the isolated
+`tools/vox-terminal-server` workspace until its Facet revision can be aligned
+with the main workspace. It owns the real `pwsh -NoProfile` PTY, terminal VT
+state, colors, scrollback, and CPU PNG rasterization. It must answer terminal
+device/cursor queries, bound input/output/frame sizes, and expose only the
+generated Vox terminal contract.
 
-**Validation:** Run the existing SFM puppet/report flow for Java-local and,
-when the bridge is available, Rust-backed mode; include full-screen, nested,
-narrow, and supported GUI-scale captures.
+**Validation:** Run the focused Rust puppet test with `1..100` and
+`Write-Host -ForegroundColor Cyan "hello, world!"`; assert the Rust cell state
+and the full PNG signature/size. Then run the endpoint over TCP and retain a
+PNG artifact for the SFM consumer proof.
 
-**Completion criteria:** The Java-local mode remains useful with no Rust process;
-the optional mode proves input round-trip, resize, disconnect/stale-frame
-handling, and fallback without native GPU-handle interop.
+**Completion criteria:** A real Rust PTY session produces a bounded full PNG,
+preserves terminal colors, and has no Java-owned terminal-content logic. The
+isolated workspace does not introduce the incompatible `weavy`/Facet links
+conflict into the primary workspace.
+
+**Completion notes (2026-07-27):** The isolated
+`tools/vox-terminal-server` workspace passed its focused puppet test and
+`cargo fmt --check`. The test runs `1..100; Write-Host -ForegroundColor Cyan
+"hello, world!"; exit`, verifies the bounded full-PNG payload, visible `100`,
+and cyan cell metadata. The endpoint was also launched over loopback TCP and
+consumed by the canonical SFM puppet; the Rust process remained hidden and the
+SFM captures verified the live frame path. The source is ready for the local
+review commit, so Phase 4 remains active until the consumer boundary is made
+durable.
+
+### [~] 4.4 Prove the optional frame consumer boundary
+
+**Work:** Coordinate with the SFM Vox plan to consume the full PNG while Java
+owns only input/resize plumbing, texture upload, clipping, GUI-scale/layout,
+stale-frame rejection, and fallback. Rust never sends a Minecraft panel or
+arbitrary UI instruction.
+
+**Validation:** Run the existing SFM puppet/report flow for Java-local and
+Rust-backed modes; include full-screen, nested, narrow, and supported GUI-scale
+captures. Record the endpoint address and exact capture names.
+
+**Completion criteria:** The Java-local mode remains useful with no Rust
+process; the optional mode proves input round-trip, resize, disconnect/stale-
+frame handling, and fallback without native GPU-handle interop. Only after
+this evidence is complete may dirty-cell/tile or unchanged-glyph optimization
+be promoted into the bridge.
+
+**Current evidence (2026-07-27):** Java accepts only bounded full PNG frames,
+uploads them to a dynamic texture, explicitly binds the Minecraft shader
+sampler, forwards text and logical resize requests, and preserves the
+Java-local fallback. Focused SFM tests and two live Rust-backed captures pass.
+Rust-owned scroll/key/mouse forwarding and the final commit/propagation gate
+remain before this item is complete.
 
 ## Phase 5 — Release and handoff [ ]
 
