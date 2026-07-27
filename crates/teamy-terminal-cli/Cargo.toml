@@ -44,10 +44,7 @@ winit.workspace = true
 png.workspace = true
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.62.2", features = [
-    "Win32_Globalization",
-    "Win32_System_Console",
-] }
+windows.workspace = true
 
 [features]
 default = ["dirty_rendering"]

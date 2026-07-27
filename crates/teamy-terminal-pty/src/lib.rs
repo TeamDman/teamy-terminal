@@ -7,20 +7,20 @@
 
 use eyre::Context;
 use eyre::Result;
+use portable_pty::native_pty_system;
 use portable_pty::Child;
 use portable_pty::ChildKiller;
 use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
-use portable_pty::native_pty_system;
 use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Duration;
 
 const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"$global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
@@ -137,6 +137,7 @@ pub struct PtySession {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    process_id: Option<u32>,
     events: Receiver<PtyEvent>,
 }
 
@@ -164,6 +165,7 @@ impl PtySession {
             .map_err(|error| {
                 eyre::eyre!("failed to spawn the configured shell in the pseudoterminal: {error}")
             })?;
+        let process_id = child.process_id();
         let killer = Arc::new(Mutex::new(child.clone_killer()));
         let reader = pair
             .master
@@ -182,6 +184,7 @@ impl PtySession {
             master: pair.master,
             writer: Mutex::new(writer),
             killer,
+            process_id,
             events,
         })
     }
@@ -265,12 +268,196 @@ impl PtySession {
     /// Returns an error when the killer lock is poisoned or the child rejects
     /// the termination request.
     pub fn kill(&self) -> Result<()> {
-        self.killer
+        let result = self
+            .killer
             .lock()
             .map_err(|error| eyre::eyre!("pseudoterminal killer lock was poisoned: {error}"))?
             .kill()
-            .wrap_err("failed to terminate the pseudoterminal child")
+            .wrap_err("failed to terminate the pseudoterminal child");
+        if result.is_ok() {
+            return Ok(());
+        }
+
+        #[cfg(windows)]
+        {
+            let primary_error = result.expect_err("the successful termination case returned early");
+            match terminate_process_tree(self.process_id) {
+                Ok(()) => Ok(()),
+                Err(fallback_error) => Err(eyre::eyre!(
+                    "{primary_error:#}; Windows process-tree fallback also failed: {fallback_error:#}"
+                )),
+            }
+        }
+
+        #[cfg(not(windows))]
+        result
     }
+}
+
+#[cfg(windows)]
+mod process_cleanup {
+    use eyre::Context;
+    use eyre::Result;
+    use windows::core::HRESULT;
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
+    use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
+    use windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+    use windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW;
+    use windows::Win32::System::Diagnostics::ToolHelp::Process32NextW;
+    use windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W;
+    use windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS;
+    use windows::Win32::System::Threading::GetExitCodeProcess;
+    use windows::Win32::System::Threading::OpenProcess;
+    use windows::Win32::System::Threading::TerminateProcess;
+    use windows::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
+    use windows::Win32::System::Threading::PROCESS_TERMINATE;
+
+    const STILL_ACTIVE: u32 = 259;
+    type ProcessInfo = (u32, u32, String);
+
+    struct OwnedHandle(windows::Win32::Foundation::HANDLE);
+
+    impl Drop for OwnedHandle {
+        fn drop(&mut self) {
+            // SAFETY: the handle was returned by a successful Win32 API call
+            // and is owned exclusively by this guard.
+            let _ = unsafe { CloseHandle(self.0) };
+        }
+    }
+
+    fn is_error(
+        error: &windows::core::Error,
+        code: windows::Win32::Foundation::WIN32_ERROR,
+    ) -> bool {
+        error.code() == HRESULT::from_win32(code.0)
+    }
+
+    fn snapshot_processes() -> Result<Vec<ProcessInfo>> {
+        // SAFETY: the snapshot flags and process id are valid for a system-wide
+        // process snapshot; the returned handle is owned by `OwnedHandle`.
+        let snapshot = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) }
+            .wrap_err("failed to snapshot Windows processes for PTY cleanup")
+            .map(OwnedHandle)?;
+        let mut processes = Vec::new();
+        let mut entry = PROCESSENTRY32W {
+            dwSize: u32::try_from(std::mem::size_of::<PROCESSENTRY32W>())
+                .expect("PROCESSENTRY32W fits in u32"),
+            ..Default::default()
+        };
+        // SAFETY: `entry` is initialized with the required size and remains
+        // alive for the duration of the enumeration call.
+        unsafe { Process32FirstW(snapshot.0, &raw mut entry) }
+            .wrap_err("failed to enumerate Windows processes for PTY cleanup")?;
+        loop {
+            let executable_name = String::from_utf16_lossy(
+                &entry.szExeFile[..entry
+                    .szExeFile
+                    .iter()
+                    .position(|character| *character == 0)
+                    .unwrap_or(entry.szExeFile.len())],
+            );
+            processes.push((
+                entry.th32ProcessID,
+                entry.th32ParentProcessID,
+                executable_name,
+            ));
+            // SAFETY: `entry` is the same valid enumeration buffer used for
+            // `Process32FirstW` and remains alive for this call.
+            match unsafe { Process32NextW(snapshot.0, &raw mut entry) } {
+                Ok(()) => {}
+                Err(error) if is_error(&error, ERROR_NO_MORE_FILES) => break,
+                Err(error) => {
+                    return Err(eyre::eyre!(
+                        "failed to continue enumerating Windows processes for PTY cleanup: {error}"
+                    ));
+                }
+            }
+        }
+        Ok(processes)
+    }
+
+    fn process_tree(root: u32, processes: &[ProcessInfo]) -> Vec<u32> {
+        let mut tree = vec![root];
+        let mut index = 0;
+        while index < tree.len() {
+            let parent_id = tree[index];
+            for &(child_id, child_parent_id, _) in processes {
+                if child_parent_id == parent_id && !tree.contains(&child_id) {
+                    tree.push(child_id);
+                }
+            }
+            index += 1;
+        }
+        tree
+    }
+
+    fn terminate_processes(tree: Vec<u32>, processes: &[ProcessInfo]) -> Result<()> {
+        for process_id in tree.into_iter().rev() {
+            let executable_name = processes
+                .iter()
+                .find(|(candidate_id, _, _)| *candidate_id == process_id)
+                .map_or("unknown", |(_, _, name)| name.as_str());
+            // SAFETY: the requested access is limited to process termination
+            // and exit-state inspection for the PTY-owned process tree.
+            let process = match unsafe {
+                OpenProcess(
+                    PROCESS_TERMINATE | PROCESS_QUERY_INFORMATION,
+                    false,
+                    process_id,
+                )
+            } {
+                Ok(process) => OwnedHandle(process),
+                // A PTY can exit between the portable-pty kill attempt and
+                // this fallback. Termination is idempotent in that case.
+                Err(error) if is_error(&error, ERROR_INVALID_PARAMETER) => continue,
+                Err(error) => {
+                    return Err(eyre::eyre!(
+                        "failed to open pseudoterminal process {process_id} ({executable_name}) for termination: {error}"
+                    ));
+                }
+            };
+            let mut exit_code = 0_u32;
+            // SAFETY: `process` is a valid handle with query access and
+            // `exit_code` is a writable output value.
+            unsafe { GetExitCodeProcess(process.0, &raw mut exit_code) }.wrap_err_with(|| {
+                format!("failed to query pseudoterminal process {process_id} ({executable_name})")
+            })?;
+            if exit_code != STILL_ACTIVE {
+                continue;
+            }
+            // SAFETY: `process` is a valid handle with terminate access.
+            if let Err(error) = unsafe { TerminateProcess(process.0, 1) } {
+                let mut final_exit_code = 0_u32;
+                // SAFETY: `process` remains valid through `OwnedHandle` and
+                // `final_exit_code` is a writable output value.
+                let process_exited =
+                    unsafe { GetExitCodeProcess(process.0, &raw mut final_exit_code) }
+                        .is_ok_and(|()| final_exit_code != STILL_ACTIVE);
+                if process_exited {
+                    continue;
+                }
+                return Err(eyre::eyre!(
+                    "failed to terminate pseudoterminal process {process_id} ({executable_name}): {error}"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) fn terminate(process_id: Option<u32>) -> Result<()> {
+        let process_id = process_id.ok_or_else(|| eyre::eyre!("PTY child has no process id"))?;
+        // Terminate the PTY process tree through typed Win32 APIs. The snapshot
+        // is intentionally taken once so the fallback is bounded and only
+        // follows descendants that existed at close time.
+        let processes = snapshot_processes()?;
+        terminate_processes(process_tree(process_id, &processes), &processes)
+    }
+}
+
+#[cfg(windows)]
+fn terminate_process_tree(process_id: Option<u32>) -> Result<()> {
+    process_cleanup::terminate(process_id)
 }
 
 impl Drop for PtySession {
@@ -383,6 +570,59 @@ mod tests {
         let output = String::from_utf8_lossy(&output);
         assert!(output.contains('1') && output.contains("1000"));
         assert_eq!(exit.map(|status| status.success), Some(true));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn active_shell_process_tree_can_be_terminated() {
+        let session =
+            PtySession::spawn(&PtyConfig::test()).expect("pwsh should start in a test PTY");
+        session
+            .write_input(b"ping.exe 127.0.0.1 -t\r")
+            .expect("the long-running command should be accepted by pwsh");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut output = Vec::new();
+        while std::time::Instant::now() < deadline {
+            let Some(event) = session
+                .recv_timeout(Duration::from_millis(100))
+                .expect("PTY event receive should remain healthy")
+            else {
+                continue;
+            };
+            match event {
+                PtyEvent::Output(bytes) => {
+                    output.extend(bytes);
+                    if String::from_utf8_lossy(&output).contains("Pinging 127.0.0.1") {
+                        break;
+                    }
+                }
+                PtyEvent::Exited(status) => panic!("PowerShell exited before ping: {status:?}"),
+                PtyEvent::Error(error) => panic!("test PTY failed: {error}"),
+            }
+        }
+        assert!(
+            String::from_utf8_lossy(&output).contains("Pinging 127.0.0.1"),
+            "the long-running command did not start; output was:\n{}",
+            String::from_utf8_lossy(&output)
+        );
+        session
+            .kill()
+            .expect("the PTY child should be terminable by its process tree");
+        let exit_deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while std::time::Instant::now() < exit_deadline {
+            let Some(event) = session
+                .recv_timeout(Duration::from_millis(100))
+                .expect("PTY event receive should remain healthy")
+            else {
+                continue;
+            };
+            match event {
+                PtyEvent::Exited(_) => return,
+                PtyEvent::Output(_) => {}
+                PtyEvent::Error(error) => panic!("test PTY failed after termination: {error}"),
+            }
+        }
+        panic!("the terminated PTY did not report process exit");
     }
 
     #[cfg(windows)]
@@ -541,5 +781,4 @@ mod tests {
             String::from_utf8_lossy(&output)
         );
     }
-
 }

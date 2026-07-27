@@ -15,5 +15,8 @@ eyre.workspace = true
 portable-pty.workspace = true
 tracing.workspace = true
 
+[target.'cfg(windows)'.dependencies]
+windows.workspace = true
+
 [lints]
 workspace = true

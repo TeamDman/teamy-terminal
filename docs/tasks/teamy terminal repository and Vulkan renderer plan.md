@@ -21,8 +21,8 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Close Phase 3.4 with a direct desktop interaction proof, then
-begin Phase 4's optional SFM integration. The code-level input mapping,
+**Next slice:** Finish the remaining direct desktop interaction checks for
+Phase 3.4, then begin Phase 4's optional SFM integration. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, mouse selection,
 and clipboard copy are complete. The remaining standalone gate is live
@@ -612,31 +612,25 @@ is retained as an ignored desktop-account gate for Ctrl+C against `ping.exe -t`
 using the exact generic two-record sequence emitted by the manual winit path.
 It cannot run meaningfully under the Codex sandbox identity
 (`teamy-desktop-w\codexsandboxoffline`), which accepts the input bytes but
-cannot deliver the resulting ConPTY console-control event; run it with
-`cargo test -p teamy-terminal-pty --lib -- --ignored` under the desktop
-account. `send-text` uses the same Win32 key-record encoding for text and Enter
-when that mode is active, while paste remains raw. A desktop input probe was
-attempted with
-both `SendKeys` and native `SendInput`, but this session rejected synthetic
-keystrokes, so direct manual command/paste/resize/Ctrl+C/selection/exit
-evidence remains the only open MVP check. The control-plane probe is now
-stronger: a rebuilt live window produced prompt/ANSI/resize screenshots and a
-successful `invoke get-content` response, but live `invoke ... send-keys
-"down:ctrl wait:10 down:c wait:10 up:c wait:10 up:ctrl"` still leaves
-`ping.exe -t` running even though debug evidence shows the application writes
-the exact `[67;46;3;1;8;1_]` and `[67;46;0;0;8;1_]` records. The remaining
-issue is therefore the live application/event-loop boundary rather than a
-parser ambiguity or an unverified byte variant; `get-content` does not
-substitute for resolving and manually verifying that behavior.
+cannot deliver the resulting ConPTY console-control event; the elevated
+desktop run passes with `cargo test -p teamy-terminal-pty --lib -- --ignored`.
+`send-text` uses the same Win32 key-record encoding for text and Enter
+when that mode is active, while paste remains raw. A timing-aware live
+control-plane probe now passes: `invoke get-content` observes the running ping,
+the explicit `down:/wait:/up:` Ctrl+C sequence produces `Control-C` and a fresh
+prompt, and `invoke close` returns `Ok`. Closing also has a typed `windows-rs`
+fallback that enumerates the PTY process tree and terminates it through typed
+Win32 APIs; the fallback treats an already-exited child as successful.
 
 The follow-up control-plane slice adds an intentionally literal
 `down:/up:/wait:` grammar, numeric-key coverage, manual-compatible generic
 Win32 key records with state-only modifiers, and guaranteed modifier cleanup.
-Its parser/unit tests pass. The direct PTY interrupt regression is explicitly
-ignored under the sandbox for the same desktop-account reason, and the live
-Windows control-plane interrupt probe is not yet green, so this does not close
-the Phase 3.4 gate. The earlier staged OpenConsole/`conpty.dll` retry was
-removed and is not treated as a solution.
+Its parser/unit tests pass. The direct PTY interrupt regression remains
+ignored under the sandbox for the same desktop-account reason, while both the
+elevated PTY regression and the live Windows control-plane interrupt probe are
+green. The broader Phase 3.4 gate remains open only for the other direct
+desktop checks listed above. The earlier staged OpenConsole/`conpty.dll` retry
+was removed and is not treated as a solution.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal
@@ -1181,7 +1175,7 @@ overwritten by baseline code.
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
 | Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
-| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and input mapping pass; desktop interaction pending |
+| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, and live Ctrl+C/close pass; remaining desktop interaction checks pending |
 | Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
@@ -1199,8 +1193,9 @@ cross-platform renderer support are post-MVP work.
 The roadmap as a whole is not complete: Phase 3.4 and Phases 4–5 remain future
 work. The active MVP goal is therefore audited against the
 Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
-latest audit, Phase 3.4 is implemented but remains [~] until a desktop session
-provides direct evidence for the five interaction checks.
+latest audit, the Ctrl+C and close boundary is green, but Phase 3.4 remains
+[~] until a desktop session provides direct evidence for the remaining
+interaction checks.
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.

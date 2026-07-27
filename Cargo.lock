@@ -3047,6 +3047,7 @@ dependencies = [
  "eyre",
  "portable-pty",
  "tracing",
+ "windows",
 ]
 
 [[package]]
