@@ -18,9 +18,9 @@ use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_control::ControlResponse;
 use teamy_terminal_control::ControlServer;
 use teamy_terminal_control::InstanceInfo;
+use teamy_terminal_core::CursorPosition;
 use teamy_terminal_core::TerminalLimits;
 use teamy_terminal_core::TerminalSession;
-use teamy_terminal_core::CursorPosition;
 #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
 use teamy_terminal_core::TerminalSnapshot;
 #[cfg(feature = "dirty_rendering")]
@@ -48,6 +48,10 @@ use winit::event_loop::EventLoop;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
+#[cfg(windows)]
+use winit::platform::windows::WindowAttributesExtWindows;
+#[cfg(windows)]
+use winit::platform::windows::WindowExtWindows;
 use winit::window::Icon;
 use winit::window::Window;
 use winit::window::WindowId;
@@ -66,12 +70,13 @@ static PTY_DRAIN_LOGGED: Once = Once::new();
 static CONTROL_DRAIN_LOGGED: Once = Once::new();
 
 /// Run the standalone interactive Vulkan terminal.
-pub fn run(cancellation_token: &CancellationToken) -> Result<()> {
+pub fn run(cancellation_token: &CancellationToken, initially_hidden: bool) -> Result<()> {
     let event_loop = EventLoop::new().wrap_err("failed to create the terminal event loop")?;
     event_loop.set_control_flow(ControlFlow::WaitUntil(
         Instant::now() + EVENT_LOOP_POLL_INTERVAL,
     ));
-    let mut application = InteractiveApplication::new(cancellation_token.clone())?;
+    let mut application =
+        InteractiveApplication::new(cancellation_token.clone(), initially_hidden)?;
     event_loop
         .run_app(&mut application)
         .wrap_err("the terminal event loop failed")?;
@@ -125,10 +130,11 @@ struct InteractiveApplication {
     failure: Option<String>,
     control_server: Option<ControlServer>,
     control_calls: Option<Receiver<ControlCall>>,
+    initially_hidden: bool,
 }
 
 impl InteractiveApplication {
-    fn new(cancellation_token: CancellationToken) -> Result<Self> {
+    fn new(cancellation_token: CancellationToken, initially_hidden: bool) -> Result<Self> {
         let config = PtyConfig::interactive();
         let session = PtySession::spawn(&config)
             .wrap_err("failed to launch default-profile pwsh.exe through portable-pty")?;
@@ -152,6 +158,7 @@ impl InteractiveApplication {
             failure: None,
             control_server: None,
             control_calls: None,
+            initially_hidden,
         })
     }
 
@@ -175,13 +182,20 @@ impl InteractiveApplication {
             return Ok(());
         }
         let icon = load_window_icon()?;
-        let attributes = Window::default_attributes()
+        let mut attributes = Window::default_attributes()
             .with_title("Teamy Terminal — Vulkan")
             .with_inner_size(PhysicalSize::new(
                 INITIAL_WINDOW_WIDTH,
                 INITIAL_WINDOW_HEIGHT,
             ))
             .with_window_icon(Some(icon));
+        if self.initially_hidden {
+            attributes = attributes.with_visible(false);
+            #[cfg(windows)]
+            {
+                attributes = attributes.with_skip_taskbar(true);
+            }
+        }
         let window = event_loop
             .create_window(attributes)
             .wrap_err("failed to create the terminal window")?;
@@ -383,6 +397,32 @@ impl InteractiveApplication {
                     Err(eyre::eyre!("terminal window is not initialized"))
                 }
             }
+            ControlAction::Select {
+                anchor_column,
+                anchor_row,
+                focus_column,
+                focus_row,
+            } => {
+                self.terminal.begin_selection(CursorPosition {
+                    column: anchor_column,
+                    row: anchor_row,
+                });
+                self.terminal.update_selection(CursorPosition {
+                    column: focus_column,
+                    row: focus_row,
+                });
+                self.dirty = true;
+                Ok(ControlResponse::Ok)
+            }
+            ControlAction::CopySelection => self
+                .copy_selection_text()
+                .map(|text| ControlResponse::Content { text }),
+            ControlAction::Zoom { steps } => self
+                .adjust_font_steps(steps)
+                .map(|()| ControlResponse::Ok),
+            ControlAction::SetVisible { visible } => self
+                .set_window_visible(visible)
+                .map(|()| ControlResponse::Ok),
             ControlAction::Screenshot { path } => self
                 .write_screenshot(Path::new(&path))
                 .map(|()| ControlResponse::Ok),
@@ -499,6 +539,25 @@ impl InteractiveApplication {
         writer
             .write_image_data(&frame.pixels)
             .wrap_err("failed to write screenshot PNG pixels")?;
+        Ok(())
+    }
+
+    fn adjust_font_steps(&mut self, steps: i16) -> Result<()> {
+        let direction = f32::from(steps.signum());
+        for _ in 0..steps.unsigned_abs() {
+            self.adjust_font_size(direction)?;
+        }
+        Ok(())
+    }
+
+    fn set_window_visible(&self, visible: bool) -> Result<()> {
+        let window = self
+            .window
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("terminal window is not initialized"))?;
+        window.set_visible(visible);
+        #[cfg(windows)]
+        window.set_skip_taskbar(!visible);
         Ok(())
     }
 
@@ -723,16 +782,28 @@ impl InteractiveApplication {
     }
 
     fn copy_selection(&mut self) -> Result<bool> {
-        let Some(text) = self.terminal.selected_text() else {
-            return Ok(false);
-        };
+        self.terminal
+            .selected_text()
+            .map_or(Ok(false), |text| self.copy_selection_text_for(text).map(|()| true))
+    }
+
+    fn copy_selection_text(&mut self) -> Result<String> {
+        let text = self
+            .terminal
+            .selected_text()
+            .ok_or_else(|| eyre::eyre!("no active terminal selection to copy"))?;
+        self.copy_selection_text_for(text.clone())?;
+        Ok(text)
+    }
+
+    fn copy_selection_text_for(&mut self, text: String) -> Result<()> {
         let mut clipboard = Clipboard::new().wrap_err("failed to open the system clipboard")?;
         clipboard
             .set_text(text)
             .wrap_err("failed to copy terminal selection to the system clipboard")?;
         self.terminal.clear_selection();
         self.dirty = true;
-        Ok(true)
+        Ok(())
     }
 }
 

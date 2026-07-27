@@ -21,6 +21,8 @@ pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 pub const MAX_KEY_ACTIONS: usize = 4096;
 /// Maximum delay accepted in a scripted key sequence.
 pub const MAX_KEY_DELAY_MS: u16 = 5_000;
+/// Maximum number of font-size steps accepted by one control request.
+pub const MAX_ZOOM_STEPS: i16 = 64;
 const CONTROL_DIRECTORY_NAME: &str = "teamy-terminal";
 const INSTANCE_DIRECTORY_NAME: &str = "instances";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -146,6 +148,19 @@ pub enum ControlAction {
     Screenshot { path: String },
     /// Return the latest visible terminal grid as newline-separated text.
     GetContent,
+    /// Set a visible-grid selection by its bounded anchor and focus cells.
+    Select {
+        anchor_column: u16,
+        anchor_row: u16,
+        focus_column: u16,
+        focus_row: u16,
+    },
+    /// Copy the active selection to the system clipboard and return its text.
+    CopySelection,
+    /// Adjust the terminal font size by bounded one-pixel steps.
+    Zoom { steps: i16 },
+    /// Show or hide the native terminal window.
+    SetVisible { visible: bool },
     /// Close the terminal window and its shell.
     Close,
 }
@@ -337,6 +352,10 @@ pub fn invoke(instance: &InstanceInfo, action: ControlAction) -> Result<ControlR
                 .get_content()
                 .await
                 .map(|text| ControlResponse::Content { text }),
+            ControlAction::CopySelection => client
+                .copy_selection()
+                .await
+                .map(|text| ControlResponse::Content { text }),
             action => {
                 let result = match action {
                     ControlAction::Ping => client.ping().await,
@@ -348,8 +367,20 @@ pub fn invoke(instance: &InstanceInfo, action: ControlAction) -> Result<ControlR
                     }
                     ControlAction::Resize { width, height } => client.resize(width, height).await,
                     ControlAction::Screenshot { path } => client.screenshot(path).await,
+                    ControlAction::Select {
+                        anchor_column,
+                        anchor_row,
+                        focus_column,
+                        focus_row,
+                    } => client
+                        .select(anchor_column, anchor_row, focus_column, focus_row)
+                        .await,
+                    ControlAction::Zoom { steps } => client.zoom(steps).await,
+                    ControlAction::SetVisible { visible } => client.set_visible(visible).await,
                     ControlAction::Close => client.close().await,
-                    ControlAction::GetContent => unreachable!("get-content was handled above"),
+                    ControlAction::GetContent | ControlAction::CopySelection => {
+                        unreachable!("content actions were handled above")
+                    }
                 };
                 result.map(|()| ControlResponse::Ok)
             }
@@ -466,6 +497,9 @@ fn validate_action(action: &ControlAction) -> Result<()> {
         }
         ControlAction::SendKeys { keys } if keys.len() > MAX_KEY_ACTIONS => {
             eyre::bail!("control key sequence exceeds the {MAX_KEY_ACTIONS}-action limit")
+        }
+        ControlAction::Zoom { steps } if steps.unsigned_abs() > MAX_ZOOM_STEPS.unsigned_abs() => {
+            eyre::bail!("zoom request exceeds the {MAX_ZOOM_STEPS}-step control limit")
         }
         ControlAction::SendKeys { keys } => {
             for key in keys {
@@ -664,6 +698,16 @@ pub trait TerminalControl {
     async fn resize(&self, width: u32, height: u32) -> Result<(), String>;
     async fn screenshot(&self, path: String) -> Result<(), String>;
     async fn get_content(&self) -> Result<String, String>;
+    async fn select(
+        &self,
+        anchor_column: u16,
+        anchor_row: u16,
+        focus_column: u16,
+        focus_row: u16,
+    ) -> Result<(), String>;
+    async fn copy_selection(&self) -> Result<String, String>;
+    async fn zoom(&self, steps: i16) -> Result<(), String>;
+    async fn set_visible(&self, visible: bool) -> Result<(), String>;
     async fn close(&self) -> Result<(), String>;
 }
 
@@ -722,6 +766,42 @@ impl TerminalControl for TerminalControlService {
         }
     }
 
+    async fn select(
+        &self,
+        anchor_column: u16,
+        anchor_row: u16,
+        focus_column: u16,
+        focus_row: u16,
+    ) -> Result<(), String> {
+        self.dispatch(ControlAction::Select {
+            anchor_column,
+            anchor_row,
+            focus_column,
+            focus_row,
+        })
+        .await
+        .map(|_| ())
+    }
+
+    async fn copy_selection(&self) -> Result<String, String> {
+        match self.dispatch(ControlAction::CopySelection).await? {
+            ControlResponse::Content { text } => Ok(text),
+            ControlResponse::Ok => Err(String::from(
+                "Teamy Terminal returned an empty copy-selection response",
+            )),
+        }
+    }
+
+    async fn zoom(&self, steps: i16) -> Result<(), String> {
+        self.dispatch(ControlAction::Zoom { steps }).await.map(|_| ())
+    }
+
+    async fn set_visible(&self, visible: bool) -> Result<(), String> {
+        self.dispatch(ControlAction::SetVisible { visible })
+            .await
+            .map(|_| ())
+    }
+
     async fn close(&self) -> Result<(), String> {
         self.dispatch(ControlAction::Close).await.map(|_| ())
     }
@@ -739,6 +819,26 @@ mod tests {
             text: "x".repeat(MAX_INPUT_BYTES + 1),
         };
         assert!(validate_action(&action).is_err());
+    }
+
+    #[test]
+    fn zoom_requests_are_bounded() {
+        assert!(validate_action(&ControlAction::Zoom {
+            steps: MAX_ZOOM_STEPS,
+        })
+        .is_ok());
+        assert!(validate_action(&ControlAction::Zoom {
+            steps: -MAX_ZOOM_STEPS,
+        })
+        .is_ok());
+        assert!(validate_action(&ControlAction::Zoom {
+            steps: MAX_ZOOM_STEPS + 1,
+        })
+        .is_err());
+        assert!(validate_action(&ControlAction::Zoom {
+            steps: -(MAX_ZOOM_STEPS + 1),
+        })
+        .is_err());
     }
 
     #[test]

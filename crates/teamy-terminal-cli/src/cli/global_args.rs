@@ -36,4 +36,8 @@ pub struct GlobalArgs {
     #[facet(args::named)]
     #[arbitrary(default)]
     pub output_format: Option<OutputFormat>,
+
+    /// Create the interactive Vulkan window hidden and without a taskbar entry.
+    #[facet(args::named, default)]
+    pub hidden: bool,
 }

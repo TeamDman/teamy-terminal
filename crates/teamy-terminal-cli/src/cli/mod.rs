@@ -58,10 +58,11 @@ impl Cli {
     /// This function returns an error if cancellation has already been requested.
     pub fn invoke(self, cancellation_token: &CancellationToken) -> eyre::Result<CliOutput> {
         cancellation_token.bail_if_cancelled()?;
+        let initially_hidden = self.global_args.hidden;
         match self.command {
             Some(command) => command.invoke(),
             None => {
-                crate::interactive::run(cancellation_token)?;
+                crate::interactive::run(cancellation_token, initially_hidden)?;
                 Ok(CliOutput::none())
             }
         }

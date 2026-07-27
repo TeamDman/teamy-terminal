@@ -4,8 +4,10 @@ use crate::cli::invoke::paste::PasteArgs;
 use crate::cli::invoke::ping::PingArgs;
 use crate::cli::invoke::resize::ResizeArgs;
 use crate::cli::invoke::screenshot::ScreenshotArgs;
+use crate::cli::invoke::select::SelectArgs;
 use crate::cli::invoke::send_keys::SendKeysArgs;
 use crate::cli::invoke::send_text::SendTextArgs;
+use crate::cli::invoke::zoom::ZoomArgs;
 use crate::cli::output::CliOutput;
 use arbitrary::Arbitrary;
 use facet::Facet;
@@ -36,6 +38,16 @@ pub enum InvokeAction {
     Paste(PasteArgs),
     Resize(ResizeArgs),
     Screenshot(ScreenshotArgs),
+    /// Set the visible-grid selection without desktop mouse input.
+    Select(SelectArgs),
+    /// Copy the active selection and return the copied text.
+    CopySelection(GetContentArgs),
+    /// Adjust font size by bounded one-pixel steps.
+    Zoom(ZoomArgs),
+    /// Show the native window and restore its taskbar entry.
+    Show(GetContentArgs),
+    /// Hide the native window and remove its taskbar entry.
+    Hide(GetContentArgs),
     Close(CloseArgs),
     GetContent(GetContentArgs),
 }
@@ -65,6 +77,16 @@ impl InvokeAction {
             Self::Screenshot(args) => Ok(ControlAction::Screenshot {
                 path: args.resolve_path()?.to_string_lossy().into_owned(),
             }),
+            Self::Select(args) => Ok(ControlAction::Select {
+                anchor_column: args.anchor_column,
+                anchor_row: args.anchor_row,
+                focus_column: args.focus_column,
+                focus_row: args.focus_row,
+            }),
+            Self::CopySelection(_) => Ok(ControlAction::CopySelection),
+            Self::Zoom(args) => Ok(ControlAction::Zoom { steps: args.steps }),
+            Self::Show(_) => Ok(ControlAction::SetVisible { visible: true }),
+            Self::Hide(_) => Ok(ControlAction::SetVisible { visible: false }),
             Self::GetContent(_) => Ok(ControlAction::GetContent),
             Self::Close(_) => Ok(ControlAction::Close),
         }
