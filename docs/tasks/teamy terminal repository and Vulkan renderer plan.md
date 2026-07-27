@@ -39,6 +39,14 @@ in the later SFM slice. The control plane now also exposes
 `invoke copy-selection`, `invoke zoom`, `invoke show`, and `invoke hide` now
 cover the corresponding app-owned behavior; `--hidden` creates a Vulkan-backed
 window without initially presenting it or adding a taskbar tab.
+**Automation rendering decision:** `--hidden` is the supported near-term
+background mode. It still creates a native winit window, Vulkan surface, and
+swapchain so the production renderer path remains identical, but the window is
+not presented or registered in the taskbar until `invoke show`. This is not
+true headless GPU/Vulkan rendering: `VulkanRenderer` still requires a window
+surface, while `OffscreenFrame` and the `fontdue` terminal rasterization path
+are CPU-visible deterministic seams. A future no-window Vulkan device/image
+renderer remains a separate post-MVP slice.
 The `send-keys` grammar is intentionally explicit: every token is
 `down:<key>`, `up:<key>`, or `wait:<milliseconds>`. There are no implicit
 chords, delays, or text/numeric-key reinterpretations; the action keywords are
