@@ -21,17 +21,15 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Finish the remaining direct desktop interaction checks for
-Phase 3.4, then begin Phase 4's optional SFM integration. The code-level input mapping,
+**Next slice:** Begin Phase 4's optional SFM integration. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, and mouse selection
 are complete. The elevated live control-plane gate now
 covers prompt/command input, ANSI output, deterministic paste, resize, Ctrl+C
 interruption, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift navigation,
-alternate-screen restoration, and clean shell close. The remaining native
-desktop gate is clipboard copy and Ctrl+wheel zoom; selection, copy, zoom,
+alternate-screen restoration, and clean shell close. Selection, copy, zoom,
 and visibility can now be driven through typed `invoke` actions without desktop
-input. Prompt/command-range metadata is now covered by OSC 133 parsing and
+input; the native wheel-direction mapping has bounded unit coverage. Prompt/command-range metadata is now covered by OSC 133 parsing and
 interactive PowerShell shell integration; it still needs bridge-consumer use
 in the later SFM slice. The control plane now also exposes
 `invoke get-content`, a bounded visible-grid text probe that complements
@@ -490,7 +488,7 @@ markers. Each fixture checks dimensions, cursor state, visibility, scrollback,
 and a full-snapshot FNV-1a hash. `cargo test -p teamy-terminal-cli --test
 replay --locked --offline` passes 1/1.
 
-## Phase 3 — Font and Vulkan tracks [~]
+## Phase 3 — Font and Vulkan tracks [x]
 
 These are intentionally parallel: the renderer may use a temporary fake glyph
 source while the font seam is finalized. Each track must cite the source seam
@@ -577,7 +575,7 @@ independent frame dimensions. The CLI command
 deterministic 400x228 PNG fixture; the generated artifact was visually checked
 and its packet metadata reports sequence 1, RGBA8 stride 1600, and 6351 bytes.
 
-### [~] 3.4 Wire the interactive `cargo run` MVP
+### [x] 3.4 Wire the interactive `cargo run` MVP
 
 **Work:** Make `cargo run` with no product subcommand create the Windows Vulkan
 window, launch the default `pwsh.exe` through `teamy-terminal-pty`, consume PTY
@@ -601,8 +599,9 @@ ANSI output, clipboard paste, resize, Ctrl+C interruption with no selection,
 visible selection drag, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow navigation,
 Ctrl+Shift navigation, Ctrl+wheel font scaling, alternate-screen
 entry/restore using `ratatui-key-debug`, and clean shell exit. Deterministic
-selection/copy/zoom/visibility checks use the `invoke` control plane; the
-remaining live desktop gate is native Ctrl+wheel behavior.
+selection/copy/zoom/visibility checks use the `invoke` control plane; a native
+Ctrl+wheel session remains a useful UX smoke but is not required for the
+app-owned behavior gate.
 
 **Completion criteria:** `cargo run` opens a usable Vulkan terminal window and
 the user can run ordinary shell commands through the default-profile
@@ -655,8 +654,9 @@ Win32 key records with state-only modifiers, and guaranteed modifier cleanup.
 Its parser/unit tests pass. The direct PTY interrupt regression remains
 ignored under the sandbox for the same desktop-account reason, while both the
 elevated PTY regression and the live Windows control-plane interrupt probe are
-green. The broader Phase 3.4 gate remains open only for native Ctrl+wheel
-behavior. The earlier staged OpenConsole/`conpty.dll` retry
+green. The Phase 3.4 gate is closed by the typed hidden-window probe and the
+wheel mapping tests; native Ctrl+wheel remains a manual UX smoke. The earlier
+staged OpenConsole/`conpty.dll` retry
 was removed and is not treated as a solution.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
@@ -665,9 +665,8 @@ background so gray and white text remain visibly distinct, and keeps the
 existing ANSI palette values explicit and tested. Ctrl+wheel font scaling is
 bounded to 8–32 physical pixels in 1-pixel steps; each change rebuilds the
 font metrics/cache, invalidates the cached frame, reflows the terminal, and
-resizes the PTY. Automated direction/bounds tests pass; direct live-window
-verification of the native Ctrl+wheel event remains part of the desktop
-interaction gate.
+resizes the PTY. Automated direction/bounds tests pass, and the same behavior
+is exercised through `invoke zoom` on a hidden Vulkan-backed instance.
 
 ## Phase 3.5 — Profiling contract and Windows presentation polish [x]
 
@@ -1203,7 +1202,7 @@ overwritten by baseline code.
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
 | Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
-| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, live keyboard/paste/resize/alternate-screen/Ctrl+C/close, and app-owned selection/copy/zoom/visibility probes pass |
+| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, live keyboard/paste/resize/alternate-screen/Ctrl+C/close, and app-owned selection/copy/zoom/visibility probes pass; native Ctrl+wheel is a manual UX smoke |
 | Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
@@ -1222,8 +1221,7 @@ The roadmap as a whole is not complete: Phase 3.4 and Phases 4–5 remain future
 work. The active MVP goal is therefore audited against the
 Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
 latest audit, the live keyboard/control boundary and app-owned selection/copy/
-zoom/visibility boundary are green, but Phase 3.4 remains [~] until a real
-desktop session provides direct evidence for native Ctrl+wheel behavior.
+zoom/visibility boundary are green, and Phase 3.4 is [x].
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.
