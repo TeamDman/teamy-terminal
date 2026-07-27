@@ -5,7 +5,8 @@ use figue::{self as args};
 /// Arguments for `teamy-terminal invoke <id> send-keys`.
 #[derive(Arbitrary, Debug, Facet, PartialEq, Eq)]
 pub struct SendKeysArgs {
-    /// Text or a named key/chord such as `enter`, `left`, or `ctrl+c`.
+    /// Explicit actions such as `down:ctrl wait:10 down:c wait:10 up:c
+    /// wait:10 up:ctrl`. Use `send-text` for raw text.
     #[facet(args::positional)]
     pub spec: String,
 }

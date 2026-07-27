@@ -19,6 +19,8 @@ pub const PROTOCOL_VERSION: u32 = 1;
 pub const MAX_INPUT_BYTES: usize = 64 * 1024;
 /// Maximum number of key actions accepted through one control request.
 pub const MAX_KEY_ACTIONS: usize = 4096;
+/// Maximum delay accepted in a scripted key sequence.
+pub const MAX_KEY_DELAY_MS: u16 = 5_000;
 const CONTROL_DIRECTORY_NAME: &str = "teamy-terminal";
 const INSTANCE_DIRECTORY_NAME: &str = "instances";
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -48,6 +50,30 @@ impl InstanceInfo {
             endpoint: local_endpoint(pid),
         }
     }
+}
+
+/// A physical key that can be pressed or released by a scripted key sequence.
+#[derive(Clone, Debug, Facet, PartialEq, Eq)]
+#[repr(u8)]
+pub enum ControlPhysicalKey {
+    /// A single Unicode character key.
+    Character { text: String },
+    Ctrl,
+    Shift,
+    Alt,
+    Enter,
+    Tab,
+    Backspace,
+    Escape,
+    ArrowUp,
+    ArrowDown,
+    ArrowRight,
+    ArrowLeft,
+    Home,
+    End,
+    Delete,
+    PageUp,
+    PageDown,
 }
 
 /// A key action sent to the control service.
@@ -96,6 +122,13 @@ pub enum ControlKey {
     Paste {
         text: String,
     },
+    /// Press one physical key. Scripted sequences always release outstanding
+    /// keys when the request finishes.
+    KeyDown { key: ControlPhysicalKey },
+    /// Release one physical key.
+    KeyUp { key: ControlPhysicalKey },
+    /// Pause a scripted key sequence for a bounded duration.
+    Delay { milliseconds: u16 },
 }
 
 /// An action sent to the owning application.
@@ -136,76 +169,89 @@ pub struct ControlCall {
     pub responder: tokio::sync::oneshot::Sender<Result<ControlResponse, String>>,
 }
 
-/// Parse the compact key syntax used by `teamy-terminal invoke ... send-keys`.
+/// Parse the explicit key-action syntax used by
+/// `teamy-terminal invoke ... send-keys`.
 ///
-/// A recognized chord such as `ctrl+c` becomes one control action. Any other
-/// string is treated as ordinary Unicode text, so `echo hi` does what a user
-/// naturally expects.
+/// Every token must be one of `down:<key>`, `up:<key>`, or
+/// `wait:<milliseconds>`. Raw text belongs to `send-text`; there are no
+/// implicit chords, delays, or numeric-key special cases in this grammar.
 ///
 /// # Errors
 ///
 /// Returns an error when the sequence exceeds the control-plane action bound.
 pub fn parse_key_sequence(spec: &str) -> Result<Vec<ControlKey>> {
-    if let Some(key) = parse_named_key(spec.trim()) {
-        return Ok(vec![key]);
+    let tokens: Vec<_> = spec.split_whitespace().collect();
+    if tokens.is_empty() {
+        eyre::bail!(
+            "send-keys requires explicit actions: down:<key>, up:<key>, or wait:<milliseconds>"
+        );
     }
-    let keys: Vec<_> = spec
-        .chars()
-        .map(|character| ControlKey::Character {
-            text: character.to_string(),
-        })
-        .collect();
-    if keys.len() > MAX_KEY_ACTIONS {
+
+    let mut actions = Vec::with_capacity(tokens.len());
+    for token in tokens {
+        let (operation, value) = token.split_once(':').ok_or_else(|| {
+            eyre::eyre!(
+                "invalid send-keys action {token:?}; use down:<key>, up:<key>, or wait:<milliseconds>"
+            )
+        })?;
+        if value.is_empty() {
+            eyre::bail!("send-keys action {token:?} has an empty value")
+        }
+        match operation {
+            "down" | "up" => {
+                let key = parse_physical_key(value)
+                    .ok_or_else(|| eyre::eyre!("unknown physical key: {value}"))?;
+                actions.push(if operation == "down" {
+                    ControlKey::KeyDown { key }
+                } else {
+                    ControlKey::KeyUp { key }
+                });
+            }
+            "wait" => {
+                let milliseconds = value.parse::<u16>().map_err(|_| {
+                    eyre::eyre!("invalid send-keys wait duration: {value:?}")
+                })?;
+                if milliseconds > MAX_KEY_DELAY_MS {
+                    eyre::bail!(
+                        "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
+                    );
+                }
+                actions.push(ControlKey::Delay { milliseconds });
+            }
+            _ => eyre::bail!(
+                "unknown send-keys action {operation:?}; use down:<key>, up:<key>, or wait:<milliseconds>"
+            ),
+        }
+    }
+    if actions.len() > MAX_KEY_ACTIONS {
         eyre::bail!("control key sequence exceeds the {MAX_KEY_ACTIONS}-action limit")
     }
-    Ok(keys)
+    Ok(actions)
 }
 
-fn parse_named_key(spec: &str) -> Option<ControlKey> {
+fn parse_physical_key(spec: &str) -> Option<ControlPhysicalKey> {
     let normalized = spec.to_ascii_lowercase();
     let key = match normalized.as_str() {
-        "enter" => ControlKey::Enter,
-        "tab" => ControlKey::Tab,
-        "backspace" => ControlKey::Backspace,
-        "escape" | "esc" => ControlKey::Escape,
-        "up" | "arrowup" => ControlKey::ArrowUp,
-        "down" | "arrowdown" => ControlKey::ArrowDown,
-        "right" | "arrowright" => ControlKey::ArrowRight,
-        "left" | "arrowleft" => ControlKey::ArrowLeft,
-        "home" => ControlKey::Home,
-        "end" => ControlKey::End,
-        "delete" | "del" => ControlKey::Delete,
-        "pageup" => ControlKey::PageUp,
-        "pagedown" => ControlKey::PageDown,
-        "ctrl+a" => ControlKey::CtrlA,
-        "ctrl+arrowup" | "ctrl+up" => ControlKey::CtrlArrowUp,
-        "ctrl+arrowdown" | "ctrl+down" => ControlKey::CtrlArrowDown,
-        "ctrl+arrowright" | "ctrl+right" => ControlKey::CtrlArrowRight,
-        "ctrl+arrowleft" | "ctrl+left" => ControlKey::CtrlArrowLeft,
-        "ctrl+home" => ControlKey::CtrlHome,
-        "ctrl+end" => ControlKey::CtrlEnd,
-        "ctrl+delete" | "ctrl+del" => ControlKey::CtrlDelete,
-        "ctrl+pageup" => ControlKey::CtrlPageUp,
-        "ctrl+pagedown" => ControlKey::CtrlPageDown,
-        "ctrl+c" => ControlKey::CtrlC,
-        "ctrl+d" => ControlKey::CtrlD,
-        "ctrl+z" => ControlKey::CtrlZ,
-        "ctrl+l" => ControlKey::CtrlL,
-        _ => {
-            let character = normalized.strip_prefix("ctrl+")?;
-            let mut characters = character.chars();
-            let character = characters.next()?;
-            if characters.next().is_some() {
-                return None;
-            }
-            if character.is_ascii_lowercase()
-                || matches!(character, '@' | ' ' | '[' | '\\' | ']' | '^' | '_' | '?')
-            {
-                ControlKey::CtrlCharacter { character }
-            } else {
-                return None;
-            }
-        }
+        "ctrl" | "control" => ControlPhysicalKey::Ctrl,
+        "shift" => ControlPhysicalKey::Shift,
+        "alt" => ControlPhysicalKey::Alt,
+        "enter" => ControlPhysicalKey::Enter,
+        "tab" => ControlPhysicalKey::Tab,
+        "backspace" => ControlPhysicalKey::Backspace,
+        "escape" | "esc" => ControlPhysicalKey::Escape,
+        "up" | "arrowup" => ControlPhysicalKey::ArrowUp,
+        "down" | "arrowdown" => ControlPhysicalKey::ArrowDown,
+        "right" | "arrowright" => ControlPhysicalKey::ArrowRight,
+        "left" | "arrowleft" => ControlPhysicalKey::ArrowLeft,
+        "home" => ControlPhysicalKey::Home,
+        "end" => ControlPhysicalKey::End,
+        "delete" | "del" => ControlPhysicalKey::Delete,
+        "pageup" => ControlPhysicalKey::PageUp,
+        "pagedown" => ControlPhysicalKey::PageDown,
+        _ if spec.chars().count() == 1 => ControlPhysicalKey::Character {
+            text: spec.to_owned(),
+        },
+        _ => return None,
     };
     Some(key)
 }
@@ -425,6 +471,25 @@ fn validate_action(action: &ControlAction) -> Result<()> {
             for key in keys {
                 let text = match key {
                     ControlKey::Character { text } | ControlKey::Paste { text } => text,
+                    ControlKey::KeyDown { key } | ControlKey::KeyUp { key } => match key {
+                        ControlPhysicalKey::Character { text } => {
+                            if text.chars().count() != 1 {
+                                eyre::bail!(
+                                    "physical character key must contain one Unicode scalar"
+                                );
+                            }
+                            text
+                        }
+                        _ => continue,
+                    },
+                    ControlKey::Delay { milliseconds } => {
+                        if *milliseconds > MAX_KEY_DELAY_MS {
+                            eyre::bail!(
+                                "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
+                            );
+                        }
+                        continue;
+                    }
                     _ => continue,
                 };
                 if text.len() > MAX_INPUT_BYTES {
@@ -438,6 +503,38 @@ fn validate_action(action: &ControlAction) -> Result<()> {
         _ => {}
     }
     Ok(())
+}
+
+fn physical_key_to_wire(key: &ControlPhysicalKey) -> String {
+    match key {
+        ControlPhysicalKey::Character { text } => format!("character:{text}"),
+        ControlPhysicalKey::Ctrl => "ctrl".to_owned(),
+        ControlPhysicalKey::Shift => "shift".to_owned(),
+        ControlPhysicalKey::Alt => "alt".to_owned(),
+        ControlPhysicalKey::Enter => "enter".to_owned(),
+        ControlPhysicalKey::Tab => "tab".to_owned(),
+        ControlPhysicalKey::Backspace => "backspace".to_owned(),
+        ControlPhysicalKey::Escape => "escape".to_owned(),
+        ControlPhysicalKey::ArrowUp => "arrow-up".to_owned(),
+        ControlPhysicalKey::ArrowDown => "arrow-down".to_owned(),
+        ControlPhysicalKey::ArrowRight => "arrow-right".to_owned(),
+        ControlPhysicalKey::ArrowLeft => "arrow-left".to_owned(),
+        ControlPhysicalKey::Home => "home".to_owned(),
+        ControlPhysicalKey::End => "end".to_owned(),
+        ControlPhysicalKey::Delete => "delete".to_owned(),
+        ControlPhysicalKey::PageUp => "page-up".to_owned(),
+        ControlPhysicalKey::PageDown => "page-down".to_owned(),
+    }
+}
+
+fn physical_key_from_wire(wire: &str) -> Result<ControlPhysicalKey, String> {
+    if let Some(text) = wire.strip_prefix("character:") {
+        return Ok(ControlPhysicalKey::Character {
+            text: text.to_owned(),
+        });
+    }
+    parse_physical_key(wire)
+        .ok_or_else(|| format!("unknown Teamy Terminal physical key wire value: {wire}"))
 }
 
 fn control_key_to_wire(key: &ControlKey) -> String {
@@ -472,6 +569,9 @@ fn control_key_to_wire(key: &ControlKey) -> String {
         ControlKey::CtrlZ => "ctrl-z".to_owned(),
         ControlKey::CtrlL => "ctrl-l".to_owned(),
         ControlKey::Paste { text } => format!("paste:{text}"),
+        ControlKey::KeyDown { key } => format!("key-down:{}", physical_key_to_wire(key)),
+        ControlKey::KeyUp { key } => format!("key-up:{}", physical_key_to_wire(key)),
+        ControlKey::Delay { milliseconds } => format!("delay:{milliseconds}"),
     }
 }
 
@@ -485,6 +585,27 @@ fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
         return Ok(ControlKey::Paste {
             text: text.to_owned(),
         });
+    }
+    if let Some(key) = wire.strip_prefix("key-down:") {
+        return Ok(ControlKey::KeyDown {
+            key: physical_key_from_wire(key)?,
+        });
+    }
+    if let Some(key) = wire.strip_prefix("key-up:") {
+        return Ok(ControlKey::KeyUp {
+            key: physical_key_from_wire(key)?,
+        });
+    }
+    if let Some(milliseconds) = wire.strip_prefix("delay:") {
+        let milliseconds = milliseconds
+            .parse::<u16>()
+            .map_err(|_| format!("invalid Teamy Terminal key delay wire value: {wire}"))?;
+        if milliseconds > MAX_KEY_DELAY_MS {
+            return Err(format!(
+                "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
+            ));
+        }
+        return Ok(ControlKey::Delay { milliseconds });
     }
     match wire.as_str() {
         "enter" => Ok(ControlKey::Enter),
@@ -610,6 +731,8 @@ impl TerminalControl for TerminalControlService {
 mod tests {
     use super::*;
 
+    static CONTROL_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn request_limits_reject_unbounded_text() {
         let action = ControlAction::SendText {
@@ -630,69 +753,124 @@ mod tests {
     }
 
     #[test]
-    fn key_sequence_parser_distinguishes_text_and_chords() {
+    fn key_sequence_parser_requires_explicit_actions() {
+        let ctrl_c = vec![
+            ControlKey::KeyDown {
+                key: ControlPhysicalKey::Ctrl,
+            },
+            ControlKey::Delay { milliseconds: 10 },
+            ControlKey::KeyDown {
+                key: ControlPhysicalKey::Character {
+                    text: "c".to_owned(),
+                },
+            },
+            ControlKey::Delay { milliseconds: 10 },
+            ControlKey::KeyUp {
+                key: ControlPhysicalKey::Character {
+                    text: "c".to_owned(),
+                },
+            },
+            ControlKey::Delay { milliseconds: 10 },
+            ControlKey::KeyUp {
+                key: ControlPhysicalKey::Ctrl,
+            },
+        ];
         assert_eq!(
-            parse_key_sequence("echo hi").expect("text should parse"),
+            parse_key_sequence("down:ctrl wait:10 down:c wait:10 up:c wait:10 up:ctrl")
+                .expect("explicit Ctrl+C should parse"),
+            ctrl_c
+        );
+        assert_eq!(
+            parse_key_sequence("down:1 wait:1 up:1")
+                .expect("explicit numeric key should parse"),
             vec![
-                ControlKey::Character {
-                    text: "e".to_owned()
+                ControlKey::KeyDown {
+                    key: ControlPhysicalKey::Character {
+                        text: "1".to_owned(),
+                    },
                 },
-                ControlKey::Character {
-                    text: "c".to_owned()
-                },
-                ControlKey::Character {
-                    text: "h".to_owned()
-                },
-                ControlKey::Character {
-                    text: "o".to_owned()
-                },
-                ControlKey::Character {
-                    text: " ".to_owned()
-                },
-                ControlKey::Character {
-                    text: "h".to_owned()
-                },
-                ControlKey::Character {
-                    text: "i".to_owned()
+                ControlKey::Delay { milliseconds: 1 },
+                ControlKey::KeyUp {
+                    key: ControlPhysicalKey::Character {
+                        text: "1".to_owned(),
+                    },
                 },
             ]
         );
         assert_eq!(
-            parse_key_sequence("ctrl+a").expect("Ctrl+A chord should parse"),
-            vec![ControlKey::CtrlA]
-        );
-        assert_eq!(
-            parse_key_sequence("ctrl+left").expect("Ctrl+Left chord should parse"),
-            vec![ControlKey::CtrlArrowLeft]
-        );
-        assert_eq!(
-            parse_key_sequence("ctrl+delete").expect("Ctrl+Delete chord should parse"),
-            vec![ControlKey::CtrlDelete]
-        );
-        assert_eq!(
-            parse_key_sequence("ctrl+b").expect("Ctrl+B chord should parse"),
-            vec![ControlKey::CtrlCharacter { character: 'b' }]
+            parse_key_sequence("down:a up:a").expect("adjacent actions should parse"),
+            vec![
+                ControlKey::KeyDown {
+                    key: ControlPhysicalKey::Character {
+                        text: "a".to_owned(),
+                    },
+                },
+                ControlKey::KeyUp {
+                    key: ControlPhysicalKey::Character {
+                        text: "a".to_owned(),
+                    },
+                },
+            ]
         );
         assert_eq!(
             control_key_to_wire(&ControlKey::CtrlCharacter { character: 'b' }),
             "ctrl-b"
         );
         assert_eq!(
-            control_key_from_wire("ctrl-b".to_owned()).expect("Ctrl+B wire value should parse"),
+            control_key_from_wire("ctrl-b".to_owned())
+                .expect("Ctrl+B wire value should parse"),
             ControlKey::CtrlCharacter { character: 'b' }
         );
+
+        for invalid in [
+            "123",
+            "ctrl+c",
+            "+1 10 -1",
+            "down:c 10 up:c",
+            "enter",
+            "DOWN:c",
+            "down:C WAIT:1 up:C",
+        ] {
+            assert!(
+                parse_key_sequence(invalid).is_err(),
+                "implicit syntax should be rejected: {invalid}"
+            );
+        }
+        assert!(parse_key_sequence("").is_err());
+        assert!(parse_key_sequence("wait:5001").is_err());
+        assert!(parse_key_sequence("hold:c").is_err());
+        assert!(parse_key_sequence("down:").is_err());
+        assert!(parse_key_sequence("wait:one").is_err());
+    }
+
+    #[test]
+    fn wire_format_keeps_numeric_key_actions_distinct_from_delays() {
+        let numeric_key_down = ControlKey::KeyDown {
+            key: ControlPhysicalKey::Character {
+                text: "1".to_owned(),
+            },
+        };
         assert_eq!(
-            parse_key_sequence("ctrl+c").expect("control chord should parse"),
-            vec![ControlKey::CtrlC]
+            control_key_to_wire(&numeric_key_down),
+            "key-down:character:1"
         );
         assert_eq!(
-            parse_key_sequence("ENTER").expect("named key should parse"),
-            vec![ControlKey::Enter]
+            control_key_from_wire("key-down:character:1".to_owned())
+                .expect("numeric key wire value should parse"),
+            numeric_key_down
+        );
+        assert_eq!(
+            control_key_from_wire("delay:1".to_owned())
+                .expect("delay wire value should parse"),
+            ControlKey::Delay { milliseconds: 1 }
         );
     }
 
     #[test]
     fn vox_control_round_trip_reaches_application_channel() {
+        let _guard = CONTROL_TEST_LOCK
+            .lock()
+            .expect("control test lock should not be poisoned");
         let instance = InstanceInfo::current("control-test");
         let (calls, receiver) = std::sync::mpsc::sync_channel(1);
         let server = ControlServer::start(&instance, calls).expect("control server should start");
@@ -708,6 +886,35 @@ mod tests {
         assert_eq!(
             client.join().expect("client thread should join").unwrap(),
             ControlResponse::Ok
+        );
+        drop(server);
+    }
+
+    #[test]
+    fn vox_get_content_round_trip_returns_visible_text() {
+        let _guard = CONTROL_TEST_LOCK
+            .lock()
+            .expect("control test lock should not be poisoned");
+        let instance = InstanceInfo::current("content-test");
+        let (calls, receiver) = std::sync::mpsc::sync_channel(1);
+        let server = ControlServer::start(&instance, calls).expect("control server should start");
+        let client_instance = instance.clone();
+        let client =
+            std::thread::spawn(move || invoke(&client_instance, ControlAction::GetContent));
+        let call = receiver
+            .recv_timeout(Duration::from_secs(5))
+            .expect("Vox should deliver the get-content request");
+        assert_eq!(call.operation, ControlAction::GetContent);
+        call.responder
+            .send(Ok(ControlResponse::Content {
+                text: String::from("visible text"),
+            }))
+            .expect("get-content request should still be awaiting a response");
+        assert_eq!(
+            client.join().expect("client thread should join").unwrap(),
+            ControlResponse::Content {
+                text: String::from("visible text")
+            }
         );
         drop(server);
     }

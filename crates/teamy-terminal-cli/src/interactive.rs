@@ -14,6 +14,7 @@ use teamy_cancellation::CancellationToken;
 use teamy_terminal_control::ControlAction;
 use teamy_terminal_control::ControlCall;
 use teamy_terminal_control::ControlKey;
+use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_control::ControlResponse;
 use teamy_terminal_control::ControlServer;
 use teamy_terminal_control::InstanceInfo;
@@ -295,7 +296,15 @@ impl InteractiveApplication {
             match event {
                 PtyEvent::Output(bytes) => {
                     drained_bytes = drained_bytes.saturating_add(bytes.len());
+                    let win32_input_mode_before = self.terminal.win32_input_mode_enabled();
                     self.terminal.process_bytes(&bytes);
+                    let win32_input_mode_after = self.terminal.win32_input_mode_enabled();
+                    if win32_input_mode_before != win32_input_mode_after {
+                        tracing::info!(
+                            enabled = win32_input_mode_after,
+                            "ConPTY Win32 input mode changed"
+                        );
+                    }
                     let responses: Vec<Vec<u8>> = self.terminal.drain_responses().collect();
                     if let Some(session) = self.session.as_ref() {
                         for response in responses {
@@ -359,10 +368,7 @@ impl InteractiveApplication {
         let result = match operation {
             ControlAction::Ping => Ok(ControlResponse::Ok),
             ControlAction::SendText { text } => self
-                .session
-                .as_ref()
-                .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))
-                .and_then(|session| session.write_input(text.as_bytes()))
+                .write_control_text(&text)
                 .map(|()| ControlResponse::Ok),
             ControlAction::SendKeys { keys } => self
                 .write_control_keys(&keys)
@@ -407,15 +413,70 @@ impl InteractiveApplication {
             .as_ref()
             .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))?;
         let win32_input_mode = self.terminal.win32_input_mode_enabled();
-        for key in keys {
-            let bytes = if win32_input_mode {
-                win32_control_key_bytes(key)?
-            } else {
-                control_key_bytes(key)?
-            };
-            session.write_input(&bytes)?;
-        }
-        Ok(())
+        let mut pressed = Vec::new();
+        tracing::debug!(
+            win32_input_mode,
+            key_count = keys.len(),
+            "encoding control-plane key actions"
+        );
+        let result = (|| {
+            for key in keys {
+                match key {
+                    ControlKey::KeyDown { key } => {
+                        if !pressed.contains(key) {
+                            pressed.push(key.clone());
+                        }
+                        let bytes = if win32_input_mode {
+                            win32_physical_key_event_bytes(key, true, &pressed)?
+                        } else {
+                            legacy_physical_key_bytes(key, true, &pressed)?
+                        };
+                        if !bytes.is_empty() {
+                            session.write_input(&bytes)?;
+                        }
+                    }
+                    ControlKey::KeyUp { key } => {
+                        let bytes = if win32_input_mode {
+                            win32_physical_key_event_bytes(key, false, &pressed)?
+                        } else {
+                            legacy_physical_key_bytes(key, false, &pressed)?
+                        };
+                        if !bytes.is_empty() {
+                            session.write_input(&bytes)?;
+                        }
+                        pressed.retain(|pressed_key| pressed_key != key);
+                    }
+                    ControlKey::Delay { milliseconds } => {
+                        std::thread::sleep(Duration::from_millis(u64::from(*milliseconds)));
+                    }
+                    _ => {
+                        let bytes = if win32_input_mode {
+                            win32_control_key_bytes(key)?
+                        } else {
+                            control_key_bytes(key)?
+                        };
+                        session.write_input(&bytes)?;
+                    }
+                }
+            }
+            Ok(())
+        })();
+
+        let release_result = release_pressed_keys(session, win32_input_mode, &mut pressed);
+        result.and(release_result)
+    }
+
+    fn write_control_text(&self, text: &str) -> Result<()> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))?;
+        let bytes = if self.terminal.win32_input_mode_enabled() {
+            win32_text_bytes(text)
+        } else {
+            text.as_bytes().to_vec()
+        };
+        session.write_input(&bytes)
     }
 
     fn write_screenshot(&mut self, path: &Path) -> Result<()> {
@@ -612,11 +673,8 @@ impl InteractiveApplication {
                 }
             }
         }
-        let bytes = match terminal_input(
-            event,
-            self.modifiers,
-            self.terminal.win32_input_mode_enabled(),
-        ) {
+        let win32_input_mode = self.terminal.win32_input_mode_enabled();
+        let bytes = match terminal_input(event, self.modifiers, win32_input_mode) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return,
             Err(error) => {
@@ -624,6 +682,16 @@ impl InteractiveApplication {
                 return;
             }
         };
+        if self.modifiers.control_key() {
+            tracing::info!(
+                key = ?event.logical_key,
+                text = ?event.text,
+                modifiers = ?self.modifiers,
+                win32_input_mode,
+                bytes = ?bytes,
+                "encoded Ctrl-modified window key"
+            );
+        }
         if let Some(session) = self.session.as_ref()
             && let Err(error) = session.write_input(&bytes)
         {
@@ -944,6 +1012,7 @@ fn terminal_input(
 }
 
 const LEFT_ALT_PRESSED: u32 = 0x0002;
+const RIGHT_ALT_PRESSED: u32 = 0x0001;
 const LEFT_CTRL_PRESSED: u32 = 0x0008;
 const SHIFT_PRESSED: u32 = 0x0010;
 const ENHANCED_KEY: u32 = 0x0100;
@@ -985,9 +1054,188 @@ fn win32_key_press(
     bytes
 }
 
+fn win32_text_bytes(text: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(text.len().saturating_mul(20));
+    for character in text.chars() {
+        if matches!(character, '\r' | '\n') {
+            bytes.extend(win32_key_press(0x0D, 0x1C, u32::from('\r'), 0));
+            continue;
+        }
+        if character == '\t' {
+            bytes.extend(win32_key_press(0x09, 0x0F, u32::from('\t'), 0));
+            continue;
+        }
+        let Some((virtual_key, scan_code)) = ascii_key_location(character) else {
+            bytes.extend(character.to_string().as_bytes());
+            continue;
+        };
+        let control_state = u32::from(character.is_ascii_uppercase()) * SHIFT_PRESSED;
+        bytes.extend(win32_key_press(
+            virtual_key,
+            scan_code,
+            u32::from(character),
+            control_state,
+        ));
+    }
+    bytes
+}
+
+fn release_pressed_keys(
+    session: &PtySession,
+    win32_input_mode: bool,
+    pressed: &mut Vec<ControlPhysicalKey>,
+) -> Result<()> {
+    while let Some(key) = pressed.pop() {
+        let bytes = if win32_input_mode {
+            win32_physical_key_event_bytes(&key, false, pressed)?
+        } else {
+            legacy_physical_key_bytes(&key, false, pressed)?
+        };
+        if !bytes.is_empty() {
+            session.write_input(&bytes)?;
+        }
+    }
+    Ok(())
+}
+
+fn physical_modifier_flags(key: &ControlPhysicalKey) -> u32 {
+    match key {
+        // ConPTY's Win32 input path distinguishes the left and right control
+        // keys.  The keyboard event generated for Ctrl+C is the left-control
+        // `WriteCtrlKey` form used by OpenConsole, so keep scripted Ctrl
+        // state consistent with that form instead of claiming both keys.
+        ControlPhysicalKey::Ctrl => LEFT_CTRL_PRESSED,
+        ControlPhysicalKey::Shift => SHIFT_PRESSED,
+        ControlPhysicalKey::Alt => LEFT_ALT_PRESSED | RIGHT_ALT_PRESSED,
+        _ => 0,
+    }
+}
+
+fn physical_control_state(
+    key: &ControlPhysicalKey,
+    key_down: bool,
+    pressed: &[ControlPhysicalKey],
+) -> u32 {
+    let mut state = pressed.iter().fold(0, |state, pressed_key| {
+        state | physical_modifier_flags(pressed_key)
+    });
+    let flags = physical_modifier_flags(key);
+    if key_down {
+        state |= flags;
+    } else {
+        state &= !flags;
+    }
+    state
+}
+
+fn win32_physical_key_event_bytes(
+    key: &ControlPhysicalKey,
+    key_down: bool,
+    pressed: &[ControlPhysicalKey],
+) -> Result<Vec<u8>> {
+    // Winit reports modifier transitions through ModifiersChanged rather than
+    // as terminal key events. ConPTY's Win32 input mode likewise expects the
+    // modifier state on the following key record, so track these actions in
+    // `pressed` without emitting standalone modifier records.
+    if matches!(
+        key,
+        ControlPhysicalKey::Ctrl
+            | ControlPhysicalKey::Shift
+            | ControlPhysicalKey::Alt
+    ) {
+        return Ok(Vec::new());
+    }
+    let control_state = physical_control_state(key, key_down, pressed);
+    let (virtual_key, scan_code, mut unicode_character, enhanced) = match key {
+        ControlPhysicalKey::Character { text } => {
+            let mut characters = text.chars();
+            let character = characters
+                .next()
+                .ok_or_else(|| eyre::eyre!("physical character key cannot be empty"))?;
+            if characters.next().is_some() {
+                eyre::bail!("physical character key must contain one Unicode scalar")
+            }
+            let (virtual_key, scan_code) = ascii_key_location(character).unwrap_or((0, 0));
+            (virtual_key, scan_code, u32::from(character), false)
+        }
+        ControlPhysicalKey::Ctrl => (0x11, 0x1D, 0, false),
+        ControlPhysicalKey::Shift => (0x10, 0x2A, 0, false),
+        ControlPhysicalKey::Alt => (0x12, 0x38, 0, false),
+        ControlPhysicalKey::Enter => (0x0D, 0x1C, u32::from('\r'), false),
+        ControlPhysicalKey::Tab => (0x09, 0x0F, u32::from('\t'), false),
+        ControlPhysicalKey::Backspace => (0x08, 0x0E, 0x08, false),
+        ControlPhysicalKey::Escape => (0x1B, 0x01, 0x1B, false),
+        ControlPhysicalKey::ArrowUp => (0x26, 0x48, 0, true),
+        ControlPhysicalKey::ArrowDown => (0x28, 0x50, 0, true),
+        ControlPhysicalKey::ArrowRight => (0x27, 0x4D, 0, true),
+        ControlPhysicalKey::ArrowLeft => (0x25, 0x4B, 0, true),
+        ControlPhysicalKey::Home => (0x24, 0x47, 0, true),
+        ControlPhysicalKey::End => (0x23, 0x4F, 0, true),
+        ControlPhysicalKey::Delete => (0x2E, 0x53, 0, true),
+        ControlPhysicalKey::PageUp => (0x21, 0x49, 0, true),
+        ControlPhysicalKey::PageDown => (0x22, 0x51, 0, true),
+    };
+    if control_state & LEFT_CTRL_PRESSED != 0
+        && let Some(character) = char::from_u32(unicode_character)
+        && let Some(control) = control_character_byte(&character.to_string())
+    {
+        unicode_character = u32::from(control);
+    }
+    if !key_down {
+        unicode_character = 0;
+    }
+    Ok(win32_key_event(
+        virtual_key,
+        scan_code,
+        unicode_character,
+        key_down,
+        control_state | if enhanced { ENHANCED_KEY } else { 0 },
+    ))
+}
+
+fn legacy_physical_key_bytes(
+    key: &ControlPhysicalKey,
+    key_down: bool,
+    pressed: &[ControlPhysicalKey],
+) -> Result<Vec<u8>> {
+    if !key_down {
+        return Ok(Vec::new());
+    }
+    let ctrl = pressed.contains(&ControlPhysicalKey::Ctrl);
+    let shift = pressed.contains(&ControlPhysicalKey::Shift);
+    let bytes = match key {
+        ControlPhysicalKey::Character { text } if ctrl => {
+            let text = text.to_ascii_lowercase();
+            control_character_byte(&text)
+                .map(|character| vec![character])
+                .unwrap_or_else(|| text.into_bytes())
+        }
+        ControlPhysicalKey::Character { text } if shift => text.to_ascii_uppercase().into_bytes(),
+        ControlPhysicalKey::Character { text } => text.as_bytes().to_vec(),
+        ControlPhysicalKey::Ctrl | ControlPhysicalKey::Shift | ControlPhysicalKey::Alt => {
+            Vec::<u8>::new()
+        }
+        ControlPhysicalKey::Enter => b"\r".to_vec(),
+        ControlPhysicalKey::Tab => b"\t".to_vec(),
+        ControlPhysicalKey::Backspace => vec![0x7F],
+        ControlPhysicalKey::Escape => vec![0x1B],
+        ControlPhysicalKey::ArrowUp => b"\x1b[A".to_vec(),
+        ControlPhysicalKey::ArrowDown => b"\x1b[B".to_vec(),
+        ControlPhysicalKey::ArrowRight => b"\x1b[C".to_vec(),
+        ControlPhysicalKey::ArrowLeft => b"\x1b[D".to_vec(),
+        ControlPhysicalKey::Home => b"\x1b[H".to_vec(),
+        ControlPhysicalKey::End => b"\x1b[F".to_vec(),
+        ControlPhysicalKey::Delete => b"\x1b[3~".to_vec(),
+        ControlPhysicalKey::PageUp => b"\x1b[5~".to_vec(),
+        ControlPhysicalKey::PageDown => b"\x1b[6~".to_vec(),
+    };
+    Ok(bytes)
+}
+
 fn win32_control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
     let bytes = match key {
-        ControlKey::Character { text } | ControlKey::Paste { text } => text.as_bytes().to_vec(),
+        ControlKey::Character { text } => win32_text_bytes(text),
+        ControlKey::Paste { text } => text.as_bytes().to_vec(),
         ControlKey::Enter => win32_key_press(0x0D, 0x1C, u32::from('\r'), 0),
         ControlKey::Tab => win32_key_press(0x09, 0x0F, u32::from('\t'), 0),
         ControlKey::Backspace => win32_key_press(0x08, 0x0E, 0x08, 0),
@@ -1022,15 +1270,16 @@ fn win32_control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
             }
         }
         ControlKey::CtrlC => {
-            let mut bytes = win32_key_event(0x11, 0x1D, 0, true, LEFT_CTRL_PRESSED);
-            bytes.extend(win32_key_event(0x43, 0x2E, 0x03, true, LEFT_CTRL_PRESSED));
-            bytes.extend(win32_key_event(0x43, 0x2E, 0, false, LEFT_CTRL_PRESSED));
-            bytes.extend(win32_key_event(0x11, 0x1D, 0, false, 0));
-            bytes
+            win32_ctrl_letter('c', 0x03)
         }
         ControlKey::CtrlD => win32_ctrl_letter('d', 0x04),
         ControlKey::CtrlZ => win32_ctrl_letter('z', 0x1A),
         ControlKey::CtrlL => win32_ctrl_letter('l', 0x0C),
+        ControlKey::KeyDown { .. }
+        | ControlKey::KeyUp { .. }
+        | ControlKey::Delay { .. } => {
+            eyre::bail!("scripted key actions must be handled by the sequence writer")
+        }
     };
     if bytes.len() > teamy_terminal_control::MAX_INPUT_BYTES {
         eyre::bail!("control key text exceeds the input limit")
@@ -1355,6 +1604,11 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
         ControlKey::CtrlD => vec![0x04],
         ControlKey::CtrlZ => vec![0x1a],
         ControlKey::CtrlL => vec![0x0c],
+        ControlKey::KeyDown { .. }
+        | ControlKey::KeyUp { .. }
+        | ControlKey::Delay { .. } => {
+            eyre::bail!("scripted key actions must be handled by the sequence writer")
+        }
     };
     if bytes.len() > teamy_terminal_control::MAX_INPUT_BYTES {
         eyre::bail!("control key text exceeds the input limit")
@@ -1555,13 +1809,96 @@ mod tests {
         );
         assert_eq!(
             win32_control_key_bytes(&ControlKey::CtrlC).expect("Win32 Ctrl+C should encode"),
-            b"\x1b[17;29;0;1;8;1_\x1b[67;46;3;1;8;1_\x1b[67;46;0;0;8;1_\x1b[17;29;0;0;0;1_"
-                .to_vec()
+            b"\x1b[67;46;3;1;8;1_\x1b[67;46;0;0;8;1_".to_vec()
         );
         assert_eq!(
             win32_control_key_bytes(&ControlKey::CtrlArrowRight)
                 .expect("Win32 Ctrl+Right should encode"),
             b"\x1b[39;77;0;1;8;1_\x1b[39;77;0;0;8;1_".to_vec()
+        );
+        assert_eq!(
+            win32_text_bytes("Ab"),
+            b"\x1b[65;30;65;1;16;1_\x1b[65;30;0;0;16;1_\x1b[66;48;98;1;0;1_\x1b[66;48;0;0;0;1_"
+                .to_vec()
+        );
+        assert_eq!(
+            win32_text_bytes("A\r\n"),
+            b"\x1b[65;30;65;1;16;1_\x1b[65;30;0;0;16;1_\x1b[13;28;13;1;0;1_\x1b[13;28;0;0;0;1_\x1b[13;28;13;1;0;1_\x1b[13;28;0;0;0;1_"
+                .to_vec()
+        );
+        assert_eq!(
+            win32_control_key_bytes(&ControlKey::Character {
+                text: String::from("Ab")
+            })
+            .expect("Win32 text should encode as key events"),
+            win32_text_bytes("Ab")
+        );
+        assert_eq!(
+            win32_control_key_bytes(&ControlKey::Paste {
+                text: String::from("Ab")
+            })
+            .expect("Win32 paste should remain raw text"),
+            b"Ab".to_vec()
+        );
+        let numeric_key = ControlPhysicalKey::Character {
+            text: String::from("1"),
+        };
+        assert_eq!(
+            win32_physical_key_event_bytes(&numeric_key, true, &[])
+                .expect("numeric key down should encode"),
+            b"\x1b[49;2;49;1;0;1_".to_vec()
+        );
+        assert_eq!(
+            win32_physical_key_event_bytes(&numeric_key, false, &[])
+                .expect("numeric key up should encode"),
+            b"\x1b[49;2;0;0;0;1_".to_vec()
+        );
+        let ctrl = ControlPhysicalKey::Ctrl;
+        let c = ControlPhysicalKey::Character {
+            text: String::from("c"),
+        };
+        assert_eq!(
+            win32_physical_key_event_bytes(&ctrl, true, &[ctrl.clone()])
+                .expect("Ctrl key down should only update state"),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            win32_physical_key_event_bytes(&c, true, &[ctrl.clone()])
+                .expect("Ctrl+C key down should encode"),
+            b"\x1b[67;46;3;1;8;1_".to_vec()
+        );
+        assert_eq!(
+            win32_physical_key_event_bytes(&ctrl, false, &[ctrl.clone()])
+                .expect("Ctrl key up should only update state"),
+            Vec::<u8>::new()
+        );
+        assert_eq!(
+            win32_physical_key_event_bytes(&c, false, &[ctrl.clone(), c.clone()])
+                .expect("Ctrl+C key up should encode"),
+            b"\x1b[67;46;0;0;8;1_".to_vec()
+        );
+        let l = ControlPhysicalKey::Character {
+            text: String::from("l"),
+        };
+        assert_eq!(
+            win32_physical_key_event_bytes(&l, true, &[ctrl.clone()])
+                .expect("Ctrl+L key down should use the generic encoder"),
+            b"\x1b[76;38;12;1;8;1_".to_vec()
+        );
+        assert_eq!(
+            win32_physical_key_event_bytes(&l, false, &[ctrl.clone(), l.clone()])
+                .expect("Ctrl+L key up should use the generic encoder"),
+            b"\x1b[76;38;0;0;8;1_".to_vec()
+        );
+        assert!(
+            win32_physical_key_event_bytes(&ctrl, true, &[ctrl.clone()])
+                .expect("Ctrl modifier down should only update state")
+                .is_empty()
+        );
+        assert!(
+            win32_physical_key_event_bytes(&ctrl, false, &[ctrl.clone()])
+                .expect("Ctrl modifier up should only update state")
+                .is_empty()
         );
         assert_eq!(
             terminal_input_key(

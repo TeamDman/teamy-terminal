@@ -34,6 +34,13 @@ interactive PowerShell shell integration; it still needs bridge-consumer use
 in the later SFM slice. The control plane now also exposes
 `invoke get-content`, a bounded visible-grid text probe that complements
 `invoke screenshot` for deterministic desktop checks.
+The `send-keys` grammar is intentionally explicit: every token is
+`down:<key>`, `up:<key>`, or `wait:<milliseconds>`. There are no implicit
+chords, delays, or text/numeric-key reinterpretations; the action keywords are
+exact lowercase spellings, and raw text belongs to `send-text`. Outstanding
+physical modifiers are released at the end of every request, including error
+cleanup, and numeric keys use the same explicit `down:1`/`up:1` form as every
+other physical key.
 
 The first profiling evidence pass is now complete enough to make the renderer
 decision: retain the full-frame baseline, and validate the opt-in
@@ -601,18 +608,35 @@ and successful exit. The core now records ConPTY's `?9001h/l` Win32-input
 mode request, and mode-aware keyboard/control encoding emits the documented
 `KEY_EVENT_RECORD` sequences while retaining raw paste. A focused interactive
 PTY regression, including DSR cursor-report responses and an initial resize,
-passes Ctrl+C against `ping.exe -t` and proves that the PowerShell shell
-survives for a follow-up command. A desktop input probe was attempted with
+is retained as an ignored desktop-account gate for Ctrl+C against `ping.exe -t`
+using the exact generic two-record sequence emitted by the manual winit path.
+It cannot run meaningfully under the Codex sandbox identity
+(`teamy-desktop-w\codexsandboxoffline`), which accepts the input bytes but
+cannot deliver the resulting ConPTY console-control event; run it with
+`cargo test -p teamy-terminal-pty --lib -- --ignored` under the desktop
+account. `send-text` uses the same Win32 key-record encoding for text and Enter
+when that mode is active, while paste remains raw. A desktop input probe was
+attempted with
 both `SendKeys` and native `SendInput`, but this session rejected synthetic
 keystrokes, so direct manual command/paste/resize/Ctrl+C/selection/exit
 evidence remains the only open MVP check. The control-plane probe is now
 stronger: a rebuilt live window produced prompt/ANSI/resize screenshots and a
-successful `invoke get-content` response, but live `invoke ... send-keys ctrl+c`
-still leaves `ping.exe -t` running even though the application emits the exact
-structured sequence. The remaining issue is therefore the live application
-boundary between its PTY/event-loop path and the otherwise passing PTY
-regression; `get-content` does not substitute for resolving and manually
-verifying that behavior.
+successful `invoke get-content` response, but live `invoke ... send-keys
+"down:ctrl wait:10 down:c wait:10 up:c wait:10 up:ctrl"` still leaves
+`ping.exe -t` running even though debug evidence shows the application writes
+the exact `[67;46;3;1;8;1_]` and `[67;46;0;0;8;1_]` records. The remaining
+issue is therefore the live application/event-loop boundary rather than a
+parser ambiguity or an unverified byte variant; `get-content` does not
+substitute for resolving and manually verifying that behavior.
+
+The follow-up control-plane slice adds an intentionally literal
+`down:/up:/wait:` grammar, numeric-key coverage, manual-compatible generic
+Win32 key records with state-only modifiers, and guaranteed modifier cleanup.
+Its parser/unit tests pass. The direct PTY interrupt regression is explicitly
+ignored under the sandbox for the same desktop-account reason, and the live
+Windows control-plane interrupt probe is not yet green, so this does not close
+the Phase 3.4 gate. The earlier staged OpenConsole/`conpty.dll` retry was
+removed and is not treated as a solution.
 
 Interactive polish now maps Ctrl+Backspace to the backward-kill-word control
 byte used by PowerShell-compatible prompts, uses a black default terminal
@@ -1094,9 +1118,13 @@ earlier reviewed boundaries `144382fd5` and `35461380d`. It carries frame
 kind/stride/tile bounds, cursor, selection, mouse button state, capability
 flags, and OSC 133 prompt/command metadata, with generated Java 17 sources.
 Rust schema tests, codegen freshness, and the focused generator compile pass.
-It is not yet a published or SFM-consumed pin; broad `test-java` remains
-environment-limited by the installed JBR 17.0.6 `Cannot close compiler
-resources` failure.
+The SFM propagation CLI now has a `CargoCommand` source-build recipe for the
+dependency-free `vox-java` artifact, including the locked `cargo run
+--locked --package vox-xtask -- package-java` task and portable output path.
+The exact contract commit `26fda8736` is still local-only and is not yet a
+published or SFM-consumed pin; broad `test-java` remains environment-limited
+by the installed JBR 17.0.6 `Cannot close compiler resources` failure in the
+non-elevated environment, while the elevated package gate passes.
 
 ### [ ] 4.3 Prove the optional frame consumer boundary
 
