@@ -21,7 +21,7 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Begin Phase 4's optional SFM integration. The code-level input mapping,
+**Next slice:** Complete Phase 4's optional SFM integration. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, and mouse selection
 are complete. The elevated live control-plane gate now
@@ -42,6 +42,15 @@ state plus bounded full-PNG snapshots: Rust owns the PTY, VT parsing, colors,
 scrollback, and rasterization; Java sends input/resize and displays the PNG.
 Dirty-cell/tile, unchanged-glyph, and GPU-sharing optimizations are deferred
 until the end-to-end correctness proof is captured.
+The interactive follow-up now uses the existing Vox `send_key` and `send_mouse`
+operations rather than buffering a Java command line: printable code points are
+sent as exact text, control/navigation keys are sent as key transitions, and
+mouse reports are encoded by Rust only when the terminal requests mouse mode.
+SFM independently polls `snapshot(after_sequence)` every 50 ms, so Rust output
+can advance the displayed frame during a long-running command without another
+Java input event. Triple Esc closes the hosted panel and triple Tab returns the
+event to Minecraft's normal focus traversal; both sequences use a 1.5-second
+window and single/double presses remain terminal input.
 **Automation rendering decision:** `--hidden` is the supported near-term
 background mode. It still creates a native winit window, Vulkan surface, and
 swapchain so the production renderer path remains identical, but the window is
@@ -1204,7 +1213,12 @@ be promoted into the bridge.
 uploads them to a dynamic texture, explicitly binds the Minecraft shader
 sampler, forwards text and logical resize requests, and preserves the
 Java-local fallback. Focused SFM tests and two live Rust-backed captures pass.
-Rust-owned scroll/key/mouse forwarding and the final commit/propagation gate
+Rust now accepts exact text, generic key transitions, and SGR/legacy mouse
+events after terminal mode negotiation. SFM routes printable characters,
+control/navigation key presses/releases, mouse buttons/drag/wheel events, and
+periodically polls sequence-aware PNG snapshots. The deterministic focus
+sequence tests cover triple Esc close and triple Tab Java focus escape. A live
+Minecraft control-key/mouse/long-output capture and stale/disconnect proof
 remain before this item is complete.
 
 ### [~] 4.5 Consolidate the Rust endpoint into the normal CLI and lifecycle

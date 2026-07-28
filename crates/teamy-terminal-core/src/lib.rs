@@ -276,6 +276,8 @@ struct TerminalState {
     command_start: Option<CursorPosition>,
     responses: VecDeque<Vec<u8>>,
     win32_input_mode: bool,
+    mouse_tracking_mode: u8,
+    sgr_mouse_mode: bool,
     alternate_screen: Option<SavedScreen>,
     saved_private_cursor: Option<SavedCursor>,
 }
@@ -302,6 +304,8 @@ impl TerminalState {
             command_start: None,
             responses: VecDeque::new(),
             win32_input_mode: false,
+            mouse_tracking_mode: 0,
+            sgr_mouse_mode: false,
             alternate_screen: None,
             saved_private_cursor: None,
         }
@@ -402,6 +406,8 @@ impl TerminalState {
         self.clear_prompt_metadata();
         self.saved_private_cursor = None;
         self.win32_input_mode = false;
+        self.mouse_tracking_mode = 0;
+        self.sgr_mouse_mode = false;
     }
 
     fn save_private_cursor(&mut self) {
@@ -890,6 +896,10 @@ impl Perform for Performer<'_> {
                             }
                         }
                         9001 => self.state.win32_input_mode = enabled,
+                        1000 => self.state.mouse_tracking_mode = if enabled { 1 } else { 0 },
+                        1002 => self.state.mouse_tracking_mode = if enabled { 2 } else { 0 },
+                        1003 => self.state.mouse_tracking_mode = if enabled { 3 } else { 0 },
+                        1006 => self.state.sgr_mouse_mode = enabled,
                         _ => {}
                     }
                 }
@@ -1106,6 +1116,18 @@ impl TerminalSession {
         self.state.win32_input_mode
     }
 
+    /// Return whether the child requested terminal mouse reports.
+    #[must_use]
+    pub const fn mouse_reporting_enabled(&self) -> bool {
+        self.state.mouse_tracking_mode != 0
+    }
+
+    /// Return whether mouse reports should use SGR (1006) encoding.
+    #[must_use]
+    pub const fn sgr_mouse_mode_enabled(&self) -> bool {
+        self.state.sgr_mouse_mode
+    }
+
     /// Feed raw PTY bytes through the VT parser.
     pub fn process_bytes(&mut self, bytes: &[u8]) {
         let mut performer = Performer {
@@ -1246,6 +1268,21 @@ mod tests {
 
         terminal.process_bytes(b"\x1b[?9001l");
         assert!(!terminal.win32_input_mode_enabled());
+    }
+
+    #[test]
+    fn tracks_xterm_mouse_reporting_requests() {
+        let mut terminal = session();
+        assert!(!terminal.mouse_reporting_enabled());
+        assert!(!terminal.sgr_mouse_mode_enabled());
+
+        terminal.process_bytes(b"\x1b[?1002;1006h");
+        assert!(terminal.mouse_reporting_enabled());
+        assert!(terminal.sgr_mouse_mode_enabled());
+
+        terminal.process_bytes(b"\x1b[?1002;1006l");
+        assert!(!terminal.mouse_reporting_enabled());
+        assert!(!terminal.sgr_mouse_mode_enabled());
     }
 
     #[test]
