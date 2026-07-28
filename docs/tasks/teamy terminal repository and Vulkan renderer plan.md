@@ -1216,10 +1216,12 @@ Java-local fallback. Focused SFM tests and two live Rust-backed captures pass.
 Rust now accepts exact text, generic key transitions, and SGR/legacy mouse
 events after terminal mode negotiation. SFM routes printable characters,
 control/navigation key presses/releases, mouse buttons/drag/wheel events, and
-periodically polls sequence-aware PNG snapshots. The deterministic focus
-sequence tests cover triple Esc close and triple Tab Java focus escape. A live
-Minecraft control-key/mouse/long-output capture and stale/disconnect proof
-remain before this item is complete.
+periodically polls sequence-aware PNG snapshots. Commit `df80cb38d` fixed the
+Java poller timing and made the automation proof wait for a command frame; the
+live cyan capture now visibly contains Rust-rendered range and `Write-Host`
+output. The deterministic focus-sequence tests cover triple Esc close and
+triple Tab Java focus escape. A live Minecraft control-key/mouse/long-output
+capture and stale/disconnect proof remain before this item is complete.
 
 ### [~] 4.5 Consolidate the Rust endpoint into the normal CLI and lifecycle
 
