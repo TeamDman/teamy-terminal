@@ -4,6 +4,8 @@
 pub mod cli;
 mod interactive;
 pub mod logging_init;
+mod stop_after_args;
+mod vox_server;
 #[cfg(windows)]
 mod windows_startup;
 

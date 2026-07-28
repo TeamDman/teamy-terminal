@@ -4,7 +4,7 @@ use crate::cli::output::OutputFormat;
 use arbitrary::Arbitrary;
 use facet::Facet;
 use figue::{self as args};
-use teamy_cancellation::StopAfterArgs;
+use crate::stop_after_args::StopAfterArgs;
 
 /// Global arguments that apply to all commands.
 #[derive(Facet, Arbitrary, Debug, Default, PartialEq)]

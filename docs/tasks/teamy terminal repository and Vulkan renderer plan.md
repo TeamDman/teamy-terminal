@@ -357,14 +357,15 @@ cargo tree -d
 **Completion criteria:** The full quality gate passes from a fresh clone and
 the lockfile contains one compatible Facet family for the CLI.
 
-**Completion notes:** Updated `TeamDman/facet` `mine/main` from its previous
-state by fetching `origin/main` (upstream tip `7b0e73a37`) and merging it into
-the fork. The synchronized fork was committed and pushed as `23ad4dcd0`.
-Updated `teamy-cancellation` to use that same Facet/Figue revision in commit
-`2ba7fa5`, pushed to its `main`, and pinned teamy-terminal to that commit.
-Every direct Facet/Figue dependency and the lockfile now resolves to
-`23ad4dcd0`; `cargo tree -d` shows no duplicate Facet family. The hook-bypassing
-`--no-verify` choices were required for those two commits.
+**Completion notes:** The original synchronized fork was committed and pushed
+as `23ad4dcd0`, but the terminal contract was subsequently added at
+`aa75598dabb2138b18365cdf0d97ca94a34c5319`. The primary workspace now pins its
+direct Facet/Figue/spec-proto/Vox family to that contract revision. The current
+published `teamy-cancellation` feature set still names the older revision, so
+the CLI does not enable its optional Figue integration; it keeps the equivalent
+small `StopAfterArgs` adapter locally while using teamy-cancellation for the
+runtime cancellation primitives. This leaves one `weavy` provider in the
+primary lockfile without changing the cancellation repository.
 
 `check-all.ps1` now runs nightly `cargo fmt -- --check`, workspace Clippy with
 `-D warnings`, workspace all-feature build, and workspace all-feature tests.
@@ -1177,9 +1178,10 @@ conflict into the primary workspace.
 "hello, world!"; exit`, verifies the bounded full-PNG payload, visible `100`,
 and cyan cell metadata. The endpoint was also launched over loopback TCP and
 consumed by the canonical SFM puppet; the Rust process remained hidden and the
-SFM captures verified the live frame path. The source is ready for the local
-review commit, so Phase 4 remains active until the consumer boundary is made
-durable.
+SFM captures verified the live frame path. The endpoint source is committed
+locally at `ff26237`; it is now also compiled into the primary CLI at the
+aligned Facet revision. The isolated workspace remains only as a compatibility
+test until the primary executable and SFM lifecycle proof are committed.
 
 ### [~] 4.4 Prove the optional frame consumer boundary
 
@@ -1204,6 +1206,44 @@ sampler, forwards text and logical resize requests, and preserves the
 Java-local fallback. Focused SFM tests and two live Rust-backed captures pass.
 Rust-owned scroll/key/mouse forwarding and the final commit/propagation gate
 remain before this item is complete.
+
+### [~] 4.5 Consolidate the Rust endpoint into the normal CLI and lifecycle
+
+**Work:** Promote the isolated endpoint into the primary `teamy-terminal`
+binary as `teamy-terminal serve [ADDRESS]`, accepting `:PORT` as loopback
+shorthand and defaulting to the configured development port. Align the
+Facet/spec-proto/Vox revision with the primary workspace so the server no
+longer requires a separate Cargo manifest. Retain the isolated workspace only
+as a focused compatibility test until the primary command is proven.
+
+Add CLI help/parse and loopback readiness tests. The SFM side will launch the
+installed or configured `teamy-terminal.exe` directly, with no `cargo run` and
+no extra Windows Terminal window. The server remains Rust-owned; Java only
+chooses the endpoint, starts an optional child process, connects/reconnects,
+and presents validated PNG frames.
+
+**Validation:** Run `teamy-terminal serve :63946`, connect from SFM with Rust
+started first, then start SFM first and invoke the Java start/connect action.
+Stop and restart the endpoint while Minecraft remains open, and verify the
+Rust terminal recovers without affecting `repl/open`.
+
+**Current evidence (2026-07-27):** The primary `teamy-terminal.exe serve
+[ADDRESS]` help and `:PORT` normalization are implemented, its 16 focused CLI
+library tests pass, and the binary launches the endpoint under
+`--stop-after-duration`. SFM's rebuilt `--solo --smoke` path reaches the title
+screen with Vox Java present and Mekanism absent. The Rust-start puppet
+`sfm:title_screen_rust_terminal` also completes with two live PNG captures,
+including the `1..100` and cyan `Write-Host` proof, after Java launches the
+primary executable. The remaining lifecycle gate is a focused stop/restart
+matrix while Minecraft remains open; the correctness baseline is otherwise
+proven before dirty-cell or GPU optimization.
+
+**Completion criteria:** The primary executable exposes a bounded, documented
+`serve` command; SFM's normal manual path uses a client-configured endpoint
+and explicit `repl`/`terminal` actions; server startup after Java, server
+failure/retry, and Java-only behavior are covered by focused tests and a live
+capture. The full-PNG CPU path remains the correctness baseline before any
+dirty-cell or GPU optimization.
 
 ## Phase 5 — Release and handoff [ ]
 

@@ -1,14 +1,11 @@
 //! Rust-authoritative Vox terminal endpoint.
-//! Rust-authoritative Vox terminal endpoint.
 //!
 //! The endpoint owns the PowerShell PTY, VT parsing, and CPU PNG rasterization.
 //! Java receives only bounded full-frame PNG snapshots and sends input text
 //! back through the generated Vox contract.
 
-use arbitrary::Arbitrary;
 use eyre::{Context, Result};
-use facet::Facet;
-use figue::{self as args};
+use vox_terminal as vox;
 use spec_proto::terminal::{
     Terminal, TerminalCancelRequest, TerminalCapabilities, TerminalCapabilitiesRequest,
     TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult, TerminalCursor,
@@ -30,15 +27,27 @@ use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
 const MAX_COLUMNS: u16 = 240;
 const MAX_ROWS: u16 = 120;
 const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
-/// CLI arguments for the long-running Vox endpoint.
-#[derive(Arbitrary, Debug, Facet, PartialEq, Eq)]
-#[facet(rename_all = "kebab-case")]
-pub struct ServeVoxArgs {
-    /// TCP listen address; port zero asks the OS for an available port.
-    #[facet(args::named, default)]
-    #[arbitrary(default)]
-    pub listen: Option<String>,
+/// Normalize the public `serve` address syntax to a TCP bind address.
+pub fn normalize_listen_address(raw: &str) -> Result<String> {
+    let value = raw.trim();
+    if value.is_empty() {
+        eyre::bail!("listen address must not be empty");
+    }
+    if let Some(port) = value.strip_prefix(':') {
+        if port.is_empty() {
+            eyre::bail!("listen address is missing its port: {value}");
+        }
+        return Ok(format!("127.0.0.1:{port}"));
+    }
+    if value.chars().all(|character| character.is_ascii_digit()) {
+        return Ok(format!("127.0.0.1:{value}"));
+    }
+    if value.parse::<std::net::SocketAddr>().is_err() && !value.contains(':') {
+        eyre::bail!("listen address must be HOST:PORT or :PORT: {value}");
+    }
+    Ok(value.to_string())
 }
 
 #[derive(Clone)]
@@ -545,7 +554,8 @@ impl Terminal for VoxTerminalService {
 
 /// Serve the Rust-authoritative terminal endpoint until the process exits.
 pub async fn serve(listen: &str) -> Result<()> {
-    let listener = tokio::net::TcpListener::bind(listen)
+    let listen = normalize_listen_address(listen)?;
+    let listener = tokio::net::TcpListener::bind(&listen)
         .await
         .with_context(|| format!("failed to bind Vox terminal endpoint at {listen}"))?;
     let address = listener
@@ -579,8 +589,15 @@ pub async fn serve(listen: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use spec_proto::terminal::{TerminalCapabilities, TerminalClient};
+    use spec_proto::terminal::TerminalClient;
     use teamy_terminal_core::Color;
+
+    #[test]
+    fn normalize_listen_address_accepts_loopback_shorthand() {
+        assert_eq!(normalize_listen_address(":63946").unwrap(), "127.0.0.1:63946");
+        assert_eq!(normalize_listen_address("63946").unwrap(), "127.0.0.1:63946");
+        assert_eq!(normalize_listen_address("localhost:63946").unwrap(), "localhost:63946");
+    }
 
     #[tokio::test]
     async fn vox_puppet_runs_power_shell_and_returns_bounded_png() {

@@ -24,6 +24,7 @@ arbitrary.workspace = true
 chrono.workspace = true
 color-eyre.workspace = true
 eyre.workspace = true
+humantime.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 tracing-tracy = { workspace = true, optional = true }
@@ -35,6 +36,8 @@ facet-csv.workspace = true
 facet-json.workspace = true
 facet-pretty.workspace = true
 figue.workspace = true
+spec-proto.workspace = true
+vox-terminal.workspace = true
 teamy-terminal-core.workspace = true
 teamy-terminal-font.workspace = true
 teamy-terminal-frame.workspace = true

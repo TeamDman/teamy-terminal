@@ -3,6 +3,7 @@ pub mod invoke;
 pub mod list;
 pub mod output;
 pub mod render_fixture;
+pub mod serve;
 
 use crate::cli::global_args::GlobalArgs;
 use crate::cli::output::CliOutput;
@@ -40,6 +41,8 @@ pub enum Command {
     List(list::ListArgs),
     /// Render a deterministic terminal frame fixture to a portable artifact.
     RenderFixture(render_fixture::RenderFixtureArgs),
+    /// Serve the Rust-authoritative terminal endpoint over TCP.
+    Serve(serve::ServeArgs),
     /// Invoke an action on a registered Teamy Terminal instance.
     Invoke(invoke::InvokeArgs),
 }
@@ -60,7 +63,7 @@ impl Cli {
         cancellation_token.bail_if_cancelled()?;
         let initially_hidden = self.global_args.hidden;
         match self.command {
-            Some(command) => command.invoke(),
+            Some(command) => command.invoke(cancellation_token.clone()),
             None => {
                 crate::interactive::run(cancellation_token, initially_hidden)?;
                 Ok(CliOutput::none())
@@ -70,10 +73,11 @@ impl Cli {
 }
 
 impl Command {
-    fn invoke(self) -> eyre::Result<CliOutput> {
+    fn invoke(self, cancellation_token: CancellationToken) -> eyre::Result<CliOutput> {
         match self {
             Self::List(args) => args.invoke(),
             Self::RenderFixture(args) => args.invoke(),
+            Self::Serve(args) => args.invoke(cancellation_token),
             Self::Invoke(args) => args.invoke(),
         }
     }
