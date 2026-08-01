@@ -506,8 +506,6 @@ checksum = "980c2afde4af43d6a05c5be738f9eae595cff86dce1f38f88b95058a98c027f3"
 [[package]]
 name = "copypatch"
 version = "0.2.0-rc.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2eff9d651f092b10adc03aee68ec9558922bde5e0b064c73ef46b41430cd2114"
 dependencies = [
  "libc",
  "object 0.39.1",
@@ -516,7 +514,8 @@ dependencies = [
 [[package]]
 name = "copypatch"
 version = "0.2.0-rc.4"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "2eff9d651f092b10adc03aee68ec9558922bde5e0b064c73ef46b41430cd2114"
 dependencies = [
  "libc",
  "object 0.39.1",
@@ -775,6 +774,15 @@ dependencies = [
 [[package]]
 name = "facet"
 version = "0.50.0-rc.5"
+dependencies = [
+ "autocfg",
+ "facet-core 0.50.0-rc.5",
+ "facet-macros 0.50.0-rc.5",
+]
+
+[[package]]
+name = "facet"
+version = "0.50.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cd3e58a40571ddd336865ec9643ea43d5cf93c35ae4f5ad5d903dc4e427a2e03"
 dependencies = [
@@ -785,13 +793,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet"
+name = "facet-core"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "autocfg",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-macros 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "camino",
+ "chrono",
+ "compact_str",
+ "const-fnv1a-hash",
+ "iddqd",
+ "impls",
+ "indexmap",
+ "taxon",
+ "uuid",
 ]
 
 [[package]]
@@ -808,31 +822,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-core"
+name = "facet-csv"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "autocfg",
- "camino",
- "chrono",
- "compact_str",
- "const-fnv1a-hash",
- "iddqd",
- "impls",
- "indexmap",
- "taxon",
- "uuid",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
+ "facet-format 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
 ]
 
 [[package]]
-name = "facet-csv"
+name = "facet-dessert"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-format 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-core 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -846,20 +850,21 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-dessert"
+name = "facet-error"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
 ]
 
 [[package]]
-name = "facet-error"
+name = "facet-format"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-core 0.50.0-rc.5",
+ "facet-dessert 0.50.0-rc.5",
+ "facet-path 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "facet-solver 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -876,28 +881,24 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-format"
+name = "facet-json"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-dessert 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-path 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-solver 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "copypatch 0.2.0-rc.4",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
+ "facet-format 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "weavy 0.2.2",
 ]
 
 [[package]]
-name = "facet-json"
+name = "facet-macro-parse"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "copypatch 0.2.0-rc.4 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-format 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "weavy 0.2.2 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-macro-types 0.50.0-rc.5",
+ "proc-macro2",
+ "quote",
 ]
 
 [[package]]
@@ -912,13 +913,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-macro-parse"
+name = "facet-macro-types"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-macro-types 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
  "proc-macro2",
  "quote",
+ "unsynn",
 ]
 
 [[package]]
@@ -933,13 +933,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-macro-types"
+name = "facet-macros"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "proc-macro2",
- "quote",
- "unsynn",
+ "facet-macros-impl 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -952,11 +949,15 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-macros"
+name = "facet-macros-impl"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-macros-impl 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-macro-parse 0.50.0-rc.5",
+ "facet-macro-types 0.50.0-rc.5",
+ "proc-macro2",
+ "quote",
+ "strsim",
+ "unsynn",
 ]
 
 [[package]]
@@ -974,16 +975,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-macros-impl"
+name = "facet-path"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-macro-parse 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-macro-types 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "proc-macro2",
- "quote",
- "strsim",
- "unsynn",
+ "facet-core 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -996,11 +991,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-path"
+name = "facet-pretty"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-core 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "owo-colors",
+ "terminal-light",
 ]
 
 [[package]]
@@ -1015,14 +1012,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-pretty"
+name = "facet-reflect"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "owo-colors",
- "terminal-light",
+ "facet-core 0.50.0-rc.5",
+ "facet-path 0.50.0-rc.5",
+ "hashbrown 0.17.1",
+ "smallvec 2.0.0-alpha.12",
 ]
 
 [[package]]
@@ -1038,14 +1034,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-reflect"
+name = "facet-solver"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-path 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "hashbrown 0.17.1",
- "smallvec 2.0.0-alpha.12",
+ "facet-core 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "strsim",
 ]
 
 [[package]]
@@ -1060,13 +1054,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "facet-solver"
+name = "facet-value"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "strsim",
+ "facet-core 0.50.0-rc.5",
+ "facet-format 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "indexmap",
 ]
 
 [[package]]
@@ -1078,17 +1072,6 @@ dependencies = [
  "facet-core 0.50.0-rc.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "facet-format 0.50.0-rc.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "facet-reflect 0.50.0-rc.5 (registry+https://github.com/rust-lang/crates.io-index)",
- "indexmap",
-]
-
-[[package]]
-name = "facet-value"
-version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
-dependencies = [
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-format 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
  "indexmap",
 ]
 
@@ -1110,18 +1093,17 @@ dependencies = [
 [[package]]
 name = "figue"
 version = "5.0.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "arbitrary",
  "ariadne",
  "camino",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
  "facet-error",
- "facet-format 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-format 0.50.0-rc.5",
  "facet-json",
- "facet-pretty 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-pretty 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
  "figue-attrs",
  "heck",
  "indexmap",
@@ -1138,9 +1120,8 @@ dependencies = [
 [[package]]
 name = "figue-attrs"
 version = "5.0.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -2212,6 +2193,18 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 [[package]]
 name = "phon"
 version = "0.2.0-rc.5"
+dependencies = [
+ "facet 0.50.0-rc.5",
+ "facet-value 0.50.0-rc.5",
+ "phon-engine 0.2.0-rc.5",
+ "phon-ir 0.2.0-rc.5",
+ "phon-jit 0.2.0-rc.5",
+ "phon-schema 0.2.0-rc.5",
+]
+
+[[package]]
+name = "phon"
+version = "0.2.0-rc.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "dc1d35927f33d36721ccc0eec1a335b557673f6c412f0c650335a9d9fc45a033"
 dependencies = [
@@ -2224,16 +2217,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "phon"
+name = "phon-engine"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-value 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-engine 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-ir 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-jit 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-schema 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-value 0.50.0-rc.5",
+ "phon-ir 0.2.0-rc.5",
+ "phon-schema 0.2.0-rc.5",
+ "weavy 0.2.2",
 ]
 
 [[package]]
@@ -2249,14 +2239,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "phon-engine"
+name = "phon-ir"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet-value 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-ir 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-schema 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "weavy 0.2.2 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "phon-schema 0.2.0-rc.5",
+ "weavy 0.2.2",
 ]
 
 [[package]]
@@ -2270,12 +2257,13 @@ dependencies = [
 ]
 
 [[package]]
-name = "phon-ir"
+name = "phon-jit"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "phon-schema 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "weavy 0.2.2 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "copypatch 0.2.0-rc.4",
+ "phon-ir 0.2.0-rc.5",
+ "phon-schema 0.2.0-rc.5",
+ "weavy 0.2.2",
 ]
 
 [[package]]
@@ -2291,14 +2279,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "phon-jit"
+name = "phon-schema"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "copypatch 0.2.0-rc.4 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-ir 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-schema 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "weavy 0.2.2 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "blake3",
+ "facet-value 0.50.0-rc.5",
+ "taxon",
 ]
 
 [[package]]
@@ -2309,16 +2295,6 @@ checksum = "6d14899019fdf1a665207c3c2e1fcf5cbe87cf9c48ec3e745c5eaa55504eb39e"
 dependencies = [
  "blake3",
  "facet-value 0.50.0-rc.5 (registry+https://github.com/rust-lang/crates.io-index)",
-]
-
-[[package]]
-name = "phon-schema"
-version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
-dependencies = [
- "blake3",
- "facet-value 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "taxon",
 ]
 
 [[package]]
@@ -2922,10 +2898,9 @@ dependencies = [
 [[package]]
 name = "spec-proto"
 version = "0.2.2"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-value 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-value 0.50.0-rc.5",
  "vox 0.10.0-rc.5",
  "vox-schema 0.10.0-rc.5",
 ]
@@ -3023,7 +2998,6 @@ dependencies = [
 [[package]]
 name = "taxon"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "blake3",
 ]
@@ -3050,10 +3024,10 @@ dependencies = [
  "color-eyre",
  "embed-resource",
  "eyre",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
  "facet-csv",
  "facet-json",
- "facet-pretty 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet-pretty 0.50.0-rc.5",
  "figue",
  "humantime",
  "png",
@@ -3080,7 +3054,7 @@ name = "teamy-terminal-control"
 version = "0.1.0"
 dependencies = [
  "eyre",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
  "facet-json",
  "tokio",
  "tracing",
@@ -3552,11 +3526,10 @@ dependencies = [
 [[package]]
 name = "vox"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-pretty 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-pretty 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
  "tokio",
  "tracing",
  "vox-core 0.10.0-rc.5",
@@ -3590,10 +3563,9 @@ dependencies = [
 [[package]]
 name = "vox-core"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
  "futures-util",
  "tokio",
  "tracing",
@@ -3618,7 +3590,6 @@ dependencies = [
 [[package]]
 name = "vox-fdpass"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "libc",
  "passfd",
@@ -3640,7 +3611,6 @@ dependencies = [
 [[package]]
 name = "vox-macros-core"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -3660,7 +3630,6 @@ dependencies = [
 [[package]]
 name = "vox-macros-parse"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -3683,14 +3652,13 @@ dependencies = [
 [[package]]
 name = "vox-phon"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-engine 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-ir 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-jit 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "phon-schema 0.2.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "phon 0.2.0-rc.5",
+ "phon-engine 0.2.0-rc.5",
+ "phon-ir 0.2.0-rc.5",
+ "phon-jit 0.2.0-rc.5",
+ "phon-schema 0.2.0-rc.5",
  "vox-rt 0.10.0-rc.5",
 ]
 
@@ -3713,7 +3681,6 @@ dependencies = [
 [[package]]
 name = "vox-rt"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -3734,7 +3701,6 @@ source = "git+https://github.com/bearcove/vox.git?rev=2ca38f41c2d615e05c11347d6d
 [[package]]
 name = "vox-rt-macros"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 
 [[package]]
 name = "vox-schema"
@@ -3750,11 +3716,10 @@ dependencies = [
 [[package]]
 name = "vox-schema"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "blake3",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
 ]
 
 [[package]]
@@ -3769,7 +3734,6 @@ dependencies = [
 [[package]]
 name = "vox-service-macros"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "proc-macro2",
  "vox-macros-core 0.10.0-rc.5",
@@ -3792,7 +3756,6 @@ dependencies = [
 [[package]]
 name = "vox-stream"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "libc",
  "tokio",
@@ -3829,13 +3792,12 @@ dependencies = [
 [[package]]
 name = "vox-types"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
 dependencies = [
  "blake3",
- "facet 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-core 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-reflect 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
- "facet-value 0.50.0-rc.5 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "facet 0.50.0-rc.5",
+ "facet-core 0.50.0-rc.5",
+ "facet-reflect 0.50.0-rc.5",
+ "facet-value 0.50.0-rc.5",
  "heck",
  "indexmap",
  "structstruck",
@@ -4077,18 +4039,17 @@ dependencies = [
 [[package]]
 name = "weavy"
 version = "0.2.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "30261027ea4225cf7c8287aa70bd103c1e78508606c77caf24bb468326ce7b5f"
 dependencies = [
- "copypatch 0.2.0-rc.4 (registry+https://github.com/rust-lang/crates.io-index)",
+ "copypatch 0.2.0-rc.4",
 ]
 
 [[package]]
 name = "weavy"
 version = "0.2.2"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "30261027ea4225cf7c8287aa70bd103c1e78508606c77caf24bb468326ce7b5f"
 dependencies = [
- "copypatch 0.2.0-rc.4 (git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319)",
+ "copypatch 0.2.0-rc.4 (registry+https://github.com/rust-lang/crates.io-index)",
 ]
 
 [[package]]

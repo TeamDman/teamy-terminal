@@ -5,28 +5,30 @@
 //! back through the generated Vox contract.
 
 use eyre::{Context, Result};
-use vox_terminal as vox;
 use spec_proto::terminal::{
     Terminal, TerminalCancelRequest, TerminalCapabilities, TerminalCapabilitiesRequest,
-    TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult, TerminalCursor,
-    TerminalDisconnectRequest, TerminalDispatcher, TerminalError, TerminalErrorCode,
-    TerminalFrameEncoding, TerminalFrameKind, TerminalInputResult, TerminalKeyInput,
-    TerminalMouseInput, TerminalOperationResult, TerminalPromptMetadata, TerminalRange,
-    TerminalResizeRequest, TerminalResizeResult, TerminalSelection, TerminalSnapshot,
-    TerminalSnapshotRequest, TerminalState, TerminalTextInput,
+    TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult,
+    TerminalContentRequest, TerminalContentResult, TerminalCursor, TerminalDisconnectRequest,
+    TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding, TerminalFrameKind,
+    TerminalInputResult, TerminalKeyInput, TerminalMouseInput, TerminalOperationResult,
+    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
+    TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest, TerminalState, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_core::{TerminalLimits, TerminalSession};
 use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, TerminalFont};
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
+use vox_terminal as vox;
 
 const MAX_COLUMNS: u16 = 240;
 const MAX_ROWS: u16 = 120;
 const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+const MAX_CONTENT_CHARS: u32 = 256 * 1024;
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
 const GLFW_MOD_SHIFT: u32 = 0x0001;
@@ -49,7 +51,8 @@ const GLFW_KEY_HOME: u32 = 268;
 const GLFW_KEY_END: u32 = 269;
 
 fn modified_navigation_bytes(key_code: u32, modifiers: u32) -> Option<Vec<u8>> {
-    let has_modifier = modifiers & (GLFW_MOD_SHIFT | GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER) != 0;
+    let has_modifier =
+        modifiers & (GLFW_MOD_SHIFT | GLFW_MOD_CONTROL | GLFW_MOD_ALT | GLFW_MOD_SUPER) != 0;
     if !has_modifier {
         return None;
     }
@@ -92,6 +95,26 @@ fn control_byte(key_code: u32) -> Option<u8> {
 }
 
 fn key_input_bytes(key_code: u32, modifiers: u32, pressed: bool) -> Vec<u8> {
+    if modifiers & GLFW_MOD_SUPER == 0 {
+        if let Some(key) = control_physical_key(key_code, modifiers) {
+            let mut pressed_keys = Vec::new();
+            if modifiers & GLFW_MOD_CONTROL != 0 {
+                pressed_keys.push(ControlPhysicalKey::Ctrl);
+            }
+            if modifiers & GLFW_MOD_SHIFT != 0 {
+                pressed_keys.push(ControlPhysicalKey::Shift);
+            }
+            if modifiers & GLFW_MOD_ALT != 0 {
+                pressed_keys.push(ControlPhysicalKey::Alt);
+            }
+            return crate::interactive::win32_physical_key_event_bytes(
+                &key,
+                pressed,
+                &pressed_keys,
+            )
+            .expect("GLFW key should encode as a Win32 physical event");
+        }
+    }
     if !pressed {
         return Vec::new();
     }
@@ -133,6 +156,42 @@ fn key_input_bytes(key_code: u32, modifiers: u32, pressed: bool) -> Vec<u8> {
     }
 }
 
+fn control_physical_key(key_code: u32, modifiers: u32) -> Option<ControlPhysicalKey> {
+    let named = match key_code {
+        GLFW_KEY_ENTER => Some(ControlPhysicalKey::Enter),
+        GLFW_KEY_TAB => Some(ControlPhysicalKey::Tab),
+        GLFW_KEY_BACKSPACE => Some(ControlPhysicalKey::Backspace),
+        GLFW_KEY_ESCAPE => Some(ControlPhysicalKey::Escape),
+        GLFW_KEY_UP => Some(ControlPhysicalKey::ArrowUp),
+        GLFW_KEY_DOWN => Some(ControlPhysicalKey::ArrowDown),
+        GLFW_KEY_RIGHT => Some(ControlPhysicalKey::ArrowRight),
+        GLFW_KEY_LEFT => Some(ControlPhysicalKey::ArrowLeft),
+        GLFW_KEY_HOME => Some(ControlPhysicalKey::Home),
+        GLFW_KEY_END => Some(ControlPhysicalKey::End),
+        GLFW_KEY_DELETE => Some(ControlPhysicalKey::Delete),
+        GLFW_KEY_PAGE_UP => Some(ControlPhysicalKey::PageUp),
+        GLFW_KEY_PAGE_DOWN => Some(ControlPhysicalKey::PageDown),
+        _ => None,
+    };
+    if named.is_some() {
+        return named;
+    }
+    let character = match key_code {
+        32 => Some(' '),
+        48..=57 | 65..=90 => char::from_u32(key_code).map(|character| {
+            if modifiers & GLFW_MOD_SHIFT != 0 {
+                character.to_ascii_uppercase()
+            } else {
+                character.to_ascii_lowercase()
+            }
+        }),
+        _ => None,
+    }?;
+    Some(ControlPhysicalKey::Character {
+        text: character.to_string(),
+    })
+}
+
 fn mouse_input_bytes(
     terminal: &TerminalSession,
     x: u16,
@@ -140,12 +199,18 @@ fn mouse_input_bytes(
     buttons: u8,
     button: u8,
     pressed: bool,
+    motion: bool,
     wheel_x: i32,
     wheel_y: i32,
 ) -> Vec<u8> {
     if !terminal.mouse_reporting_enabled() {
         return Vec::new();
     }
+    let motion_button = if motion {
+        buttons.trailing_zeros().min(2) as u16
+    } else {
+        u16::from(button.min(2))
+    };
     let mut code = if wheel_y > 0 {
         64
     } else if wheel_y < 0 {
@@ -154,8 +219,10 @@ fn mouse_input_bytes(
         66
     } else if wheel_x < 0 {
         67
+    } else if motion {
+        32 + motion_button
     } else {
-        u16::from(button.min(2))
+        motion_button
     };
     if !pressed && wheel_x == 0 && wheel_y == 0 {
         code = if buttons == 0 { 3 } else { code };
@@ -163,7 +230,11 @@ fn mouse_input_bytes(
     let x = u32::from(x).saturating_add(1);
     let y = u32::from(y).saturating_add(1);
     if terminal.sgr_mouse_mode_enabled() {
-        let suffix = if pressed || wheel_x != 0 || wheel_y != 0 { 'M' } else { 'm' };
+        let suffix = if pressed || wheel_x != 0 || wheel_y != 0 {
+            'M'
+        } else {
+            'm'
+        };
         return format!("\x1b[<{code};{x};{y}{suffix}").into_bytes();
     }
     let legacy_code = u8::try_from(code.min(223) + 32).expect("legacy mouse code fits in u8");
@@ -382,6 +453,46 @@ impl VoxTerminalService {
             end_y: 0,
         }
     }
+
+    fn empty_prompt() -> TerminalPromptMetadata {
+        TerminalPromptMetadata {
+            prompt_present: false,
+            prompt: Self::empty_range(),
+            command_present: false,
+            command: Self::empty_range(),
+            command_status_present: false,
+            command_status: 0,
+        }
+    }
+
+    fn prompt_metadata(prompt: &teamy_terminal_core::PromptMetadata) -> TerminalPromptMetadata {
+        let range = |range: Option<teamy_terminal_core::TerminalRange>| {
+            range.map_or((false, Self::empty_range()), |range| {
+                (
+                    true,
+                    TerminalRange {
+                        start_x: range.start.column,
+                        start_y: range.start.row,
+                        end_x: range.end.column,
+                        end_y: range.end.row,
+                    },
+                )
+            })
+        };
+        let (prompt_present, prompt_range) = range(prompt.prompt_range);
+        let (command_present, command_range) = range(prompt.command_range);
+        let (command_status_present, command_status) = prompt
+            .command_status
+            .map_or((false, 0), |status| (true, status));
+        TerminalPromptMetadata {
+            prompt_present,
+            prompt: prompt_range,
+            command_present,
+            command: command_range,
+            command_status_present,
+            command_status,
+        }
+    }
 }
 
 impl Default for VoxTerminalService {
@@ -400,7 +511,7 @@ impl Terminal for VoxTerminalService {
             "sfm-terminal-{}",
             self.next_session.fetch_add(1, Ordering::Relaxed)
         );
-        let pty = PtySession::spawn(&PtyConfig::test())
+        let pty = PtySession::spawn(&PtyConfig::interactive())
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         let mut state = TerminalSessionState {
             pty,
@@ -612,6 +723,7 @@ impl Terminal for VoxTerminalService {
             request.buttons,
             request.button,
             request.pressed,
+            request.motion,
             request.wheel_x,
             request.wheel_y,
         );
@@ -673,9 +785,18 @@ impl Terminal for VoxTerminalService {
                 tile_height: 0,
                 payload: Vec::new(),
                 complete: false,
-                cursor: TerminalCursor { x: 0, y: 0, visible: false },
+                cursor: TerminalCursor {
+                    x: 0,
+                    y: 0,
+                    visible: false,
+                },
                 selection_present: false,
-                selection: TerminalSelection { anchor_x: 0, anchor_y: 0, focus_x: 0, focus_y: 0 },
+                selection: TerminalSelection {
+                    anchor_x: 0,
+                    anchor_y: 0,
+                    focus_x: 0,
+                    focus_y: 0,
+                },
                 prompt: TerminalPromptMetadata {
                     prompt_present: false,
                     prompt: Self::empty_range(),
@@ -686,6 +807,7 @@ impl Terminal for VoxTerminalService {
                 },
             });
         }
+        let terminal_snapshot = session.terminal.snapshot();
         let (width, height, stride, payload) =
             Self::encode_png(&session.terminal).map_err(|mut error| {
                 error.server_sequence = sequence;
@@ -725,14 +847,59 @@ impl Terminal for VoxTerminalService {
                 focus_x: 0,
                 focus_y: 0,
             },
-            prompt: TerminalPromptMetadata {
-                prompt_present: false,
-                prompt: Self::empty_range(),
-                command_present: false,
-                command: Self::empty_range(),
-                command_status_present: false,
-                command_status: 0,
-            },
+            prompt: Self::prompt_metadata(&terminal_snapshot.prompt),
+        })
+    }
+
+    async fn get_content(
+        &self,
+        request: TerminalContentRequest,
+    ) -> Result<TerminalContentResult, TerminalError> {
+        let mut sessions = self.sessions.lock().map_err(|_| {
+            Self::error(
+                TerminalErrorCode::Internal,
+                "terminal session lock poisoned",
+                0,
+            )
+        })?;
+        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
+            Self::error(
+                TerminalErrorCode::SessionNotFound,
+                "terminal session not found",
+                0,
+            )
+        })?;
+        if request.max_chars == 0 {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                "content max_chars must be non-zero",
+                session.sequence,
+            ));
+        }
+        Self::drain_pty(session)?;
+        let sequence = session.sequence;
+        if request.after_sequence > 0 && request.after_sequence >= sequence {
+            return Ok(TerminalContentResult {
+                session_id: request.session_id,
+                sequence,
+                text: String::new(),
+                complete: false,
+                truncated: false,
+                prompt: Self::empty_prompt(),
+            });
+        }
+        let terminal_snapshot = session.terminal.snapshot();
+        let text = terminal_snapshot.visible_text();
+        let max_chars = request.max_chars.min(MAX_CONTENT_CHARS) as usize;
+        let truncated = text.chars().count() > max_chars;
+        let text = text.chars().take(max_chars).collect();
+        Ok(TerminalContentResult {
+            session_id: request.session_id,
+            sequence,
+            text,
+            complete: true,
+            truncated,
+            prompt: Self::prompt_metadata(&terminal_snapshot.prompt),
         })
     }
 
@@ -740,24 +907,48 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalCancelRequest,
     ) -> Result<TerminalOperationResult, TerminalError> {
-        let sessions = self.sessions.lock().map_err(|_| {
+        let mut sessions = self.sessions.lock().map_err(|_| {
             Self::error(
                 TerminalErrorCode::Internal,
                 "terminal session lock poisoned",
                 0,
             )
         })?;
-        let session = sessions.get(&request.session_id).ok_or_else(|| {
+        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
             Self::error(
                 TerminalErrorCode::SessionNotFound,
                 "terminal session not found",
                 0,
             )
         })?;
+        // Cancellation is a terminal input operation, not merely a state
+        // acknowledgement. Ctrl+C is deliberately encoded through the same
+        // generic key path as a client key event so every terminal control
+        // sequence retains one source of truth.
+        Self::drain_pty(session)?;
+        let interrupt_down = key_input_bytes(67, GLFW_MOD_CONTROL, true);
+        session.pty.write_input(&interrupt_down).map_err(|error| {
+            Self::error(
+                TerminalErrorCode::Internal,
+                error.to_string(),
+                session.sequence,
+            )
+        })?;
+        std::thread::sleep(Duration::from_millis(10));
+        let interrupt_up = key_input_bytes(67, GLFW_MOD_CONTROL, false);
+        session.pty.write_input(&interrupt_up).map_err(|error| {
+            Self::error(
+                TerminalErrorCode::Internal,
+                error.to_string(),
+                session.sequence,
+            )
+        })?;
+        Self::drain_pty(session)?;
+        let sequence = Self::next_sequence(&mut session.sequence);
         Ok(TerminalOperationResult {
             session_id: request.session_id,
             state: TerminalState::Ready,
-            server_sequence: session.sequence,
+            server_sequence: sequence,
         })
     }
 
@@ -837,9 +1028,18 @@ mod tests {
 
     #[test]
     fn normalize_listen_address_accepts_loopback_shorthand() {
-        assert_eq!(normalize_listen_address(":63946").unwrap(), "127.0.0.1:63946");
-        assert_eq!(normalize_listen_address("63946").unwrap(), "127.0.0.1:63946");
-        assert_eq!(normalize_listen_address("localhost:63946").unwrap(), "localhost:63946");
+        assert_eq!(
+            normalize_listen_address(":63946").unwrap(),
+            "127.0.0.1:63946"
+        );
+        assert_eq!(
+            normalize_listen_address("63946").unwrap(),
+            "127.0.0.1:63946"
+        );
+        assert_eq!(
+            normalize_listen_address("localhost:63946").unwrap(),
+            "localhost:63946"
+        );
     }
 
     #[tokio::test]
@@ -919,7 +1119,8 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        let snapshot = snapshot.expect("PowerShell output should arrive in a bounded polling window");
+        let snapshot =
+            snapshot.expect("PowerShell output should arrive in a bounded polling window");
         assert_eq!(snapshot.encoding, TerminalFrameEncoding::Png);
         assert_eq!(snapshot.kind, TerminalFrameKind::Full);
         assert!(snapshot.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
@@ -953,11 +1154,165 @@ mod tests {
         ));
         drop(sessions);
 
+        let content = client
+            .get_content(TerminalContentRequest {
+                session_id: connected.session_id.clone(),
+                after_sequence: 0,
+                max_chars: 4096,
+                client_sequence: 4,
+            })
+            .await
+            .expect("terminal content witness should be returned");
+        assert!(content.complete);
+        assert!(!content.truncated);
+        assert!(
+            content.text.lines().any(|line| line.trim() == "100"),
+            "content witness should contain range output 100:\n{}",
+            content.text
+        );
+        assert!(
+            content.text.contains("hello, world!"),
+            "content witness should contain Write-Host output:\n{}",
+            content.text
+        );
+
         client
             .disconnect(TerminalDisconnectRequest {
                 session_id: connected.session_id,
                 reason: "test complete".to_string(),
-                client_sequence: 4,
+                client_sequence: 5,
+            })
+            .await
+            .expect("terminal session should disconnect");
+        connection.shutdown().ok();
+        server_guard.shutdown().ok();
+    }
+
+    #[tokio::test]
+    async fn vox_cancel_interrupts_a_running_power_shell_command() {
+        let (client_link, server_link) = vox::memory_link_pair(16);
+        let service = VoxTerminalService::new();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            vox::acceptor_on(server_link)
+                .on_lane(TerminalDispatcher::new(server_service))
+                .establish_connection()
+                .await
+                .expect("Vox server connection should establish")
+        });
+        let connection = vox::initiator_on(client_link)
+            .establish_connection()
+            .await
+            .expect("Vox client connection should establish");
+        let server_guard = server.await.expect("Vox server task should establish");
+        let client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("terminal service lane should open");
+        let connected = client
+            .connect(TerminalConnectRequest {
+                endpoint: "test-cancel".to_string(),
+                requested_width: 120,
+                requested_height: 40,
+                capabilities: TerminalCapabilities {
+                    text_input: true,
+                    key_input: true,
+                    mouse_input: true,
+                    structured_cells: false,
+                    raster_frames: true,
+                    selection: false,
+                    scrollback: true,
+                    dirty_frames: false,
+                    max_width: MAX_COLUMNS,
+                    max_height: MAX_ROWS,
+                    max_frame_bytes: MAX_FRAME_BYTES,
+                },
+                client_sequence: 1,
+            })
+            .await
+            .expect("terminal session should connect");
+
+        client
+            .send_text(TerminalTextInput {
+                session_id: connected.session_id.clone(),
+                text: "Write-Output READY\r".to_string(),
+                client_sequence: 2,
+            })
+            .await
+            .expect("PowerShell readiness input should be accepted");
+        let mut ready = false;
+        for client_sequence in 3..=100 {
+            let candidate = client
+                .get_content(TerminalContentRequest {
+                    session_id: connected.session_id.clone(),
+                    after_sequence: 0,
+                    max_chars: 32 * 1024,
+                    client_sequence,
+                })
+                .await
+                .expect("terminal content should be readable during startup");
+            if candidate.text.contains("READY") {
+                ready = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(ready, "PowerShell readiness command did not complete");
+
+        client
+            .send_text(TerminalTextInput {
+                session_id: connected.session_id.clone(),
+                text:
+                    "1..10000 | ForEach-Object { Write-Output $_; Start-Sleep -Milliseconds 10 }\r"
+                        .to_string(),
+                client_sequence: 101,
+            })
+            .await
+            .expect("long-running PowerShell input should be accepted");
+        tokio::time::sleep(Duration::from_millis(1_000)).await;
+
+        let cancelled = client
+            .cancel(TerminalCancelRequest {
+                session_id: connected.session_id.clone(),
+                request_sequence: 2,
+                reason: "puppet cancellation proof".to_string(),
+                client_sequence: 3,
+            })
+            .await
+            .expect("terminal cancellation should be accepted");
+        assert_eq!(cancelled.state, TerminalState::Ready);
+
+        let mut content = String::new();
+        for client_sequence in 4..=120 {
+            let candidate = client
+                .get_content(TerminalContentRequest {
+                    session_id: connected.session_id.clone(),
+                    after_sequence: 0,
+                    max_chars: 32 * 1024,
+                    client_sequence,
+                })
+                .await
+                .expect("terminal content should remain readable after cancellation");
+            content = candidate.text;
+            if content.contains("PS ") || content.contains("❯") {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+        assert!(
+            content.contains("PS ") || content.contains("❯"),
+            "cancelled PowerShell command should return to a prompt:\n{content}"
+        );
+        assert!(
+            !content.contains("10000"),
+            "cancelled PowerShell command should not contain the range sentinel:\n{content}"
+        );
+
+        client
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "test complete".to_string(),
+                client_sequence: 121,
             })
             .await
             .expect("terminal session should disconnect");
@@ -967,35 +1322,73 @@ mod tests {
 
     #[test]
     fn key_input_uses_terminal_control_sequences_without_hardcoded_chords() {
-        assert_eq!(key_input_bytes(65, GLFW_MOD_CONTROL, true), vec![0x01]);
-        assert_eq!(key_input_bytes(67, GLFW_MOD_CONTROL, true), vec![0x03]);
-        assert_eq!(key_input_bytes(GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL, true), vec![0x17]);
+        assert_eq!(
+            key_input_bytes(65, GLFW_MOD_CONTROL, true),
+            b"\x1b[65;30;1;1;8;1_"
+        );
+        assert_eq!(
+            key_input_bytes(67, GLFW_MOD_CONTROL, true),
+            b"\x1b[67;46;3;1;8;1_"
+        );
+        assert_eq!(
+            key_input_bytes(67, GLFW_MOD_CONTROL, false),
+            b"\x1b[67;46;0;0;8;1_"
+        );
+        assert_eq!(
+            key_input_bytes(76, GLFW_MOD_CONTROL, true),
+            b"\x1b[76;38;12;1;8;1_"
+        );
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL, true),
+            b"\x1b[8;14;8;1;8;1_"
+        );
         assert_eq!(
             key_input_bytes(GLFW_KEY_RIGHT, GLFW_MOD_CONTROL, true),
-            b"\x1b[1;5C".to_vec()
+            b"\x1b[39;77;0;1;264;1_"
         );
-        assert_eq!(key_input_bytes(GLFW_KEY_RIGHT, 0, false), Vec::<u8>::new());
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_LEFT, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, true),
+            b"\x1b[37;75;0;1;280;1_"
+        );
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_RIGHT, 0, false),
+            b"\x1b[39;77;0;0;256;1_"
+        );
     }
 
     #[test]
     fn unmodified_character_key_codes_are_supported_for_protocol_tests() {
-        assert_eq!(key_input_bytes(65, 0, true), b"a".to_vec());
-        assert_eq!(key_input_bytes(65, GLFW_MOD_SHIFT, true), b"A".to_vec());
-        assert_eq!(key_input_bytes(GLFW_KEY_ENTER, 0, true), b"\r".to_vec());
+        assert_eq!(key_input_bytes(65, 0, true), b"\x1b[65;30;97;1;0;1_");
+        assert_eq!(
+            key_input_bytes(65, GLFW_MOD_SHIFT, true),
+            b"\x1b[65;30;65;1;16;1_"
+        );
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_ENTER, 0, true),
+            b"\x1b[13;28;13;1;0;1_"
+        );
     }
 
     #[test]
     fn mouse_input_respects_terminal_reporting_mode_and_uses_one_based_sgr_cells() {
         let mut terminal = TerminalSession::new(TerminalLimits::default(), 80, 24);
-        assert!(mouse_input_bytes(&terminal, 2, 3, 0, 0, true, 0, 0).is_empty());
+        assert!(mouse_input_bytes(&terminal, 2, 3, 0, 0, true, false, 0, 0).is_empty());
         terminal.process_bytes(b"\x1b[?1000;1006h");
         assert_eq!(
-            mouse_input_bytes(&terminal, 2, 3, 1, 0, true, 0, 0),
+            mouse_input_bytes(&terminal, 2, 3, 1, 0, true, false, 0, 0),
             b"\x1b[<0;3;4M".to_vec()
         );
         assert_eq!(
-            mouse_input_bytes(&terminal, 2, 3, 0, 0, false, 0, 1),
+            mouse_input_bytes(&terminal, 2, 3, 0, 0, false, false, 0, 1),
             b"\x1b[<64;3;4M".to_vec()
+        );
+        assert_eq!(
+            mouse_input_bytes(&terminal, 4, 5, 1, 0, true, true, 0, 0),
+            b"\x1b[<32;5;6M".to_vec()
+        );
+        assert_eq!(
+            mouse_input_bytes(&terminal, 4, 5, 2, 0, true, true, 0, 0),
+            b"\x1b[<33;5;6M".to_vec()
         );
     }
 }

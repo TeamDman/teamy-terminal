@@ -1,4 +1,5 @@
 /target
+/tools/vox-terminal-server/target/
 /tracy/
 ignore
 *.tracy

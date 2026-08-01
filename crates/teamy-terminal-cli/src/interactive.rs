@@ -1199,7 +1199,7 @@ fn physical_control_state(
     state
 }
 
-fn win32_physical_key_event_bytes(
+pub(crate) fn win32_physical_key_event_bytes(
     key: &ControlPhysicalKey,
     key_down: bool,
     pressed: &[ControlPhysicalKey],

@@ -23,7 +23,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
-const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"$global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
+const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"if (Get-Module -ListAvailable -Name PSReadLine) { Import-Module PSReadLine -ErrorAction SilentlyContinue }; $global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
 
 /// Initial terminal dimensions used before a window reports its real size.
 pub const DEFAULT_COLUMNS: u16 = 120;
@@ -90,8 +90,10 @@ impl PtyConfig {
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "teamy-terminal");
         command.env("TERM_PROGRAM_VERSION", env!("CARGO_PKG_VERSION"));
-        if !self.no_profile && is_pwsh_shell(&self.shell) {
-            command.env("TEAMY_SHELL_INTEGRATION", "osc133-pwsh-prompt");
+        if is_pwsh_shell(&self.shell) {
+            if !self.no_profile {
+                command.env("TEAMY_SHELL_INTEGRATION", "osc133-pwsh-prompt");
+            }
             command.arg("-NoExit");
             command.arg("-Command");
             command.arg(TEAMY_PWSH_OSC133_BOOTSTRAP);
@@ -532,8 +534,8 @@ mod tests {
         assert!(interactive
             .iter()
             .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
-        assert!(!test.iter().any(|argument| argument == "-NoExit"));
-        assert!(!test
+        assert!(test.iter().any(|argument| argument == "-NoExit"));
+        assert!(test
             .iter()
             .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
     }
