@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-07-27
+**Last updated:** 2026-08-02
 
 ## How to update this plan
 
@@ -21,7 +21,14 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Complete Phase 4's optional SFM integration. The code-level input mapping,
+**Next slice:** Reproduce the current user-perceived multi-second SFM terminal
+delay with a machine-readable end-to-end witness, complete 3.5.6's native-size
+contract, and then run Phase 3.6's renderer comparison work in parallel with
+the remaining Phase 4 integration. Do not assume that CPU `fontdue`
+rasterization is the dominant bridged cost merely because it is a plausible
+hypothesis: the Rust glyph pass, PNG/readback/encoding, Vox transfer, Java PNG
+decode, Minecraft texture allocation/upload, render-thread scheduling, and
+final presentation must be independently observable. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, and mouse selection
 are complete. The elevated live control-plane gate now
@@ -42,6 +49,12 @@ state plus bounded full-PNG snapshots: Rust owns the PTY, VT parsing, colors,
 scrollback, and rasterization; Java sends input/resize and displays the PNG.
 Dirty-cell/tile, unchanged-glyph, and GPU-sharing optimizations are deferred
 until the end-to-end correctness proof is captured.
+SFM manual testing now adds a presentation constraint: at high Minecraft GUI
+scale, the Java panel must not stretch a smaller Rust PNG. The bridge contract
+must carry logical panel dimensions and cell metrics so Rust increases font
+size while preserving the intended cell grid. The current CPU `fontdue` path
+remains the correctness baseline; slug/GPU rasterization and persistent-target
+optimization stay later slices.
 The interactive follow-up now uses the existing Vox `send_key` and `send_mouse`
 operations rather than buffering a Java command line: printable code points are
 sent as exact text, control/navigation keys are sent as key transitions, and
@@ -67,15 +80,18 @@ physical modifiers are released at the end of every request, including error
 cleanup, and numeric keys use the same explicit `down:1`/`up:1` form as every
 other physical key.
 
-The first profiling evidence pass is now complete enough to make the renderer
-decision: retain the full-frame baseline, and validate the opt-in
+The first profiling evidence pass is complete enough to make the CPU damage
+decision, not the final cross-process renderer decision: retain the full-frame baseline, and validate the opt-in
 `dirty_rendering` prototype against it. The capture observed a low
 changed-cell ratio while the current path still rasterized and uploaded the
 whole frame; a naive changed-cell loop without cached frame storage and
 swapchain-safe partial upload is not an acceptable optimization. The candidate
 now has a successful 40-second GUI capture with generated output and explicit
 800x450/1600x900 resizes; the stale registry entry from an earlier instance
-remains visible but does not prevent new windows from launching.
+remains visible but does not prevent new windows from launching. Those
+standalone Rust captures do not include PNG transport or Minecraft's decode,
+texture, scheduling, and presentation costs, so they cannot establish the
+cause of the current SFM lag by themselves.
 
 ## Purpose
 
@@ -503,7 +519,7 @@ markers. Each fixture checks dimensions, cursor state, visibility, scrollback,
 and a full-snapshot FNV-1a hash. `cargo test -p teamy-terminal-cli --test
 replay --locked --offline` passes 1/1.
 
-## Phase 3 — Font and Vulkan tracks [x]
+## Phase 3 — Font, Vulkan, and comparative rendering tracks [~]
 
 These are intentionally parallel: the renderer may use a temporary fake glyph
 source while the font seam is finalized. Each track must cite the source seam
@@ -683,7 +699,7 @@ font metrics/cache, invalidates the cached frame, reflows the terminal, and
 resizes the PTY. Automated direction/bounds tests pass, and the same behavior
 is exercised through `invoke zoom` on a hidden Vulkan-backed instance.
 
-## Phase 3.5 — Profiling contract and Windows presentation polish [x]
+## Phase 3.5 — Profiling contract and Windows presentation polish [~]
 
 This phase is the performance and integration follow-up to the interactive
 MVP. teamy-profiler is the golden execution harness; teamy-rust-cli is the
@@ -1111,6 +1127,253 @@ next implementation slice should evaluate the swapchain/persistent-target
 design before attempting further partial-upload changes, while retaining the
 current CPU dirty-rendering result as the default interactive optimization.
 
+### [ ] 3.5.6 Couple external frame size to logical cells and font metrics
+
+**Work:** Extend the portable frame/bridge contract so an SFM panel provides
+logical dimensions and terminal cell metrics, and the Rust renderer selects a
+font size that keeps the requested cell grid stable. Java must present the
+result without bitmap upscaling. Keep the CPU `fontdue` renderer as the
+reference implementation and leave slug/GPU rasterization and persistent
+swapchain targets to later optimization work.
+
+**Validation:** Capture the same terminal content at normal Minecraft GUI scale
+and GUI scale 7. Assert the same requested `columns × rows`, larger Rust
+font/cell pixel dimensions, and a native-sized delivered frame through typed
+content/frame-metadata/screenshot witnesses. Compare it against a
+Java-stretched-frame negative control and add a bridge fixture for resize and
+stale-frame rejection.
+
+**Completion criteria:** High-scale SFM presentation remains crisp enough to
+prove that font size, not post-render bitmap stretching, is responding to the
+available panel size; the logical-size contract is documented and covered by
+focused tests; and no GPU/slug implementation is required to pass this gate.
+
+## Phase 3.6 — Cross-renderer evidence laboratory and GPU text path [ ]
+
+This phase turns terminal performance into a reproducible comparison rather
+than a sequence of renderer guesses. The motivating symptom is the user's
+current perception of a multi-second delay in the Rust-backed SFM terminal.
+The first gate is to observe that delay computationally on the current CPU
+full-PNG behavior. The CPU `fontdue` path is a hypothesis and the stable visual
+reference, not a preselected culprit or loser. A GPU path is not considered a
+GPU glyph renderer if it merely uploads pixels already rasterized by
+`fontdue` on the CPU.
+
+The comparison must keep terminal semantics independent from presentation.
+One terminal snapshot and damage stream must be consumable by Rust CPU, Rust
+GPU/slug, and Java cell renderers. Pixel transport and semantic-cell transport
+are separate variables: a fast Rust GPU rasterizer may still lose to GPU
+readback, PNG encoding, transfer, Java decoding, or texture upload, while a
+Java semantic-cell renderer may save bandwidth but spend more time in
+Minecraft font/layout calls. Measure the complete path and every major stage.
+
+### [ ] 3.6.1 Capture the perceived multi-second bridge delay
+
+**Work:** Add a cross-process correlation id and terminal/frame sequence to the
+current Rust CPU full-PNG path. Record the local monotonic timestamps or
+durations for input receipt, PTY drain, VT mutation, snapshot/damage creation,
+glyph rasterization, frame construction, GPU upload/present where applicable,
+GPU readback, PNG/raw encoding, response send, Java receive, Java decode,
+texture allocation/update/upload, panel render, and the first frame that
+reports the target sequence as presented. Do not subtract unrelated Rust and
+Java clocks as though they were synchronized; transmit Rust stage durations
+and let Java measure its own stages plus end-to-end request/output-to-present
+latency.
+
+Exercise cold and warm glyph caches, idle/prompt typing, `1..100`,
+`1..10000 | Out-Host`, cyan ANSI output, scroll floods, alternate-screen
+entry/restoration, panel resize, normal GUI scale, GUI scale 7, and a split
+panel. Use repeated samples and retain the exact user-visible scenario that
+reproduces the lag. If unattended automation cannot reproduce the perceived
+multi-second magnitude, expose typed start/mark/stop capture actions so a
+manual session can produce the same manifest without relying on stopwatch
+memory or screen recording.
+
+**Validation:** A checked manifest identifies source revisions, CPU/GPU,
+driver, OS, Java/Minecraft version, window/panel dimensions, GUI scale,
+columns/rows, font and size, renderer, transport, cache state, workload,
+sample count, bytes, dropped/stale frames, and stage timings. The current
+default path has a machine-readable input-or-output-to-present measurement in
+the same multi-second range perceived by the user, or the plan records which
+tested scenarios failed to reproduce it and the manual capture needed to do
+so.
+
+**Completion criteria:** We can point to the correlated sequence and stage
+durations that account for the visible delay. No backend is promoted and no
+GPU performance claim is accepted before this witness exists.
+
+### [ ] 3.6.2 Freeze renderer-neutral snapshot, request, and result contracts
+
+**Work:** Keep PTY ownership, VT parsing, scrollback, cursor, selection, color,
+style, wide-cell occupancy, and damage calculation in the renderer-free core.
+Define a bounded render request containing session/sequence, logical
+columns/rows, physical pixel extent, requested cell/font metrics, font
+selection, complete-versus-damage state, cursor/selection overlays, and cache
+invalidation reason. Define a render result containing backend identity,
+native pixel dimensions, cell metrics, full-frame/dirty-region metadata,
+optional portable pixels or renderer-owned presentation data, visual hash,
+and bounded stage statistics.
+
+Semantic transport must carry terminal cells, not plain transcript text. It
+must preserve grapheme/code point, foreground/background, bold, underline,
+inverse, width/continuation cells, cursor shape/location, selection, damage,
+sequence, and full-refresh semantics. Renderer and transport selection must
+be explicit in CLI/configuration and artifact manifests so changing one does
+not silently change the other.
+
+**Validation:** The same deterministic snapshots and damage sequences are
+accepted by multiple test backends. Bounds, stale/out-of-order sequences,
+malformed continuation cells, resize invalidation, and unsupported capability
+negotiation have focused tests. Core/font crates do not acquire winit, Vulkan,
+Minecraft, or Vox dependencies.
+
+**Completion criteria:** Rust CPU, Rust GPU/slug, and imported Java comparison
+results can share one fixture identity and one semantic correctness oracle
+without sharing application-specific renderer objects.
+
+### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
+
+**Work:** Retain full-frame and dirty-cell `fontdue` rendering as explicit
+named reference backends. Make full PNG, raw full pixels, and raw or losslessly
+compressed dirty regions selectable transport outputs where the frame
+contract supports them. Keep Caskaydia Cove Nerd Font Mono version/provenance,
+font size, fallback choice, and glyph-cache state explicit. Measure persistent
+render targets and partial uploads separately from glyph rasterization so an
+upload improvement is not reported as a font improvement.
+
+**Validation:** Full-frame and dirty paths are pixel-equivalent for the same
+fontdue request after composing dirty regions. The fixture suite covers ANSI
+colors, bold, underline, inverse, cursor variants, selection, wide glyphs,
+combining/fallback characters, scroll, alternate screen, resize, and forced
+full refresh. Existing `--no-default-features` and dirty-rendering baselines
+remain reproducible.
+
+**Completion criteria:** The CPU reference can be run headlessly and through
+the real bridge with stable backend/transport names, comparable manifests,
+and no accidental bitmap scaling.
+
+### [ ] 3.6.4 Extract Teamy Studio's slug algorithm into a true GPU backend
+
+**Work:** Audit the current Teamy Studio slug implementation and copy only the
+font geometry/coverage, shader, atlas/buffer, and test concepts needed behind
+the renderer-neutral request. Record source revision and file provenance.
+Exclude Teamy Studio application/window models and unrelated DirectX, CUDA,
+Burn, PyTorch, or UI dependencies. The new backend must generate glyph
+coverage/compositing on the GPU; Vulkan presentation of CPU-fontdue RGBA bytes
+does not satisfy this item.
+
+The planning audit found the current reference at Teamy Studio revision
+`c827d78c4b60b64348a82db9c7a961c01c8d0701`: the implementation and CPU
+oracles live in
+`crates/teamy_studio_shell/src/windows_d3d12_renderer.rs`, with design and
+known band/glyph regressions in `docs/notes/slug-font-renderer.md` and
+`docs/notes/text-rendering-glyphy-band-contract-plan.md`. Re-record the exact
+revision used when extraction begins rather than assuming this planning pin
+remains current.
+
+Support damage, glyph caching, colors/styles, cursor/selection, wide cells,
+resize, font-size changes, and deterministic readback. Add a true no-window
+Vulkan device/image path for automated rendering if the platform supports it;
+retain `--hidden` production-window execution as a separate comparison rather
+than calling it headless. Because SFM cannot assume cross-process native GPU
+handle sharing, measure GPU readback, encoding, and portable transfer costs
+independently. Native-handle interop remains an optional later experiment.
+
+**Validation:** CPU/fontdue and GPU/slug consume the same fixtures. GPU
+readback artifacts are bounded and repeatable enough for visual comparison;
+shader/geometry tests include the known difficult glyphs and band-contract
+regressions documented by Teamy Studio. Missing Vulkan produces an actionable
+skip/diagnostic without invalidating CPU/core tests.
+
+**Completion criteria:** A selectable `rust-gpu-slug` backend renders terminal
+glyphs on Vulkan, produces native-sized visible artifacts, and reports raster,
+GPU execution/readback, encode, and transfer stages separately.
+
+### [ ] 3.6.5 Produce visual comparisons across every renderer/font pair
+
+**Work:** Build a deterministic comparison command that consumes one fixture
+set plus imported SFM Java artifacts and emits the source snapshot, each PNG,
+heat-map/diff images, and a self-contained HTML/JSON report. Compare at fixed
+logical grids, native pixel extents, font sizes, GUI scales, and cold/warm
+caches. Include Rust fontdue with Caskaydia Cove Nerd Font Mono, Rust GPU/slug
+with that same face, Java with the vanilla Minecraft font, and Java with the
+same named/versioned Caskaydia Cove Nerd Font Mono face used by Rust.
+
+Use exact pixel equality only for repeat runs or backends expected to be
+pixel-identical. Different rasterizers and fonts require semantic assertions
+plus recorded geometry, color, glyph-occupancy, and perceptual/image-distance
+metrics; an antialiasing difference must not hide a missing glyph, wrong cell,
+wrong color, stale cursor, or bitmap stretch. Reports must make side-by-side
+human inspection easy while remaining machine-readable.
+
+**Validation:** Fixtures include ASCII prompt text, Nerd Font glyphs, fallback
+Unicode, ANSI palette samples, bold/underline/inverse, cursor and selection,
+wide/combining text, dense output, and normal/high GUI-scale captures. Every
+artifact records renderer, transport, font identity/hash, cell metrics,
+logical grid, and native image dimensions.
+
+**Completion criteria:** A reviewer can compare visual quality and terminal
+correctness without guessing which backend/font produced an image, and CI can
+detect semantic or material visual regressions without demanding false
+cross-font pixel identity.
+
+### [ ] 3.6.6 Run the temporal matrix and make an evidence-based default decision
+
+**Work:** Run matched repeated samples for each valid combination of renderer
+(`rust-cpu-fontdue`, `rust-gpu-slug`, `java-vanilla`, `java-caskaydia`),
+transport (full PNG, full raw pixels, dirty pixels/tiles, semantic cells),
+workload, layout, GUI scale, and cache state. Invalid combinations must be
+reported as unsupported rather than silently substituted. Record p50/p95/p99
+and maximum input-to-present and output-complete-to-present latency, Rust and
+Java CPU time, GPU time when available, rasterized cells/pixels, bytes encoded
+and transferred, allocations, texture creations/updates, uploaded bytes,
+frames rendered/presented/dropped/coalesced/stale, queue depth, and resize or
+reflow time.
+
+Use Teamy Profiler/Tracy to locate work and the fixed benchmark manifest as the
+regression gate. Separate cold startup from steady-state interaction and
+separate Rust GPU raster time from readback/encoding/bridge costs. Select the
+default bridge renderer/transport from end-to-end evidence, correctness, and
+visual quality; do not select GPU merely because one internal GPU span is
+shorter. Retain the CPU reference and at least one semantic Java comparator
+for diagnosis even if they are not the default.
+
+**Validation:** The report reproduces the original lag witness, reruns it on
+every candidate, and shows matched before/after distributions with source and
+environment manifests. The selected path passes the full semantic fixture and
+visual acceptance suite and has no unexplained multi-second outliers.
+
+**Completion criteria:** The plan records the selected default, rejected or
+deferred combinations and why, measured trade-offs, fallback policy, and exact
+commands/artifacts required to repeat the decision.
+
+### Parallel implementation topology
+
+The lag witness and contract are integration foundations, but implementation
+does not need to become serial after their first reviewed version. Assign
+separate subagents or user-visible Codex tasks backed by isolated
+branches/worktrees for each track, record
+their exact locations here when work begins, and give one integration owner
+responsibility for contract changes. No two agents should edit the same
+canonical plan or generated Vox output concurrently.
+
+| Track | May start after | Primary ownership | Parallel deliverable |
+| --- | --- | --- | --- |
+| P0 — correlation and benchmark contract | immediately | shared manifest, ids, stage vocabulary, lag reproducer | 3.6.1 plus the first reviewed 3.6.2 contract |
+| P1 — Rust CPU/transport baselines | P0 contract draft | teamy-terminal font/frame/CPU paths | 3.6.3 full/dirty PNG/raw evidence |
+| P2 — Rust GPU/slug | P0 render-request draft | isolated Teamy Studio audit and teamy-terminal Vulkan/slug backend | 3.6.4 GPU fixtures and timings |
+| P3 — Java vanilla renderer | P0 semantic snapshot draft | canonical-oldest SFM Java panel backend | vanilla-font artifacts and Java timings |
+| P4 — Java Caskaydia renderer | font identity and licensing frozen | SFM resources/font adapter, separate from P3 where practical | same-font Java artifacts and metrics |
+| P5 — Vox cell/damage transport | P0 semantic snapshot draft | isolated Facet/Vox contract worktree plus generated Java/Rust fixtures | bounded semantic-cell capability and round trips |
+| P6 — report and visual-diff tooling | fixture ids and manifest schema frozen | renderer-independent artifact/report tooling | HTML/JSON matrix, diffs, and comparison summaries |
+
+P1–P6 may proceed concurrently. Integration waits for a reviewed contract
+revision and imports immutable commits/artifacts from each track. P3/P4 must
+follow SFM's oldest-branch-first rule and must not propagate until the selected
+canonical implementation is accepted. P5 must not modify Cloud Terrastodon.
+The final matrix and default decision in 3.6.6 are integration work and remain
+sequential after the candidate evidence is available.
+
 ## Phase 4 — Optional SFM integration [ ]
 
 ### [ ] 4.1 Integrate a local core/frame path without runtime coupling
@@ -1302,12 +1565,12 @@ overwritten by baseline code.
 | Target/dialect | Support status | Required validation | Evidence |
 | --- | --- | --- | --- |
 | Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
-| Windows x64 interactive Vulkan MVP | Goal of the current slice | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, live keyboard/paste/resize/alternate-screen/Ctrl+C/close, and app-owned selection/copy/zoom/visibility probes pass; native Ctrl+wheel is a manual UX smoke |
-| Windows Vulkan device | Supported when loader/device exists | renderer diagnostic plus window/off-screen proof | Window startup smoke passes; off-screen path deferred |
+| Windows x64 interactive Vulkan MVP | Completed standalone baseline | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, live keyboard/paste/resize/alternate-screen/Ctrl+C/close, and app-owned selection/copy/zoom/visibility probes pass; native Ctrl+wheel is a manual UX smoke |
+| Windows Vulkan device | Supported for windowed CPU-pixel presentation when loader/device exists; true GPU slug/off-screen comparison pending | renderer diagnostic, then Phase 3.6 GPU glyph and no-window/off-screen proof | Window startup smoke passes; true GPU glyph/off-screen path is Phase 3.6.4 |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
-| SFM optional Rust/Vox mode | Optional development tooling | pinned dependency, frame/bridge puppet proof | Pending Phase 4 |
+| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG correctness baseline proven | pinned dependency, frame/bridge puppet proof, then Phase 3.6/V-4 renderer matrix | Input/lifecycle/full-PNG puppets pass; native-size and comparative performance evidence remain open |
 
 ## Overall completion criteria
 
@@ -1317,11 +1580,12 @@ default-profile PowerShell PTY and supports the agreed command/input/resize/
 cancellation/exit behavior. Portable frame encoding, SFM integration, and
 cross-platform renderer support are post-MVP work.
 
-The roadmap as a whole is not complete: Phase 3.4 and Phases 4–5 remain future
-work. The active MVP goal is therefore audited against the
-Phase 3.4 boundary, not against those deferred roadmap deliverables. As of the
-latest audit, the live keyboard/control boundary and app-owned selection/copy/
-zoom/visibility boundary are green, and Phase 3.4 is [x].
+The roadmap as a whole is not complete: the standalone Phase 3.4 boundary is
+complete, while 3.5.6, Phase 3.6, the remaining Phase 4 bridge work, and Phase
+5 remain open. The current performance work is audited against the
+multi-second SFM lag witness and cross-renderer matrix, not retroactively folded
+into the already-complete standalone MVP. The live keyboard/control boundary
+and app-owned selection/copy/zoom/visibility boundary are green.
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.
@@ -1330,6 +1594,12 @@ zoom/visibility boundary are green, and Phase 3.4 is [x].
   open until the broader phase evidence is green.
 - [ ] Font extraction and Vulkan/off-screen output have deterministic fixtures.
 - [ ] Portable frame data is validated without native GPU-handle interop.
+- [ ] The current SFM multi-second delay is reproduced with correlated
+  Rust/Java stage evidence and no unsynchronized-clock arithmetic.
+- [ ] Rust CPU/fontdue, Rust GPU/slug, Java vanilla-font, and Java Caskaydia
+  candidates have matched semantic, visual, and temporal reports.
+- [ ] The selected renderer/transport has no unexplained multi-second outlier
+  in the matched workload and the rejected alternatives are documented.
 - [ ] SFM integration is optional, pinned, and never an absolute path in
   canonical or propagated source.
 - [ ] Java-local SFM functionality remains self-sufficient when Rust is absent.
@@ -1348,11 +1618,16 @@ zoom/visibility boundary are green, and Phase 3.4 is [x].
 | Absolute local path leaks into SFM or later versions | Cargo config override only; inspect diff/lockfile; baseline-first propagation audit | Phase 4.1–4.2 |
 | Font extraction couples the app to Teamy Studio | Renderer-neutral fixture and dependency-tree check before integration | Phase 3.1 |
 | PNG-per-keystroke causes latency or CPU pressure | PNG only for keyframes/artifacts; dirty-tile/raw frame path for live updates | Phase 3.3–4.3 |
+| A plausible `fontdue` hypothesis hides Java decode/upload or scheduling cost | Require the correlated current-path lag witness before changing defaults; report every major Rust/Java stage | Phase 3.6.1 |
+| GPU glyph work looks fast internally but readback/encoding erases the gain | Measure GPU execution, readback, encode, transfer, Java upload, and end-to-end presentation separately | Phase 3.6.4–3.6.6 |
+| Cross-font pixel differences create false failures or hide real terminal errors | Pair semantic cell assertions with geometry/color/occupancy and perceptual reports; use exact pixels only where valid | Phase 3.6.5 |
+| Rust and Java monotonic clocks are treated as synchronized | Correlate ids/sequences, transmit local stage durations, and let Java measure its own end-to-end interval | Phase 3.6.1 |
 | Review mistakes a smoke test for runtime wiring | Pair unit/fixture checks with CLI, renderer, and SFM puppet evidence at each boundary | All phases |
 
 The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
 core VT state, bounded replay, embedded font, Vulkan presenter, portable frame
-encoding, and interactive wiring are implemented. The next required evidence
-is desktop MVP interaction and the corresponding runtime audit; SFM pinning,
-Java-local integration, optional Rust consumption, and propagation remain
-deferred.
+encoding, interactive wiring, and CPU full-PNG SFM correctness proof are
+implemented. The next required evidence is the correlated current-path SFM lag
+witness, native-size/cell-metric proof, and parallel renderer/transport
+candidate work defined by Phase 3.6; release/propagation decisions follow the
+matched integration matrix.
