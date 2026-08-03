@@ -21,21 +21,13 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Complete the Facet prerequisite in 3.6.2b and then replace
-SFM's 50 ms unary snapshot poller with a bounded Vox `Tx`/`Rx` frame
-subscription. The current CPU/full-PNG path now retains its reusable Rust and
-Minecraft presentation resources, so the remaining baseline defect is live
-delivery. Rust must
-observe PTY/VT sequence changes continuously and begin publishing the newest
-state immediately; there is no frame debounce interval. Backpressure is
-latest-state bounded: at most one frame is rendering/sending and one newer
-sequence is pending, so output floods cannot queue obsolete full PNGs. The
-one-shot `snapshot` operation remains for explicit capture, bootstrap, and
-resynchronization, not periodic live delivery. Re-run the correlated witness
-after each repair before starting GPU/slug or Java renderer implementation.
-The resource-retention work and Facet Java-channel runtime/codegen work are
-parallelizable; the Rust producer and SFM consumer integration depend on the
-reviewed generated channel contract.
+**Next slice:** 3.6.2b is complete: the retained CPU/full-PNG baseline now uses
+bounded Vox `Tx`/`Rx` push delivery with no steady snapshot poller. Proceed to
+3.6.3 by preserving and naming the CPU reference renderer/transport variants
+before comparing GPU/slug and Java rendering candidates. Keep renderer and
+transport selection independent, retain the completed correlated witness, and
+do not infer that GPU glyph work wins until readback, encoding, transport, Java
+upload, scheduling, and presentation are measured end to end.
 
 Do not assume that CPU `fontdue` rasterization is the dominant bridged cost
 merely because it is a plausible hypothesis: the Rust glyph pass,
@@ -1383,7 +1375,7 @@ workspace Rust test attempt also exposed only the unrelated pre-existing
 stochastic `fuzz_cli_args_roundtrip` zero-valid-sample failure; all 23 library
 tests and every focused resource/lifecycle test passed.
 
-### [ ] 3.6.2b Replace live snapshot polling with bounded Vox Tx/Rx push
+### [x] 3.6.2b Replace live snapshot polling with bounded Vox Tx/Rx push
 
 **Work:** Extend the generated Facet/Vox terminal service with a typed
 request-scoped frame subscription, expected to have the directional shape
@@ -1446,6 +1438,33 @@ begin publication immediately on Rust sequence mutation, remain bounded under
 an output flood or stalled Java receiver, recover through an explicit fresh
 subscription, and require no timer-driven Java frame polling. One-shot
 snapshot remains functional but is absent from steady-state live telemetry.
+
+**Completion evidence — 2026-08-03:** Teamy Terminal commit `7117b00` moves PTY
+drain/publication into the session actor, publishes immediately through a typed
+request-scoped channel, permits one render/send in flight plus one newest
+pending sequence, reports credit/coalescing/queue counters, emits a complete
+initial/resynchronization frame, and isolates session ownership. Eleven focused
+producer tests pass, including slow-credit coalescing, cancellation/restart,
+stale epochs, and independent sessions; seven PTY tests pass, with the one
+pre-existing sandbox-only Ctrl+C case still ignored. Facet commits
+`75833707780b8a4570638044b7714fe6030065f0` and
+`4d62d2cfb211f48f89ca4a06c466ca8fe452ca03` provide the Java `Tx`/`Rx`
+runtime/codegen/package and exact Rust-authoritative nested schema closures.
+The Facet gates pass 43 vox-codegen tests, 78 Java assertions, 12 Java-wire
+tests, formatting, and deterministic package verification; SFM pins the latter
+revision and package hash `14d192241617c123a37b37434b7f0bfbf681eb3e`.
+
+The normal and 3840×2130 GUI-scale-7 SFM puppets both pass the complete terminal
+interaction/restart witness. They record zero steady snapshot calls and zero
+poll loops, two subscriptions, one retired pre-restart channel, no rejected
+events, producer pending-depth maximum one, and completed render/send counts.
+Normal receives/accepts 397 events, delivers 393 Java frames, supersedes four,
+and records 34 completed pushes with 119 pre-render coalesces. GUI-scale 7
+receives/accepts 399 events, delivers 397 Java frames, supersedes two, and
+records 32 completed pushes with 125 pre-render coalesces. The latter
+mutation-to-send sample is 4,321 microseconds. Machine-readable evidence is
+checked into SFM as
+`docs/architecture/evidence/vox-terminal-push-delivery-1.19.2.json`.
 
 ### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
 
@@ -1860,9 +1879,9 @@ and app-owned selection/copy/zoom/visibility boundary are green.
 
 The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
 core VT state, bounded replay, embedded font, Vulkan presenter, portable frame
-encoding, interactive wiring, and CPU full-PNG SFM correctness proof are
-implemented. The correlated lag witness and native-size/cell-metric proof are
-complete. The next required work is 3.6.2b Vox push delivery, followed by the
-parallel renderer/transport candidates defined
+encoding, interactive wiring, CPU full-PNG SFM correctness proof, correlated
+lag witness, native-size/cell-metric proof, retained resources, and bounded Vox
+push delivery are implemented. The next required work is 3.6.3's named CPU
+reference paths, followed by the parallel renderer/transport candidates defined
 by Phase 3.6; release/propagation decisions follow the matched integration
 matrix.
