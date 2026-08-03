@@ -238,7 +238,7 @@ impl RenderFixtureArgs {
             base_sequence: descriptor.base_sequence,
             width: descriptor.width,
             height: descriptor.height,
-            stride: descriptor.stride,
+            stride: transport.wire_stride(descriptor.stride),
             bytes: rendered.update.bytes.len(),
             regions: rendered.update.regions.len(),
             exact_equivalence: rendered.exact_equivalence,
@@ -419,7 +419,7 @@ fn manifest(
         logical_columns: rendered.logical_columns,
         logical_rows: rendered.logical_rows,
         frame_stride: descriptor.width.saturating_mul(4),
-        update_stride: descriptor.stride,
+        update_stride: transport.wire_stride(descriptor.stride),
         bytes_per_pixel: 4,
         origin: "top-left".to_string(),
         alpha_mode: "straight".to_string(),
@@ -523,6 +523,13 @@ impl RenderFixtureTransport {
         }
     }
 
+    const fn wire_stride(self, rgba_stride: u32) -> u32 {
+        match self {
+            Self::FullPng | Self::DirtyRawRgba => 0,
+            Self::FullRawRgba => rgba_stride,
+        }
+    }
+
     const fn default_path(self) -> &'static str {
         match self {
             Self::FullPng => "teamy-terminal-fixture.png",
@@ -616,6 +623,9 @@ mod tests {
             manifests[1].payload_fnv1a64,
             manifests[1].composition_proof.direct_full_b_rgba_fnv1a64
         );
+        assert_eq!(manifests[0].update_stride, 0);
+        assert_eq!(manifests[1].update_stride, manifests[1].frame_stride);
+        assert_eq!(manifests[2].update_stride, 0);
         assert_eq!(
             manifests[2].payload_fnv1a64,
             manifests[2].composition_proof.dirty_payload_fnv1a64

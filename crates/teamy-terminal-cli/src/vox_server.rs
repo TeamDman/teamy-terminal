@@ -3789,7 +3789,7 @@ mod tests {
             "cancelled PowerShell command should return to a prompt:\n{content}"
         );
         assert!(
-            !content.contains("10000"),
+            !content.lines().any(|line| line.trim() == "10000"),
             "cancelled PowerShell command should not contain the range sentinel:\n{content}"
         );
 

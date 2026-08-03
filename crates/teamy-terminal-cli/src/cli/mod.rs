@@ -28,7 +28,6 @@ pub struct Cli {
     /// Control an already-running terminal instance, or launch interactively
     /// when omitted.
     #[facet(args::subcommand)]
-    #[arbitrary(default)]
     pub command: Option<Command>,
 }
 
