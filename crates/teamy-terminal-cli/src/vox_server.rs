@@ -1595,7 +1595,15 @@ impl VoxTerminalService {
             },
             encoding,
             kind,
-            stride: descriptor.stride,
+            // Encoded PNG bytes do not expose a row stride. The decoded
+            // RGBA8 layout is described by dimensions/origin/alpha/color
+            // metadata, while raw full frames carry width * 4 and packed
+            // dirty frames carry per-region strides.
+            stride: if encoding == TerminalFrameEncoding::Png {
+                0
+            } else {
+                descriptor.stride
+            },
             origin: TerminalFrameOrigin::TopLeft,
             alpha_mode: TerminalAlphaMode::Straight,
             color_space: TerminalColorSpace::Srgb,
@@ -3012,6 +3020,7 @@ mod tests {
         assert_eq!(initial.transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(initial.frame.kind, TerminalRasterFrameKind::Full);
         assert_eq!(initial.frame.encoding, TerminalFrameEncoding::Png);
+        assert_eq!(initial.frame.stride, 0);
         assert!(initial.frame.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert_eq!(initial.base_frame_sequence, 0);
         assert!(initial.frame_sequence > 0);
