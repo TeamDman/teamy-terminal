@@ -14,7 +14,7 @@ use spec_proto::terminal::{
     TerminalInputResult, TerminalKeyInput, TerminalMouseInput, TerminalOperationResult,
     TerminalPromptMetadata, TerminalRange, TerminalResizeRequest,
     TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
-    TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
+    TerminalSnapshotTiming, TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -1010,6 +1010,14 @@ impl Terminal for VoxTerminalService {
                     command_status_present: false,
                     command_status: 0,
                 },
+                timing: TerminalSnapshotTiming {
+                    pty_drain_us: pty_drain_micros as i64,
+                    terminal_snapshot_us: 0,
+                    font_load_us: 0,
+                    raster_us: 0,
+                    png_encode_us: 0,
+                    total_us: snapshot_total_micros as i64,
+                },
             });
         }
         let terminal_snapshot_started = Instant::now();
@@ -1123,6 +1131,14 @@ impl Terminal for VoxTerminalService {
                 focus_y: 0,
             },
             prompt: Self::prompt_metadata(&terminal_snapshot.prompt),
+            timing: TerminalSnapshotTiming {
+                pty_drain_us: pty_drain_micros as i64,
+                terminal_snapshot_us: terminal_snapshot_micros as i64,
+                font_load_us: font_load_micros as i64,
+                raster_us: raster_micros as i64,
+                png_encode_us: png_encode_micros as i64,
+                total_us: snapshot_total_micros as i64,
+            },
         })
     }
 
@@ -1277,6 +1293,7 @@ pub async fn serve(listen: &str) -> Result<()> {
             .accept()
             .await
             .context("failed to accept Vox terminal connection")?;
+        eprintln!("VOX_TERMINAL_CONNECTION_ACCEPTED peer={peer}");
         stream.set_nodelay(true).ok();
         let service = service.clone();
         tokio::spawn(async move {
@@ -1286,10 +1303,15 @@ pub async fn serve(listen: &str) -> Result<()> {
                 .await;
             match result {
                 Ok(connection) => {
+                    eprintln!("VOX_TERMINAL_CONNECTION_ESTABLISHED peer={peer}");
                     connection.closed().await;
+                    eprintln!("VOX_TERMINAL_CONNECTION_CLOSED peer={peer}");
                     connection.shutdown().ok();
                 }
-                Err(error) => tracing::warn!(?peer, ?error, "Vox terminal connection failed"),
+                Err(error) => {
+                    eprintln!("VOX_TERMINAL_CONNECTION_FAILED peer={peer} error={error:?}");
+                    tracing::warn!(?peer, ?error, "Vox terminal connection failed");
+                }
             }
         });
     }
