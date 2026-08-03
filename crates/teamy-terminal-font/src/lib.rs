@@ -16,6 +16,9 @@ use fontdue::Font;
 use fontdue::FontSettings;
 use num_traits::ToPrimitive;
 use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 use swash::FontRef;
 use swash::scale::Render;
 use swash::scale::ScaleContext;
@@ -38,6 +41,12 @@ const FALLBACK_FONT_FAMILIES: &[&str] = &[
 
 /// The default embedded font size in physical pixels.
 pub const DEFAULT_PIXEL_SIZE: f32 = 16.0;
+/// Maximum rasterized glyphs retained by one size-specific renderer.
+pub const MAX_CACHED_GLYPHS: usize = 4_096;
+
+static SHARED_SYSTEM_FONT_CATALOG: OnceLock<Result<Arc<TerminalFontCatalog>, String>> =
+    OnceLock::new();
+static SHARED_SYSTEM_FONT_CATALOG_LOADS: AtomicU64 = AtomicU64::new(0);
 
 /// The RGBA output of a font render pass.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -97,6 +106,12 @@ struct Glyph {
 }
 
 #[derive(Clone, Debug)]
+struct CachedGlyph {
+    glyph: Glyph,
+    last_used: u64,
+}
+
+#[derive(Clone, Debug)]
 struct ColorBitmap {
     left: i32,
     top: i32,
@@ -111,38 +126,46 @@ struct FontFace {
     index: u32,
 }
 
-/// A terminal font backed by Caskaydia Cove and installed fallback faces.
-pub struct TerminalFont {
+/// Immutable terminal font faces shared by every size-specific renderer.
+///
+/// System font discovery and font-byte parsing are intentionally kept here so
+/// creating another pixel-size renderer does not rescan the machine.
+pub struct TerminalFontCatalog {
     fonts: Vec<FontFace>,
-    swash_context: ScaleContext,
-    pixel_size: f32,
-    cell_width: u32,
-    cell_height: u32,
-    baseline: i32,
-    glyphs: HashMap<char, Glyph>,
 }
 
-impl std::fmt::Debug for TerminalFont {
+impl std::fmt::Debug for TerminalFontCatalog {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("TerminalFont")
-            .field("pixel_size", &self.pixel_size)
-            .field("cell_width", &self.cell_width)
-            .field("cell_height", &self.cell_height)
-            .field("baseline", &self.baseline)
+        f.debug_struct("TerminalFontCatalog")
             .field("font_count", &self.fonts.len())
-            .field("cached_glyphs", &self.glyphs.len())
-            .finish_non_exhaustive()
+            .finish()
     }
 }
 
-impl TerminalFont {
-    /// Load the embedded Caskaydia face at the requested pixel size.
+impl TerminalFontCatalog {
+    /// Return the process-wide system/embedded terminal font catalog.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the embedded font bytes cannot be parsed.
-    pub fn new(pixel_size: f32) -> Result<Self> {
-        let pixel_size = pixel_size.max(8.0);
+    /// The successful catalog or its construction error is retained so every
+    /// caller observes one bounded discovery attempt.
+    pub fn shared_system() -> Result<Arc<Self>> {
+        match SHARED_SYSTEM_FONT_CATALOG.get_or_init(|| {
+            SHARED_SYSTEM_FONT_CATALOG_LOADS.fetch_add(1, Ordering::Relaxed);
+            Self::load_system()
+                .map(Arc::new)
+                .map_err(|error| format!("{error:#}"))
+        }) {
+            Ok(catalog) => Ok(Arc::clone(catalog)),
+            Err(message) => Err(eyre::eyre!(message.clone())),
+        }
+    }
+
+    /// Number of process-wide catalog construction attempts.
+    #[must_use]
+    pub fn shared_system_loads() -> u64 {
+        SHARED_SYSTEM_FONT_CATALOG_LOADS.load(Ordering::Relaxed)
+    }
+
+    fn load_system() -> Result<Self> {
         let embedded_font = Font::from_bytes(EMBEDDED_FONT, FontSettings::default())
             .map_err(|error| eyre::eyre!("embedded Caskaydia font is invalid: {error}"))?;
         let embedded_face = FontFace {
@@ -163,7 +186,91 @@ impl TerminalFont {
                 .iter()
                 .filter_map(|family_name| load_system_font(&database, family_name)),
         );
-        let Some(primary_font) = fonts.first() else {
+        if fonts.is_empty() {
+            return Err(eyre::eyre!("no terminal font was loaded"));
+        }
+        Ok(Self { fonts })
+    }
+}
+
+/// Bounded counters for one size-specific glyph cache.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct TerminalFontCacheStats {
+    /// Glyph lookups served by an existing rasterized glyph.
+    pub hits: u64,
+    /// Glyphs rasterized and inserted into the cache.
+    pub misses: u64,
+    /// Glyphs evicted after reaching the configured bound.
+    pub evictions: u64,
+    /// Current number of retained glyphs.
+    pub cached_glyphs: usize,
+    /// Maximum glyphs retained by this renderer.
+    pub capacity: usize,
+}
+
+/// A terminal font backed by Caskaydia Cove and installed fallback faces.
+pub struct TerminalFont {
+    catalog: Arc<TerminalFontCatalog>,
+    swash_context: ScaleContext,
+    pixel_size: f32,
+    cell_width: u32,
+    cell_height: u32,
+    baseline: i32,
+    glyphs: HashMap<char, CachedGlyph>,
+    glyph_use_sequence: u64,
+    glyph_cache_capacity: usize,
+    glyph_cache_hits: u64,
+    glyph_cache_misses: u64,
+    glyph_cache_evictions: u64,
+}
+
+impl std::fmt::Debug for TerminalFont {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalFont")
+            .field("pixel_size", &self.pixel_size)
+            .field("cell_width", &self.cell_width)
+            .field("cell_height", &self.cell_height)
+            .field("baseline", &self.baseline)
+            .field("font_count", &self.catalog.fonts.len())
+            .field("cached_glyphs", &self.glyphs.len())
+            .field("glyph_cache_capacity", &self.glyph_cache_capacity)
+            .field("glyph_cache_hits", &self.glyph_cache_hits)
+            .field("glyph_cache_misses", &self.glyph_cache_misses)
+            .field("glyph_cache_evictions", &self.glyph_cache_evictions)
+            .finish_non_exhaustive()
+    }
+}
+
+impl TerminalFont {
+    /// Load the embedded Caskaydia face at the requested pixel size.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedded font bytes cannot be parsed.
+    pub fn new(pixel_size: f32) -> Result<Self> {
+        Self::from_catalog(TerminalFontCatalog::shared_system()?, pixel_size)
+    }
+
+    /// Create a size-specific renderer from an already discovered catalog.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error only when the supplied catalog contains no face.
+    pub fn from_catalog(catalog: Arc<TerminalFontCatalog>, pixel_size: f32) -> Result<Self> {
+        Self::from_catalog_with_glyph_cache_capacity(catalog, pixel_size, MAX_CACHED_GLYPHS)
+    }
+
+    /// Create a size renderer with an explicit bounded glyph-cache capacity.
+    ///
+    /// This is primarily useful for deterministic eviction tests and
+    /// constrained hosts; a zero capacity is normalized to one visible glyph.
+    pub fn from_catalog_with_glyph_cache_capacity(
+        catalog: Arc<TerminalFontCatalog>,
+        pixel_size: f32,
+        glyph_cache_capacity: usize,
+    ) -> Result<Self> {
+        let pixel_size = pixel_size.max(8.0);
+        let Some(primary_font) = catalog.fonts.first() else {
             return Err(eyre::eyre!("no terminal font was loaded"));
         };
         let metrics = primary_font.font.metrics('M', pixel_size);
@@ -179,13 +286,18 @@ impl TerminalFont {
             },
         );
         Ok(Self {
-            fonts,
+            catalog,
             swash_context: ScaleContext::new(),
             pixel_size,
             cell_width,
             cell_height,
             baseline,
             glyphs: HashMap::new(),
+            glyph_use_sequence: 0,
+            glyph_cache_capacity: glyph_cache_capacity.max(1),
+            glyph_cache_hits: 0,
+            glyph_cache_misses: 0,
+            glyph_cache_evictions: 0,
         })
     }
 
@@ -210,6 +322,18 @@ impl TerminalFont {
         self.cell_height
     }
 
+    /// Return current glyph-cache counters for this exact pixel size.
+    #[must_use]
+    pub fn cache_stats(&self) -> TerminalFontCacheStats {
+        TerminalFontCacheStats {
+            hits: self.glyph_cache_hits,
+            misses: self.glyph_cache_misses,
+            evictions: self.glyph_cache_evictions,
+            cached_glyphs: self.glyphs.len(),
+            capacity: self.glyph_cache_capacity,
+        }
+    }
+
     /// Render a terminal snapshot into a frame of the supplied pixel size.
     ///
     /// # Panics
@@ -222,24 +346,37 @@ impl TerminalFont {
         width: u32,
         height: u32,
     ) -> RasterizedFrame {
+        let mut frame = RasterizedFrame {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+        self.render_into(snapshot, &mut frame, width, height);
+        frame
+    }
+
+    /// Render a complete snapshot into retained frame storage.
+    pub fn render_into(
+        &mut self,
+        snapshot: &TerminalSnapshot,
+        frame: &mut RasterizedFrame,
+        width: u32,
+        height: u32,
+    ) {
         let pixel_count = usize::try_from(width)
             .unwrap_or(0)
             .saturating_mul(usize::try_from(height).unwrap_or(0));
-        let mut pixels = vec![0_u8; pixel_count.saturating_mul(4)];
-        for pixel in pixels.chunks_exact_mut(4) {
+        frame.width = width;
+        frame.height = height;
+        frame.pixels.resize(pixel_count.saturating_mul(4), 0);
+        for pixel in frame.pixels.chunks_exact_mut(4) {
             pixel.copy_from_slice(&[30, 30, 30, 255]);
         }
-        let mut frame = RasterizedFrame {
-            width,
-            height,
-            pixels,
-        };
         self.render_cells(
             snapshot,
-            &mut frame,
+            frame,
             &[CellRect::full(snapshot.columns, snapshot.rows)],
         );
-        frame
     }
 
     /// Refresh selected cell rectangles in an existing cached frame.
@@ -404,25 +541,30 @@ impl TerminalFont {
     }
 
     fn glyph(&mut self, character: char) -> Glyph {
-        if let Some(glyph) = self.glyphs.get(&character) {
-            return glyph.clone();
+        self.glyph_use_sequence = self.glyph_use_sequence.saturating_add(1);
+        if let Some(glyph) = self.glyphs.get_mut(&character) {
+            glyph.last_used = self.glyph_use_sequence;
+            self.glyph_cache_hits = self.glyph_cache_hits.saturating_add(1);
+            return glyph.glyph.clone();
         }
+
+        self.glyph_cache_misses = self.glyph_cache_misses.saturating_add(1);
 
         let font_index = self.font_index_for(character).unwrap_or_else(|| {
             self.font_index_for('?')
                 .expect("the embedded Caskaydia font must contain the fallback glyph")
         });
-        let rendered_character = if self.fonts[font_index].font.has_glyph(character) {
+        let rendered_character = if self.catalog.fonts[font_index].font.has_glyph(character) {
             character
         } else {
             '?'
         };
-        let (metrics, bitmap) = self.fonts[font_index]
+        let (metrics, bitmap) = self.catalog.fonts[font_index]
             .font
             .rasterize(rendered_character, self.pixel_size);
         let color_bitmap = render_color_glyph(
             &mut self.swash_context,
-            &self.fonts[font_index],
+            &self.catalog.fonts[font_index],
             rendered_character,
             self.pixel_size,
         );
@@ -431,12 +573,30 @@ impl TerminalFont {
             bitmap,
             color_bitmap,
         };
-        let _ = self.glyphs.insert(character, glyph.clone());
+        if self.glyphs.len() == self.glyph_cache_capacity {
+            let oldest = self
+                .glyphs
+                .iter()
+                .min_by_key(|(_, cached)| cached.last_used)
+                .map(|(character, _)| *character);
+            if let Some(oldest) = oldest {
+                self.glyphs.remove(&oldest);
+                self.glyph_cache_evictions = self.glyph_cache_evictions.saturating_add(1);
+            }
+        }
+        let _ = self.glyphs.insert(
+            character,
+            CachedGlyph {
+                glyph: glyph.clone(),
+                last_used: self.glyph_use_sequence,
+            },
+        );
         glyph
     }
 
     fn font_index_for(&self, character: char) -> Option<usize> {
-        self.fonts
+        self.catalog
+            .fonts
             .iter()
             .position(|font| font.font.has_glyph(character))
     }
@@ -716,6 +876,81 @@ mod tests {
     }
 
     #[test]
+    fn process_font_catalog_and_size_glyph_cache_are_retained() {
+        let catalog = TerminalFontCatalog::shared_system().expect("font catalog should load");
+        let repeat = TerminalFontCatalog::shared_system().expect("font catalog should be reused");
+        assert!(Arc::ptr_eq(&catalog, &repeat));
+
+        let mut font = TerminalFont::from_catalog(catalog, DEFAULT_PIXEL_SIZE)
+            .expect("size renderer should use shared faces");
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 1);
+        terminal.process_bytes(b"ABBA");
+        let snapshot = terminal.snapshot();
+        let _ = font.render(&snapshot, 64, 32);
+        let first = font.cache_stats();
+        let _ = font.render(&snapshot, 64, 32);
+        let second = font.cache_stats();
+
+        assert!(
+            first.misses >= 2,
+            "first render should rasterize visible glyphs"
+        );
+        assert_eq!(second.misses, first.misses);
+        assert!(second.hits > first.hits);
+        assert_eq!(second.cached_glyphs, first.cached_glyphs);
+    }
+
+    #[test]
+    fn glyph_cache_is_bounded_and_evicts_least_recently_used_glyph() {
+        let catalog = TerminalFontCatalog::shared_system().expect("font catalog should load");
+        let mut font =
+            TerminalFont::from_catalog_with_glyph_cache_capacity(catalog, DEFAULT_PIXEL_SIZE, 2)
+                .expect("bounded size renderer should construct");
+
+        let _ = font.glyph('A');
+        let _ = font.glyph('B');
+        let _ = font.glyph('A');
+        let _ = font.glyph('C');
+        let after_eviction = font.cache_stats();
+        assert_eq!(after_eviction.capacity, 2);
+        assert_eq!(after_eviction.cached_glyphs, 2);
+        assert_eq!(after_eviction.evictions, 1);
+        assert_eq!(after_eviction.hits, 1);
+        assert_eq!(after_eviction.misses, 3);
+
+        let _ = font.glyph('B');
+        let reconstructed = font.cache_stats();
+        assert_eq!(reconstructed.misses, 4);
+        assert_eq!(reconstructed.evictions, 2);
+        assert_eq!(reconstructed.cached_glyphs, 2);
+    }
+
+    #[test]
+    fn complete_render_reuses_frame_storage_across_a_b_a_resize() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 2);
+        terminal.process_bytes(b"ABCD");
+        let snapshot = terminal.snapshot();
+        let mut frame = RasterizedFrame {
+            width: 0,
+            height: 0,
+            pixels: Vec::new(),
+        };
+
+        font.render_into(&snapshot, &mut frame, 64, 32);
+        let a_capacity = frame.pixels.capacity();
+        font.render_into(&snapshot, &mut frame, 128, 64);
+        let b_capacity = frame.pixels.capacity();
+        let b_pointer = frame.pixels.as_ptr();
+        font.render_into(&snapshot, &mut frame, 64, 32);
+
+        assert!(b_capacity >= a_capacity);
+        assert_eq!(frame.pixels.capacity(), b_capacity);
+        assert_eq!(frame.pixels.as_ptr(), b_pointer);
+        assert_eq!((frame.width, frame.height), (64, 32));
+    }
+
+    #[test]
     fn dirty_cell_render_matches_a_full_render() {
         let mut font = TerminalFont::embedded().expect("embedded font should parse");
         let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 1);
@@ -742,10 +977,12 @@ mod tests {
         let selected = font.render(&terminal.snapshot(), 64, 32);
 
         assert_ne!(selected, unselected);
-        assert!(selected
-            .pixels
-            .chunks_exact(4)
-            .any(|pixel| pixel == [70, 100, 170, 255]));
+        assert!(
+            selected
+                .pixels
+                .chunks_exact(4)
+                .any(|pixel| pixel == [70, 100, 170, 255])
+        );
     }
 
     #[test]

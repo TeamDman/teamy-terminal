@@ -12,9 +12,9 @@ use spec_proto::terminal::{
     TerminalContentRequest, TerminalContentResult, TerminalCursor, TerminalDisconnectRequest,
     TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding, TerminalFrameKind,
     TerminalInputResult, TerminalKeyInput, TerminalMouseInput, TerminalOperationResult,
-    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest,
-    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
-    TerminalSnapshotTiming, TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
+    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
+    TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming,
+    TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -23,7 +23,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_core::{TerminalLimits, TerminalSession};
-use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, TerminalFont};
+use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, RasterizedFrame, TerminalFont, TerminalFontCatalog};
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
 use vox_terminal as vox;
 
@@ -35,6 +35,7 @@ const MAX_PIXEL_WIDTH: u16 = 4096;
 const MAX_PIXEL_HEIGHT: u16 = 4096;
 const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
+const MAX_CACHED_FONT_SIZES: usize = 4;
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
 const GLFW_MOD_SHIFT: u32 = 0x0001;
@@ -272,7 +273,7 @@ pub fn normalize_listen_address(raw: &str) -> Result<String> {
 
 #[derive(Clone)]
 pub struct VoxTerminalService {
-    sessions: Arc<Mutex<BTreeMap<String, TerminalSessionState>>>,
+    sessions: Arc<Mutex<BTreeMap<String, Arc<Mutex<TerminalSessionState>>>>>,
     next_session: Arc<AtomicU64>,
     latest_snapshot_timing: Arc<Mutex<Option<TerminalSnapshotTimingWitness>>>,
 }
@@ -284,6 +285,241 @@ struct TerminalSessionState {
     surface: TerminalSurfaceMetrics,
     closed: bool,
     debug_output: Vec<u8>,
+    render_resources: TerminalRenderResources,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+struct TerminalRenderResourceStats {
+    font_catalog_acquisitions: u64,
+    process_font_catalog_loads: u64,
+    font_renderer_cache_hits: u64,
+    font_renderer_cache_misses: u64,
+    font_renderer_constructions: u64,
+    font_renderer_evictions: u64,
+    font_renderer_cache_len: u64,
+    font_renderer_cache_capacity: u64,
+    glyph_cache_hits: u64,
+    glyph_cache_misses: u64,
+    glyph_cache_evictions: u64,
+    cached_glyphs: u64,
+    glyph_cache_capacity: u64,
+    frame_buffer_grows: u64,
+    frame_buffer_reuses: u64,
+    frame_buffer_capacity_bytes: u64,
+    png_buffer_grows: u64,
+    png_buffer_reuses: u64,
+    png_buffer_capacity_bytes: u64,
+    transport_payload_copies: u64,
+}
+
+struct CachedTerminalFont {
+    pixel_size_bits: u32,
+    last_used: u64,
+    font: TerminalFont,
+}
+
+struct TerminalRenderResources {
+    catalog: Option<Arc<TerminalFontCatalog>>,
+    fonts: Vec<CachedTerminalFont>,
+    use_sequence: u64,
+    frame: RasterizedFrame,
+    png_scratch: Vec<u8>,
+    stats: TerminalRenderResourceStats,
+}
+
+impl Default for TerminalRenderResources {
+    fn default() -> Self {
+        Self {
+            catalog: None,
+            fonts: Vec::with_capacity(MAX_CACHED_FONT_SIZES),
+            use_sequence: 0,
+            frame: RasterizedFrame {
+                width: 0,
+                height: 0,
+                pixels: Vec::new(),
+            },
+            png_scratch: Vec::new(),
+            stats: TerminalRenderResourceStats {
+                font_renderer_cache_capacity: MAX_CACHED_FONT_SIZES as u64,
+                ..TerminalRenderResourceStats::default()
+            },
+        }
+    }
+}
+
+impl TerminalRenderResources {
+    fn ensure_font(&mut self, pixel_size: f32) -> Result<usize> {
+        let pixel_size = pixel_size.max(MIN_FONT_PIXEL_SIZE);
+        let pixel_size_bits = pixel_size.to_bits();
+        self.use_sequence = self.use_sequence.saturating_add(1);
+        if let Some(index) = self
+            .fonts
+            .iter()
+            .position(|entry| entry.pixel_size_bits == pixel_size_bits)
+        {
+            self.fonts[index].last_used = self.use_sequence;
+            self.stats.font_renderer_cache_hits =
+                self.stats.font_renderer_cache_hits.saturating_add(1);
+            return Ok(index);
+        }
+
+        self.stats.font_renderer_cache_misses =
+            self.stats.font_renderer_cache_misses.saturating_add(1);
+        let catalog = if let Some(catalog) = self.catalog.as_ref() {
+            Arc::clone(catalog)
+        } else {
+            let catalog = TerminalFontCatalog::shared_system()?;
+            self.catalog = Some(Arc::clone(&catalog));
+            self.stats.font_catalog_acquisitions =
+                self.stats.font_catalog_acquisitions.saturating_add(1);
+            catalog
+        };
+        let font = TerminalFont::from_catalog(catalog, pixel_size)?;
+        self.stats.font_renderer_constructions =
+            self.stats.font_renderer_constructions.saturating_add(1);
+        if self.fonts.len() == MAX_CACHED_FONT_SIZES {
+            let eviction_index = self
+                .fonts
+                .iter()
+                .enumerate()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map_or(0, |(index, _)| index);
+            self.fonts.swap_remove(eviction_index);
+            self.stats.font_renderer_evictions =
+                self.stats.font_renderer_evictions.saturating_add(1);
+        }
+        self.fonts.push(CachedTerminalFont {
+            pixel_size_bits,
+            last_used: self.use_sequence,
+            font,
+        });
+        Ok(self.fonts.len() - 1)
+    }
+
+    fn snapshot_stats(&self) -> TerminalRenderResourceStats {
+        let (
+            glyph_cache_hits,
+            glyph_cache_misses,
+            glyph_cache_evictions,
+            cached_glyphs,
+            glyph_cache_capacity,
+        ) = self
+            .fonts
+            .iter()
+            .fold((0_u64, 0_u64, 0_u64, 0_u64, 0_u64), |total, entry| {
+                let stats = entry.font.cache_stats();
+                (
+                    total.0.saturating_add(stats.hits),
+                    total.1.saturating_add(stats.misses),
+                    total.2.saturating_add(stats.evictions),
+                    total
+                        .3
+                        .saturating_add(u64::try_from(stats.cached_glyphs).unwrap_or(u64::MAX)),
+                    total
+                        .4
+                        .saturating_add(u64::try_from(stats.capacity).unwrap_or(u64::MAX)),
+                )
+            });
+        TerminalRenderResourceStats {
+            process_font_catalog_loads: TerminalFontCatalog::shared_system_loads(),
+            font_renderer_cache_len: u64::try_from(self.fonts.len()).unwrap_or(u64::MAX),
+            glyph_cache_hits,
+            glyph_cache_misses,
+            glyph_cache_evictions,
+            cached_glyphs,
+            glyph_cache_capacity,
+            frame_buffer_capacity_bytes: u64::try_from(self.frame.pixels.capacity())
+                .unwrap_or(u64::MAX),
+            png_buffer_capacity_bytes: u64::try_from(self.png_scratch.capacity())
+                .unwrap_or(u64::MAX),
+            ..self.stats
+        }
+    }
+
+    fn encode_png(
+        &mut self,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+    ) -> Result<EncodedPng> {
+        let font_started = Instant::now();
+        let constructions_before = self.stats.font_renderer_constructions;
+        let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
+        let default_font = &self.fonts[default_font_index].font;
+        let default_width = u32::from(snapshot.columns).saturating_mul(default_font.cell_width());
+        let default_height = u32::from(snapshot.rows).saturating_mul(default_font.cell_height());
+        let target_width = if requested_pixel_width == 0 {
+            default_width
+        } else {
+            u32::from(requested_pixel_width)
+        };
+        let target_height = if requested_pixel_height == 0 {
+            default_height
+        } else {
+            u32::from(requested_pixel_height)
+        };
+        let width_scale = target_width as f32 / default_width.max(1) as f32;
+        let height_scale = target_height as f32 / default_height.max(1) as f32;
+        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
+            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
+        let font_index = self.ensure_font(font_pixel_size)?;
+        let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
+            font_started.elapsed().as_micros() as u64
+        } else {
+            0
+        };
+        let font = &self.fonts[font_index].font;
+        let width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
+        let height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
+        let cell_width = font.cell_width();
+        let cell_height = font.cell_height();
+
+        let raster_started = Instant::now();
+        let frame_capacity_before = self.frame.pixels.capacity();
+        self.fonts[font_index]
+            .font
+            .render_into(snapshot, &mut self.frame, width, height);
+        if self.frame.pixels.capacity() > frame_capacity_before {
+            self.stats.frame_buffer_grows = self.stats.frame_buffer_grows.saturating_add(1);
+        } else {
+            self.stats.frame_buffer_reuses = self.stats.frame_buffer_reuses.saturating_add(1);
+        }
+        let raster_micros = raster_started.elapsed().as_micros() as u64;
+        let stride = width.saturating_mul(4);
+
+        let png_encode_started = Instant::now();
+        let png_capacity_before = self.png_scratch.capacity();
+        self.png_scratch.clear();
+        {
+            let mut encoder = png::Encoder::new(Cursor::new(&mut self.png_scratch), width, height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header()?;
+            writer.write_image_data(&self.frame.pixels)?;
+        }
+        if self.png_scratch.capacity() > png_capacity_before {
+            self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
+        } else {
+            self.stats.png_buffer_reuses = self.stats.png_buffer_reuses.saturating_add(1);
+        }
+        let payload = self.png_scratch.clone();
+        self.stats.transport_payload_copies = self.stats.transport_payload_copies.saturating_add(1);
+        let png_encode_micros = png_encode_started.elapsed().as_micros() as u64;
+
+        Ok(EncodedPng {
+            width: u16::try_from(width)?,
+            height: u16::try_from(height)?,
+            stride,
+            payload,
+            font_load_micros,
+            raster_micros,
+            png_encode_micros,
+            cell_width: u16::try_from(cell_width)?,
+            cell_height: u16::try_from(cell_height)?,
+            font_pixel_size: font_pixel_size.round() as u16,
+            resource_stats: self.snapshot_stats(),
+        })
+    }
 }
 
 struct EncodedPng {
@@ -297,6 +533,7 @@ struct EncodedPng {
     cell_width: u16,
     cell_height: u16,
     font_pixel_size: u16,
+    resource_stats: TerminalRenderResourceStats,
 }
 
 /// Machine-readable Rust-side evidence for one full-PNG snapshot.
@@ -325,6 +562,26 @@ pub struct TerminalSnapshotTimingWitness {
     pub raster_us: u64,
     pub png_encode_us: u64,
     pub total_us: u64,
+    pub font_catalog_acquisitions: u64,
+    pub process_font_catalog_loads: u64,
+    pub font_renderer_cache_hits: u64,
+    pub font_renderer_cache_misses: u64,
+    pub font_renderer_constructions: u64,
+    pub font_renderer_evictions: u64,
+    pub font_renderer_cache_len: u64,
+    pub font_renderer_cache_capacity: u64,
+    pub glyph_cache_hits: u64,
+    pub glyph_cache_misses: u64,
+    pub glyph_cache_evictions: u64,
+    pub cached_glyphs: u64,
+    pub glyph_cache_capacity: u64,
+    pub frame_buffer_grows: u64,
+    pub frame_buffer_reuses: u64,
+    pub frame_buffer_capacity_bytes: u64,
+    pub png_buffer_grows: u64,
+    pub png_buffer_reuses: u64,
+    pub png_buffer_capacity_bytes: u64,
+    pub transport_payload_copies: u64,
 }
 
 impl VoxTerminalService {
@@ -350,6 +607,39 @@ impl VoxTerminalService {
         if let Ok(mut latest) = self.latest_snapshot_timing.lock() {
             *latest = Some(timing);
         }
+    }
+
+    fn session(&self, session_id: &str) -> Result<Arc<Mutex<TerminalSessionState>>, TerminalError> {
+        self.sessions
+            .lock()
+            .map_err(|_| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    "terminal session registry lock poisoned",
+                    0,
+                )
+            })?
+            .get(session_id)
+            .cloned()
+            .ok_or_else(|| {
+                Self::error(
+                    TerminalErrorCode::SessionNotFound,
+                    "terminal session not found",
+                    0,
+                )
+            })
+    }
+
+    fn lock_session(
+        session: &Mutex<TerminalSessionState>,
+    ) -> Result<std::sync::MutexGuard<'_, TerminalSessionState>, TerminalError> {
+        session.lock().map_err(|_| {
+            Self::error(
+                TerminalErrorCode::Internal,
+                "terminal session lock poisoned",
+                0,
+            )
+        })
     }
 
     fn capabilities() -> TerminalCapabilities {
@@ -488,98 +778,6 @@ impl VoxTerminalService {
         Ok(())
     }
 
-    fn encode_png(
-        terminal: &TerminalSession,
-        requested_pixel_width: u16,
-        requested_pixel_height: u16,
-    ) -> Result<EncodedPng, TerminalError> {
-        let snapshot = terminal.snapshot();
-        let font_started = Instant::now();
-        let mut font = TerminalFont::new(DEFAULT_PIXEL_SIZE)
-            .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        let default_width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
-        let default_height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
-        let target_width = if requested_pixel_width == 0 {
-            default_width
-        } else {
-            u32::from(requested_pixel_width)
-        };
-        let target_height = if requested_pixel_height == 0 {
-            default_height
-        } else {
-            u32::from(requested_pixel_height)
-        };
-        let width_scale = target_width as f32 / default_width.max(1) as f32;
-        let height_scale = target_height as f32 / default_height.max(1) as f32;
-        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
-            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
-        if (font_pixel_size - DEFAULT_PIXEL_SIZE).abs() > f32::EPSILON {
-            font = TerminalFont::new(font_pixel_size)
-                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        }
-        let font_load_micros = font_started.elapsed().as_micros() as u64;
-        let width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
-        let height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
-        let raster_started = Instant::now();
-        let frame = font.render(&snapshot, width, height);
-        let raster_micros = raster_started.elapsed().as_micros() as u64;
-        let stride = width.saturating_mul(4);
-        let mut bytes = Vec::new();
-        let png_encode_started = Instant::now();
-        {
-            let mut encoder = png::Encoder::new(Cursor::new(&mut bytes), frame.width, frame.height);
-            encoder.set_color(png::ColorType::Rgba);
-            encoder.set_depth(png::BitDepth::Eight);
-            let mut writer = encoder
-                .write_header()
-                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-            writer
-                .write_image_data(&frame.pixels)
-                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        }
-        let png_encode_micros = png_encode_started.elapsed().as_micros() as u64;
-        let width = u16::try_from(width).map_err(|_| {
-            Self::error(
-                TerminalErrorCode::CapacityExceeded,
-                "PNG width exceeds protocol bounds",
-                0,
-            )
-        })?;
-        let height = u16::try_from(height).map_err(|_| {
-            Self::error(
-                TerminalErrorCode::CapacityExceeded,
-                "PNG height exceeds protocol bounds",
-                0,
-            )
-        })?;
-        let cell_width = u16::try_from(font.cell_width()).map_err(|_| {
-            Self::error(
-                TerminalErrorCode::CapacityExceeded,
-                "terminal cell width exceeds protocol bounds",
-                0,
-            )
-        })?;
-        let cell_height = u16::try_from(font.cell_height()).map_err(|_| {
-            Self::error(
-                TerminalErrorCode::CapacityExceeded,
-                "terminal cell height exceeds protocol bounds",
-                0,
-            )
-        })?;
-        Ok(EncodedPng {
-            width,
-            height,
-            stride,
-            payload: bytes,
-            font_load_micros,
-            raster_micros,
-            png_encode_micros,
-            cell_width,
-            cell_height,
-            font_pixel_size: font_pixel_size.round() as u16,
-        })
-    }
-
     fn empty_range() -> TerminalRange {
         TerminalRange {
             start_x: 0,
@@ -669,6 +867,7 @@ impl Terminal for VoxTerminalService {
             surface,
             closed: false,
             debug_output: Vec::new(),
+            render_resources: TerminalRenderResources::default(),
         };
         state
             .pty
@@ -686,7 +885,7 @@ impl Terminal for VoxTerminalService {
                     sequence,
                 )
             })?
-            .insert(session_id.clone(), state);
+            .insert(session_id.clone(), Arc::new(Mutex::new(state)));
         Ok(TerminalConnectResult {
             session_id,
             capabilities: Self::capabilities(),
@@ -701,20 +900,8 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalCapabilitiesRequest,
     ) -> Result<TerminalCapabilitiesResult, TerminalError> {
-        let sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let session = Self::lock_session(&session)?;
         Ok(TerminalCapabilitiesResult {
             session_id: request.session_id,
             capabilities: Self::capabilities(),
@@ -728,20 +915,8 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalResizeResult, TerminalError> {
         Self::validate_dimensions(request.width, request.height)?;
         Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         session.surface.columns = request.width;
         session.surface.rows = request.height;
         session.surface.panel_width = request.surface.panel_width;
@@ -782,20 +957,8 @@ impl Terminal for VoxTerminalService {
                 0,
             ));
         }
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         let text = request.text.into_bytes();
         session.pty.write_input(&text).map_err(|error| {
             Self::error(
@@ -804,7 +967,7 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             )
         })?;
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let sequence = Self::next_sequence(&mut session.sequence);
         Ok(TerminalInputResult {
             session_id: request.session_id,
@@ -818,20 +981,8 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalKeyInput,
     ) -> Result<TerminalInputResult, TerminalError> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         let bytes = key_input_bytes(request.key_code, request.modifiers, request.pressed);
         let input_changed = !bytes.is_empty();
         if !bytes.is_empty() {
@@ -843,7 +994,7 @@ impl Terminal for VoxTerminalService {
                 )
             })?;
         }
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let sequence = if input_changed {
             Self::next_sequence(&mut session.sequence)
         } else {
@@ -861,20 +1012,8 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalMouseInput,
     ) -> Result<TerminalInputResult, TerminalError> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         let bytes = mouse_input_bytes(
             &session.terminal,
             request.x,
@@ -896,7 +1035,7 @@ impl Terminal for VoxTerminalService {
                 )
             })?;
         }
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let sequence = if input_changed {
             Self::next_sequence(&mut session.sequence)
         } else {
@@ -915,26 +1054,15 @@ impl Terminal for VoxTerminalService {
         request: TerminalSnapshotRequest,
     ) -> Result<TerminalSnapshot, TerminalError> {
         let snapshot_started = Instant::now();
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         let drain_started = Instant::now();
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let pty_drain_micros = drain_started.elapsed().as_micros() as u64;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
             let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
+            let resources = session.render_resources.snapshot_stats();
             tracing::debug!(
                 terminal_event = "snapshot_empty",
                 session_id = %request.session_id,
@@ -966,6 +1094,26 @@ impl Terminal for VoxTerminalService {
                 raster_us: 0,
                 png_encode_us: 0,
                 total_us: snapshot_total_micros,
+                font_catalog_acquisitions: resources.font_catalog_acquisitions,
+                process_font_catalog_loads: resources.process_font_catalog_loads,
+                font_renderer_cache_hits: resources.font_renderer_cache_hits,
+                font_renderer_cache_misses: resources.font_renderer_cache_misses,
+                font_renderer_constructions: resources.font_renderer_constructions,
+                font_renderer_evictions: resources.font_renderer_evictions,
+                font_renderer_cache_len: resources.font_renderer_cache_len,
+                font_renderer_cache_capacity: resources.font_renderer_cache_capacity,
+                glyph_cache_hits: resources.glyph_cache_hits,
+                glyph_cache_misses: resources.glyph_cache_misses,
+                glyph_cache_evictions: resources.glyph_cache_evictions,
+                cached_glyphs: resources.cached_glyphs,
+                glyph_cache_capacity: resources.glyph_cache_capacity,
+                frame_buffer_grows: resources.frame_buffer_grows,
+                frame_buffer_reuses: resources.frame_buffer_reuses,
+                frame_buffer_capacity_bytes: resources.frame_buffer_capacity_bytes,
+                png_buffer_grows: resources.png_buffer_grows,
+                png_buffer_reuses: resources.png_buffer_reuses,
+                png_buffer_capacity_bytes: resources.png_buffer_capacity_bytes,
+                transport_payload_copies: resources.transport_payload_copies,
             });
             return Ok(TerminalSnapshot {
                 session_id: request.session_id,
@@ -1023,15 +1171,14 @@ impl Terminal for VoxTerminalService {
         let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
         let terminal_snapshot_micros = terminal_snapshot_started.elapsed().as_micros() as u64;
-        let encoded = Self::encode_png(
-            &session.terminal,
-            session.surface.panel_width,
-            session.surface.panel_height,
-        )
-        .map_err(|mut error| {
-            error.server_sequence = sequence;
-            error
-        })?;
+        let panel_width = session.surface.panel_width;
+        let panel_height = session.surface.panel_height;
+        let encoded = session
+            .render_resources
+            .encode_png(&terminal_snapshot, panel_width, panel_height)
+            .map_err(|error| {
+                Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
+            })?;
         let EncodedPng {
             width,
             height,
@@ -1043,6 +1190,7 @@ impl Terminal for VoxTerminalService {
             cell_width,
             cell_height,
             font_pixel_size,
+            resource_stats,
         } = encoded;
         let max_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
         if max_bytes == 0 || payload.len() > max_bytes as usize {
@@ -1072,6 +1220,25 @@ impl Terminal for VoxTerminalService {
             raster_micros,
             png_encode_micros,
             snapshot_total_micros,
+            font_catalog_acquisitions = resource_stats.font_catalog_acquisitions,
+            process_font_catalog_loads = resource_stats.process_font_catalog_loads,
+            font_renderer_cache_hits = resource_stats.font_renderer_cache_hits,
+            font_renderer_cache_misses = resource_stats.font_renderer_cache_misses,
+            font_renderer_constructions = resource_stats.font_renderer_constructions,
+            font_renderer_evictions = resource_stats.font_renderer_evictions,
+            font_renderer_cache_len = resource_stats.font_renderer_cache_len,
+            glyph_cache_hits = resource_stats.glyph_cache_hits,
+            glyph_cache_misses = resource_stats.glyph_cache_misses,
+            glyph_cache_evictions = resource_stats.glyph_cache_evictions,
+            cached_glyphs = resource_stats.cached_glyphs,
+            glyph_cache_capacity = resource_stats.glyph_cache_capacity,
+            frame_buffer_grows = resource_stats.frame_buffer_grows,
+            frame_buffer_reuses = resource_stats.frame_buffer_reuses,
+            frame_buffer_capacity_bytes = resource_stats.frame_buffer_capacity_bytes,
+            png_buffer_grows = resource_stats.png_buffer_grows,
+            png_buffer_reuses = resource_stats.png_buffer_reuses,
+            png_buffer_capacity_bytes = resource_stats.png_buffer_capacity_bytes,
+            transport_payload_copies = resource_stats.transport_payload_copies,
             "terminal snapshot timing"
         );
         self.record_snapshot_timing(TerminalSnapshotTimingWitness {
@@ -1094,6 +1261,26 @@ impl Terminal for VoxTerminalService {
             raster_us: raster_micros,
             png_encode_us: png_encode_micros,
             total_us: snapshot_total_micros,
+            font_catalog_acquisitions: resource_stats.font_catalog_acquisitions,
+            process_font_catalog_loads: resource_stats.process_font_catalog_loads,
+            font_renderer_cache_hits: resource_stats.font_renderer_cache_hits,
+            font_renderer_cache_misses: resource_stats.font_renderer_cache_misses,
+            font_renderer_constructions: resource_stats.font_renderer_constructions,
+            font_renderer_evictions: resource_stats.font_renderer_evictions,
+            font_renderer_cache_len: resource_stats.font_renderer_cache_len,
+            font_renderer_cache_capacity: resource_stats.font_renderer_cache_capacity,
+            glyph_cache_hits: resource_stats.glyph_cache_hits,
+            glyph_cache_misses: resource_stats.glyph_cache_misses,
+            glyph_cache_evictions: resource_stats.glyph_cache_evictions,
+            cached_glyphs: resource_stats.cached_glyphs,
+            glyph_cache_capacity: resource_stats.glyph_cache_capacity,
+            frame_buffer_grows: resource_stats.frame_buffer_grows,
+            frame_buffer_reuses: resource_stats.frame_buffer_reuses,
+            frame_buffer_capacity_bytes: resource_stats.frame_buffer_capacity_bytes,
+            png_buffer_grows: resource_stats.png_buffer_grows,
+            png_buffer_reuses: resource_stats.png_buffer_reuses,
+            png_buffer_capacity_bytes: resource_stats.png_buffer_capacity_bytes,
+            transport_payload_copies: resource_stats.transport_payload_copies,
         });
         Ok(TerminalSnapshot {
             session_id: request.session_id,
@@ -1146,20 +1333,8 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalContentRequest,
     ) -> Result<TerminalContentResult, TerminalError> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         if request.max_chars == 0 {
             return Err(Self::error(
                 TerminalErrorCode::InvalidRequest,
@@ -1167,7 +1342,7 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             ));
         }
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
             return Ok(TerminalContentResult {
@@ -1198,25 +1373,13 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalCancelRequest,
     ) -> Result<TerminalOperationResult, TerminalError> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
-                0,
-            )
-        })?;
-        let session = sessions.get_mut(&request.session_id).ok_or_else(|| {
-            Self::error(
-                TerminalErrorCode::SessionNotFound,
-                "terminal session not found",
-                0,
-            )
-        })?;
+        let session = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&session)?;
         // Cancellation is a terminal input operation, not merely a state
         // acknowledgement. Ctrl+C is deliberately encoded through the same
         // generic key path as a client key event so every terminal control
         // sequence retains one source of truth.
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let interrupt_down = key_input_bytes(67, GLFW_MOD_CONTROL, true);
         session.pty.write_input(&interrupt_down).map_err(|error| {
             Self::error(
@@ -1234,7 +1397,7 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             )
         })?;
-        Self::drain_pty(session)?;
+        Self::drain_pty(&mut session)?;
         let sequence = Self::next_sequence(&mut session.sequence);
         Ok(TerminalOperationResult {
             session_id: request.session_id,
@@ -1250,17 +1413,19 @@ impl Terminal for VoxTerminalService {
         let mut sessions = self.sessions.lock().map_err(|_| {
             Self::error(
                 TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
+                "terminal session registry lock poisoned",
                 0,
             )
         })?;
-        let mut session = sessions.remove(&request.session_id).ok_or_else(|| {
+        let session = sessions.remove(&request.session_id).ok_or_else(|| {
             Self::error(
                 TerminalErrorCode::SessionNotFound,
                 "terminal session not found",
                 0,
             )
         })?;
+        drop(sessions);
+        let mut session = Self::lock_session(&session)?;
         session.pty.kill().map_err(|error| {
             Self::error(
                 TerminalErrorCode::Internal,
@@ -1323,6 +1488,38 @@ mod tests {
     use spec_proto::terminal::TerminalClient;
     use teamy_terminal_core::Color;
 
+    fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
+        TerminalConnectRequest {
+            endpoint: endpoint.to_string(),
+            requested_width: 80,
+            requested_height: 24,
+            surface: TerminalSurfaceMetrics {
+                columns: 80,
+                rows: 24,
+                panel_width: 800,
+                panel_height: 480,
+                ..TerminalSurfaceMetrics::default()
+            },
+            capabilities: TerminalCapabilities {
+                text_input: true,
+                key_input: true,
+                mouse_input: true,
+                structured_cells: false,
+                raster_frames: true,
+                selection: false,
+                scrollback: true,
+                dirty_frames: false,
+                max_width: MAX_COLUMNS,
+                max_height: MAX_ROWS,
+                max_frame_bytes: MAX_FRAME_BYTES,
+                backend_id: String::new(),
+                transport_id: String::new(),
+            },
+            client_sequence,
+            correlation_id: format!("connect-{client_sequence}"),
+        }
+    }
+
     #[test]
     fn normalize_listen_address_accepts_loopback_shorthand() {
         assert_eq!(
@@ -1337,6 +1534,131 @@ mod tests {
             normalize_listen_address("localhost:63946").unwrap(),
             "localhost:63946"
         );
+    }
+
+    #[test]
+    fn retained_render_resources_reuse_warm_a_b_a_sizes_and_buffers() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 80, 24);
+        terminal.process_bytes(b"\x1b[?25lcache me");
+        let snapshot = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+
+        let first = resources
+            .encode_png(&snapshot, 0, 0)
+            .expect("first A frame should render");
+        let first_stats = first.resource_stats;
+        assert!(first.font_load_micros > 0);
+        assert_eq!(first_stats.font_catalog_acquisitions, 1);
+        assert_eq!(first_stats.font_renderer_constructions, 1);
+        assert_eq!(first_stats.frame_buffer_grows, 1);
+
+        let second = resources
+            .encode_png(&snapshot, 1600, 900)
+            .expect("B frame should render");
+        let second_stats = second.resource_stats;
+        assert!(second.font_load_micros > 0);
+        assert_eq!(second_stats.font_renderer_constructions, 2);
+
+        let third = resources
+            .encode_png(&snapshot, 0, 0)
+            .expect("second A frame should render from retained state");
+        let third_stats = third.resource_stats;
+        assert_eq!(third.font_load_micros, 0);
+        assert_eq!(third_stats.font_catalog_acquisitions, 1);
+        assert_eq!(third_stats.font_renderer_constructions, 2);
+        assert_eq!(third_stats.font_renderer_evictions, 0);
+        assert_eq!(third_stats.font_renderer_cache_len, 2);
+        assert_eq!(
+            third_stats.font_renderer_cache_capacity,
+            MAX_CACHED_FONT_SIZES as u64
+        );
+        assert!(third_stats.font_renderer_cache_hits > second_stats.font_renderer_cache_hits);
+        assert!(third_stats.glyph_cache_hits > second_stats.glyph_cache_hits);
+        assert!(third_stats.frame_buffer_reuses >= 1);
+        assert!(third_stats.png_buffer_reuses >= 1);
+        assert_eq!(third.payload, first.payload);
+    }
+
+    #[test]
+    fn size_renderer_cache_is_bounded_and_evicts_least_recently_used_entry() {
+        let mut resources = TerminalRenderResources::default();
+        for pixel_size in [8.0_f32, 9.0, 10.0, 11.0, 12.0] {
+            resources
+                .ensure_font(pixel_size)
+                .expect("size renderer should be constructed");
+        }
+        let stats = resources.snapshot_stats();
+        assert_eq!(stats.font_renderer_cache_len, MAX_CACHED_FONT_SIZES as u64);
+        assert_eq!(stats.font_renderer_constructions, 5);
+        assert_eq!(stats.font_renderer_evictions, 1);
+
+        let constructions_before = stats.font_renderer_constructions;
+        resources
+            .ensure_font(9.0)
+            .expect("retained size should remain cached");
+        let retained = resources.snapshot_stats();
+        assert_eq!(retained.font_renderer_constructions, constructions_before);
+
+        resources
+            .ensure_font(8.0)
+            .expect("evicted least-recent size should be reconstructable");
+        let reconstructed = resources.snapshot_stats();
+        assert_eq!(
+            reconstructed.font_renderer_constructions,
+            constructions_before + 1
+        );
+        assert_eq!(reconstructed.font_renderer_evictions, 2);
+        assert_eq!(
+            reconstructed.font_renderer_cache_len,
+            MAX_CACHED_FONT_SIZES as u64
+        );
+    }
+
+    #[tokio::test]
+    async fn one_locked_session_does_not_block_another_session_or_the_registry() {
+        let service = VoxTerminalService::new();
+        let first = service
+            .connect(test_connect_request("first", 1))
+            .await
+            .expect("first terminal session should connect");
+        let second = service
+            .connect(test_connect_request("second", 2))
+            .await
+            .expect("second terminal session should connect");
+
+        let first_state = service
+            .session(&first.session_id)
+            .expect("first session should remain registered");
+        let first_guard = first_state.lock().expect("first session lock");
+        let second_capabilities = tokio::time::timeout(
+            Duration::from_millis(250),
+            service.capabilities(TerminalCapabilitiesRequest {
+                session_id: second.session_id.clone(),
+                client_sequence: 3,
+            }),
+        )
+        .await
+        .expect("a locked first session must not block registry/second-session access")
+        .expect("second session capabilities should succeed");
+        assert_eq!(second_capabilities.session_id, second.session_id);
+        drop(first_guard);
+
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: first.session_id,
+                reason: "test complete".to_string(),
+                client_sequence: 4,
+            })
+            .await
+            .expect("first terminal session should disconnect");
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: second.session_id,
+                reason: "test complete".to_string(),
+                client_sequence: 5,
+            })
+            .await
+            .expect("second terminal session should disconnect");
     }
 
     #[tokio::test]
@@ -1417,11 +1739,15 @@ mod tests {
                 .await
                 .expect("terminal PNG snapshot should be returned");
             let output_ready = service
-                .sessions
-                .lock()
-                .expect("terminal session lock")
-                .get(&connected.session_id)
-                .is_some_and(|session| session.terminal.snapshot().visible_text().contains("100"));
+                .session(&connected.session_id)
+                .ok()
+                .and_then(|session| {
+                    session
+                        .lock()
+                        .ok()
+                        .map(|session| session.terminal.snapshot().visible_text().contains("100"))
+                })
+                .unwrap_or(false);
             if output_ready && !candidate.payload.is_empty() {
                 snapshot = Some(candidate);
                 break;
@@ -1435,10 +1761,14 @@ mod tests {
         assert!(snapshot.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert!(snapshot.payload.len() <= MAX_FRAME_BYTES as usize);
 
-        let sessions = service.sessions.lock().expect("terminal session lock");
-        let session = sessions
+        let session = service
+            .sessions
+            .lock()
+            .expect("terminal session registry lock")
             .get(&connected.session_id)
+            .cloned()
             .expect("session should remain available");
+        let session = session.lock().expect("terminal session lock");
         let terminal_snapshot = session.terminal.snapshot();
         let visible_text = terminal_snapshot.visible_text();
         assert!(
@@ -1461,7 +1791,7 @@ mod tests {
                 .foreground,
             Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
         ));
-        drop(sessions);
+        drop(session);
 
         let content = client
             .get_content(TerminalContentRequest {
@@ -1488,7 +1818,10 @@ mod tests {
         let timing = service
             .latest_snapshot_timing()
             .expect("Rust snapshot timing witness should be recorded");
-        assert_eq!(timing.correlation_id.as_str(), snapshot.correlation_id.as_str());
+        assert_eq!(
+            timing.correlation_id.as_str(),
+            snapshot.correlation_id.as_str()
+        );
         assert!(timing.frame_width > 0);
         assert!(timing.frame_height > 0);
         assert!(timing.payload_bytes > 0);
