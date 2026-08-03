@@ -2987,7 +2987,7 @@ mod tests {
         assert_eq!(capabilities.default_transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(capabilities.modes, VoxTerminalService::presentation_modes());
 
-        let mut request = test_raster_request(RasterTransport::DirtyRawRgba);
+        let mut request = test_raster_request(RasterTransport::FullPng);
         request.session_id = connected.session_id.clone();
         request.transport_generation = "generation-switch-17".to_string();
         request.client_sequence = 3;
@@ -3008,10 +3008,11 @@ mod tests {
         let initial = own_raster_frame(initial);
         assert_eq!(initial.transport_generation, "generation-switch-17");
         assert_eq!(initial.renderer_id, RENDERER_ID);
-        assert_eq!(initial.damage_mode_id, DAMAGE_DIRTY);
-        assert_eq!(initial.transport_id, TRANSPORT_DIRTY_RAW_RGBA);
+        assert_eq!(initial.damage_mode_id, DAMAGE_FULL);
+        assert_eq!(initial.transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(initial.frame.kind, TerminalRasterFrameKind::Full);
-        assert_eq!(initial.frame.encoding, TerminalFrameEncoding::Rgba8);
+        assert_eq!(initial.frame.encoding, TerminalFrameEncoding::Png);
+        assert!(initial.frame.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
         assert_eq!(initial.base_frame_sequence, 0);
         assert!(initial.frame_sequence > 0);
         assert!(initial.full_resync);
@@ -3029,6 +3030,91 @@ mod tests {
             .expect("V3 subscription should stop with its session")
             .expect("V3 subscription task should not panic")
             .expect("V3 subscription should close cleanly");
+        connection.shutdown().ok();
+        server_guard.shutdown().ok();
+    }
+
+    #[tokio::test]
+    async fn v3_raster_lane_does_not_starve_control_lane_content_reads() {
+        let (client_link, server_link) = vox::memory_link_pair(16);
+        let service = VoxTerminalService::new();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            vox::acceptor_on(server_link)
+                .on_lane(TerminalDispatcher::new(server_service))
+                .establish_connection()
+                .await
+                .expect("Vox server connection should establish")
+        });
+        let connection = vox::initiator_on(client_link)
+            .establish_connection()
+            .await
+            .expect("Vox client connection should establish");
+        let server_guard = server.await.expect("Vox server task should establish");
+        let control_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("terminal control lane should open");
+
+        let mut connect_request = test_connect_request("v3-control-during-raster", 1);
+        connect_request.requested_width = 20;
+        connect_request.requested_height = 6;
+        connect_request.surface.columns = 20;
+        connect_request.surface.rows = 6;
+        connect_request.surface.panel_width = 240;
+        connect_request.surface.panel_height = 120;
+        let connected = control_client
+            .connect(connect_request)
+            .await
+            .expect("terminal session should connect");
+        let raster_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("terminal raster lane should open");
+        let mut request = test_raster_request(RasterTransport::FullRawRgba);
+        request.session_id = connected.session_id.clone();
+        request.transport_generation = "generation-control-witness".to_string();
+        request.client_sequence = 2;
+        request.correlation_id = "v3-control-during-raster-01".to_string();
+        let (frame_tx, mut frame_rx) = vox::channel::<TerminalRasterFrameEvent>();
+        let subscription = tokio::spawn(async move {
+            raster_client
+                .subscribe_raster_frames(request, frame_tx)
+                .await
+        });
+
+        tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
+            .await
+            .expect("initial full RGBA frame should arrive")
+            .expect("initial full RGBA frame receive should succeed")
+            .expect("initial full RGBA frame should be present");
+        let content = tokio::time::timeout(
+            Duration::from_secs(2),
+            control_client.get_content(TerminalContentRequest {
+                session_id: connected.session_id.clone(),
+                after_sequence: 0,
+                max_chars: MAX_CONTENT_CHARS,
+                client_sequence: 3,
+            }),
+        )
+        .await
+        .expect("raster publication must not starve the control lane")
+        .expect("terminal content should remain readable while raster frames stream");
+        assert_eq!(content.session_id, connected.session_id);
+
+        control_client
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "control-lane concurrency test complete".to_string(),
+                client_sequence: 4,
+            })
+            .await
+            .expect("test session should disconnect");
+        tokio::time::timeout(Duration::from_secs(5), subscription)
+            .await
+            .expect("raster subscription should stop with its session")
+            .expect("raster subscription task should not panic")
+            .expect("raster subscription should close cleanly");
         connection.shutdown().ok();
         server_guard.shutdown().ok();
     }
