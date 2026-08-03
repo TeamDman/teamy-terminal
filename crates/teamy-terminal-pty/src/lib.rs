@@ -7,20 +7,20 @@
 
 use eyre::Context;
 use eyre::Result;
-use portable_pty::native_pty_system;
 use portable_pty::Child;
 use portable_pty::ChildKiller;
 use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
+use portable_pty::native_pty_system;
 use std::io::Read;
 use std::io::Write;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::mpsc;
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::SyncSender;
-use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::Duration;
 
 const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"if (Get-Module -ListAvailable -Name PSReadLine) { Import-Module PSReadLine -ErrorAction SilentlyContinue }; $global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
@@ -134,13 +134,49 @@ pub enum PtyEvent {
     Error(String),
 }
 
-/// A bounded, nonblocking PTY session.
-pub struct PtySession {
+/// The reason a PTY event-forwarding loop stopped.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PtyEventForwardingExit {
+    /// Every producer for the PTY event queue has stopped.
+    EventSourceDisconnected,
+    /// The actor or other destination stopped accepting forwarded events.
+    DestinationDisconnected,
+}
+
+/// The process-control half of a PTY session.
+///
+/// This handle can live in a session actor while [`PtyEventReceiver`] is
+/// moved to a notification-driven forwarding thread. Dropping the handle
+/// terminates the child process, matching the lifetime behavior of
+/// [`PtySession`].
+pub struct PtySessionControl {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
     process_id: Option<u32>,
+}
+
+impl std::fmt::Debug for PtySessionControl {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtySessionControl").finish_non_exhaustive()
+    }
+}
+
+/// The bounded event-consumer half of a PTY session.
+pub struct PtyEventReceiver {
     events: Receiver<PtyEvent>,
+}
+
+impl std::fmt::Debug for PtyEventReceiver {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PtyEventReceiver").finish_non_exhaustive()
+    }
+}
+
+/// A bounded PTY session with backwards-compatible control and receive APIs.
+pub struct PtySession {
+    control: PtySessionControl,
+    events: PtyEventReceiver,
 }
 
 impl std::fmt::Debug for PtySession {
@@ -183,14 +219,82 @@ impl PtySession {
         spawn_waiter(child, sender);
 
         Ok(Self {
-            master: pair.master,
-            writer: Mutex::new(writer),
-            killer,
-            process_id,
-            events,
+            control: PtySessionControl {
+                master: pair.master,
+                writer: Mutex::new(writer),
+                killer,
+                process_id,
+            },
+            events: PtyEventReceiver { events },
         })
     }
 
+    /// Split process control from event consumption.
+    ///
+    /// The control half can remain in a session actor while the event half is
+    /// blocked in [`PtyEventReceiver::forward_into`] or moved to
+    /// [`PtyEventReceiver::spawn_forwarder`]. No queue is added by the split.
+    #[must_use]
+    pub fn split(self) -> (PtySessionControl, PtyEventReceiver) {
+        (self.control, self.events)
+    }
+
+    /// Send raw terminal input to the child.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the writer is poisoned or the PTY rejects the
+    /// bytes.
+    pub fn write_input(&self, bytes: &[u8]) -> Result<()> {
+        self.control.write_input(bytes)
+    }
+
+    /// Resize the PTY in character and pixel units.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the PTY rejects the new dimensions.
+    pub fn resize(
+        &self,
+        columns: u16,
+        rows: u16,
+        pixel_width: u16,
+        pixel_height: u16,
+    ) -> Result<()> {
+        self.control
+            .resize(columns, rows, pixel_width, pixel_height)
+    }
+
+    /// Return the next event without blocking.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session's synchronization state is poisoned.
+    pub fn try_recv(&self) -> Result<Option<PtyEvent>> {
+        self.events.try_recv()
+    }
+
+    /// Wait briefly for the next event, useful for headless tests.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the session's synchronization state is poisoned.
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<PtyEvent>> {
+        self.events.recv_timeout(timeout)
+    }
+
+    /// Ask the child process to terminate.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the killer lock is poisoned or the child rejects
+    /// the termination request.
+    pub fn kill(&self) -> Result<()> {
+        self.control.kill()
+    }
+}
+
+impl PtySessionControl {
     /// Send raw terminal input to the child.
     ///
     /// # Errors
@@ -233,36 +337,6 @@ impl PtySession {
             .map_err(|error| eyre::eyre!("failed to resize the pseudoterminal: {error}"))
     }
 
-    /// Return the next event without blocking.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the session's synchronization state is poisoned.
-    pub fn try_recv(&self) -> Result<Option<PtyEvent>> {
-        match self.events.try_recv() {
-            Ok(event) => Ok(Some(event)),
-            Err(mpsc::TryRecvError::Empty) => Ok(None),
-            Err(mpsc::TryRecvError::Disconnected) => Ok(Some(PtyEvent::Error(String::from(
-                "pseudoterminal event queue disconnected",
-            )))),
-        }
-    }
-
-    /// Wait briefly for the next event, useful for headless tests.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the session's synchronization state is poisoned.
-    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<PtyEvent>> {
-        match self.events.recv_timeout(timeout) {
-            Ok(event) => Ok(Some(event)),
-            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
-            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Some(PtyEvent::Error(String::from(
-                "pseudoterminal event queue disconnected",
-            )))),
-        }
-    }
-
     /// Ask the child process to terminate.
     ///
     /// # Errors
@@ -296,24 +370,98 @@ impl PtySession {
     }
 }
 
+impl PtyEventReceiver {
+    /// Return the next event without blocking.
+    ///
+    /// # Errors
+    ///
+    /// This receiver currently reports queue disconnection as a terminal
+    /// [`PtyEvent::Error`] for compatibility with [`PtySession::try_recv`].
+    pub fn try_recv(&self) -> Result<Option<PtyEvent>> {
+        match self.events.try_recv() {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::TryRecvError::Empty) => Ok(None),
+            Err(mpsc::TryRecvError::Disconnected) => Ok(Some(PtyEvent::Error(String::from(
+                "pseudoterminal event queue disconnected",
+            )))),
+        }
+    }
+
+    /// Wait for the next event up to `timeout`.
+    ///
+    /// # Errors
+    ///
+    /// This receiver currently reports queue disconnection as a terminal
+    /// [`PtyEvent::Error`] for compatibility with [`PtySession::recv_timeout`].
+    pub fn recv_timeout(&self, timeout: Duration) -> Result<Option<PtyEvent>> {
+        match self.events.recv_timeout(timeout) {
+            Ok(event) => Ok(Some(event)),
+            Err(mpsc::RecvTimeoutError::Timeout) => Ok(None),
+            Err(mpsc::RecvTimeoutError::Disconnected) => Ok(Some(PtyEvent::Error(String::from(
+                "pseudoterminal event queue disconnected",
+            )))),
+        }
+    }
+
+    /// Block on PTY events and forward them into an existing bounded actor
+    /// queue.
+    ///
+    /// The destination must be a [`SyncSender`], so this method cannot hide an
+    /// unbounded queue. Backpressure propagates to the existing bounded PTY
+    /// event queue while the actor is busy. The mapper lets callers wrap an
+    /// event in their own actor-command enum.
+    pub fn forward_into<T, F>(
+        self,
+        destination: &SyncSender<T>,
+        mut map_event: F,
+    ) -> PtyEventForwardingExit
+    where
+        F: FnMut(PtyEvent) -> T,
+    {
+        while let Ok(event) = self.events.recv() {
+            if destination.send(map_event(event)).is_err() {
+                return PtyEventForwardingExit::DestinationDisconnected;
+            }
+        }
+        PtyEventForwardingExit::EventSourceDisconnected
+    }
+
+    /// Spawn a notification-driven bridge into an existing bounded actor
+    /// queue.
+    ///
+    /// The thread blocks on the PTY receiver when idle and on the destination
+    /// queue when that bounded queue is full. It performs no timeout polling.
+    pub fn spawn_forwarder<T, F>(
+        self,
+        destination: SyncSender<T>,
+        map_event: F,
+    ) -> std::thread::JoinHandle<PtyEventForwardingExit>
+    where
+        T: Send + 'static,
+        F: FnMut(PtyEvent) -> T + Send + 'static,
+    {
+        std::thread::spawn(move || self.forward_into(&destination, map_event))
+    }
+}
+
 #[cfg(windows)]
 mod process_cleanup {
     use eyre::Context;
     use eyre::Result;
-    use windows::core::HRESULT;
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::Foundation::ERROR_INVALID_PARAMETER;
     use windows::Win32::Foundation::ERROR_NO_MORE_FILES;
     use windows::Win32::System::Diagnostics::ToolHelp::CreateToolhelp32Snapshot;
+    use windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W;
     use windows::Win32::System::Diagnostics::ToolHelp::Process32FirstW;
     use windows::Win32::System::Diagnostics::ToolHelp::Process32NextW;
-    use windows::Win32::System::Diagnostics::ToolHelp::PROCESSENTRY32W;
     use windows::Win32::System::Diagnostics::ToolHelp::TH32CS_SNAPPROCESS;
     use windows::Win32::System::Threading::GetExitCodeProcess;
     use windows::Win32::System::Threading::OpenProcess;
-    use windows::Win32::System::Threading::TerminateProcess;
     use windows::Win32::System::Threading::PROCESS_QUERY_INFORMATION;
     use windows::Win32::System::Threading::PROCESS_TERMINATE;
+    use windows::Win32::System::Threading::TerminateProcess;
+    use windows::core::HRESULT;
 
     const STILL_ACTIVE: u32 = 259;
     type ProcessInfo = (u32, u32, String);
@@ -462,7 +610,7 @@ fn terminate_process_tree(process_id: Option<u32>) -> Result<()> {
     process_cleanup::terminate(process_id)
 }
 
-impl Drop for PtySession {
+impl Drop for PtySessionControl {
     fn drop(&mut self) {
         if let Ok(mut killer) = self.killer.lock() {
             let _ = killer.kill();
@@ -515,6 +663,17 @@ fn spawn_waiter(mut child: Box<dyn Child + Send + Sync>, sender: SyncSender<PtyE
 mod tests {
     use super::*;
 
+    #[derive(Debug)]
+    enum ActorMessage {
+        Command(&'static str),
+        Pty(PtyEvent),
+    }
+
+    fn test_event_queue(capacity: usize) -> (SyncSender<PtyEvent>, PtyEventReceiver) {
+        let (sender, events) = mpsc::sync_channel(capacity);
+        (sender, PtyEventReceiver { events })
+    }
+
     #[test]
     fn interactive_shell_keeps_the_profile_enabled() {
         assert!(!PtyConfig::interactive().no_profile);
@@ -531,13 +690,161 @@ mod tests {
         assert!(test.iter().any(|argument| argument == "-NoProfile"));
         assert!(interactive.iter().any(|argument| argument == "-NoExit"));
         assert!(interactive.iter().any(|argument| argument == "-Command"));
-        assert!(interactive
-            .iter()
-            .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
+        assert!(
+            interactive
+                .iter()
+                .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP)
+        );
         assert!(test.iter().any(|argument| argument == "-NoExit"));
-        assert!(test
-            .iter()
-            .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP));
+        assert!(
+            test.iter()
+                .any(|argument| argument == TEAMY_PWSH_OSC133_BOOTSTRAP)
+        );
+    }
+
+    #[test]
+    fn event_receiver_preserves_nonblocking_and_timeout_behavior() {
+        let (sender, events) = test_event_queue(1);
+
+        assert!(
+            events
+                .try_recv()
+                .expect("empty queue should be healthy")
+                .is_none()
+        );
+        assert!(
+            events
+                .recv_timeout(Duration::from_millis(1))
+                .expect("idle queue should be healthy")
+                .is_none()
+        );
+
+        sender
+            .send(PtyEvent::Output(vec![1, 2, 3]))
+            .expect("bounded test queue should accept one event");
+        let event = events
+            .try_recv()
+            .expect("queued event should be readable")
+            .expect("queued event should be present");
+        assert!(matches!(event, PtyEvent::Output(bytes) if bytes == [1, 2, 3]));
+
+        drop(sender);
+        let event = events
+            .recv_timeout(Duration::from_millis(1))
+            .expect("disconnect remains an event for compatibility")
+            .expect("disconnect should produce the compatibility error event");
+        assert!(matches!(
+            event,
+            PtyEvent::Error(error) if error == "pseudoterminal event queue disconnected"
+        ));
+    }
+
+    #[test]
+    fn forwarder_is_notification_driven_and_shares_the_actor_inbox() {
+        let (event_sender, events) = test_event_queue(1);
+        let (actor_sender, actor_receiver) = mpsc::sync_channel(2);
+        let forwarded = events.spawn_forwarder(actor_sender.clone(), ActorMessage::Pty);
+
+        actor_sender
+            .send(ActorMessage::Command("resize"))
+            .expect("actor command should be accepted");
+        assert!(matches!(
+            actor_receiver
+                .recv_timeout(Duration::from_millis(25))
+                .expect("actor command should wake the shared inbox"),
+            ActorMessage::Command("resize")
+        ));
+        assert!(
+            actor_receiver
+                .recv_timeout(Duration::from_millis(10))
+                .is_err(),
+            "idle PTY forwarder must not synthesize periodic messages"
+        );
+
+        event_sender
+            .send(PtyEvent::Output(vec![4, 5, 6]))
+            .expect("PTY event should enter its bounded queue");
+        let message = actor_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("PTY notification should wake the shared actor inbox");
+        assert!(
+            matches!(message, ActorMessage::Pty(PtyEvent::Output(bytes)) if bytes == [4, 5, 6])
+        );
+
+        drop(actor_receiver);
+        event_sender
+            .send(PtyEvent::Exited(PtyExit {
+                code: Some(0),
+                success: true,
+            }))
+            .expect("source should remain live until forwarding observes actor shutdown");
+        assert_eq!(
+            forwarded
+                .join()
+                .expect("forwarding thread should not panic"),
+            PtyEventForwardingExit::DestinationDisconnected
+        );
+    }
+
+    #[test]
+    fn forwarder_propagates_bounded_actor_backpressure() {
+        let (event_sender, events) = test_event_queue(1);
+        let (actor_sender, actor_receiver) = mpsc::sync_channel(1);
+        let (mapped_sender, mapped_receiver) = mpsc::sync_channel(0);
+
+        actor_sender
+            .send(ActorMessage::Command("occupied"))
+            .expect("actor queue should accept its one command");
+        let forwarded = events.spawn_forwarder(actor_sender, move |event| {
+            mapped_sender
+                .send(())
+                .expect("test should observe the event before actor delivery");
+            ActorMessage::Pty(event)
+        });
+
+        event_sender
+            .send(PtyEvent::Output(vec![1]))
+            .expect("first PTY event should be accepted");
+        mapped_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("forwarder should wake for the first PTY event");
+        event_sender
+            .send(PtyEvent::Output(vec![2]))
+            .expect("one event may remain pending in the bounded PTY queue");
+        assert!(matches!(
+            event_sender.try_send(PtyEvent::Output(vec![3])),
+            Err(mpsc::TrySendError::Full(PtyEvent::Output(bytes))) if bytes == [3]
+        ));
+
+        assert!(matches!(
+            actor_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("original actor command should remain first"),
+            ActorMessage::Command("occupied")
+        ));
+        assert!(matches!(
+            actor_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("first PTY event should resume after actor capacity returns"),
+            ActorMessage::Pty(PtyEvent::Output(bytes)) if bytes == [1]
+        ));
+        mapped_receiver
+            .recv_timeout(Duration::from_secs(1))
+            .expect("forwarder should then consume the one pending PTY event");
+        assert!(matches!(
+            actor_receiver
+                .recv_timeout(Duration::from_secs(1))
+                .expect("pending PTY event should reach the actor"),
+            ActorMessage::Pty(PtyEvent::Output(bytes)) if bytes == [2]
+        ));
+
+        drop(event_sender);
+        assert_eq!(
+            forwarded
+                .join()
+                .expect("forwarding thread should not panic"),
+            PtyEventForwardingExit::EventSourceDisconnected
+        );
     }
 
     #[cfg(windows)]

@@ -10,21 +10,24 @@ use spec_proto::terminal::{
     Terminal, TerminalCancelRequest, TerminalCapabilities, TerminalCapabilitiesRequest,
     TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult,
     TerminalContentRequest, TerminalContentResult, TerminalCursor, TerminalDisconnectRequest,
-    TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding, TerminalFrameKind,
-    TerminalInputResult, TerminalKeyInput, TerminalMouseInput, TerminalOperationResult,
-    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
+    TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding,
+    TerminalFrameEvent, TerminalFrameKind, TerminalInputResult, TerminalKeyInput,
+    TerminalMouseInput, TerminalOperationResult, TerminalPromptMetadata,
+    TerminalPublicationTelemetry, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
     TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming,
-    TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
+    TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
+use std::sync::mpsc::{self, SyncSender};
+use std::sync::{Arc, Mutex, OnceLock, Weak};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_core::{TerminalLimits, TerminalSession};
 use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, RasterizedFrame, TerminalFont, TerminalFontCatalog};
-use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
+use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
+use tokio::sync::watch;
 use vox_terminal as vox;
 
 const MAX_COLUMNS: u16 = 240;
@@ -36,7 +39,12 @@ const MAX_PIXEL_HEIGHT: u16 = 4096;
 const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
+const SESSION_ACTOR_CAPACITY: usize = 64;
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
+
+static PROCESS_EPOCH: OnceLock<String> = OnceLock::new();
+static NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
+static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
 const GLFW_MOD_SHIFT: u32 = 0x0001;
 const GLFW_MOD_CONTROL: u32 = 0x0002;
@@ -273,19 +281,196 @@ pub fn normalize_listen_address(raw: &str) -> Result<String> {
 
 #[derive(Clone)]
 pub struct VoxTerminalService {
-    sessions: Arc<Mutex<BTreeMap<String, Arc<Mutex<TerminalSessionState>>>>>,
-    next_session: Arc<AtomicU64>,
+    sessions: Arc<Mutex<BTreeMap<String, Arc<TerminalSessionRuntime>>>>,
+    process_epoch: Arc<str>,
+    connection_epoch: Arc<str>,
     latest_snapshot_timing: Arc<Mutex<Option<TerminalSnapshotTimingWitness>>>,
 }
 
 struct TerminalSessionState {
-    pty: PtySession,
+    pty: PtySessionControl,
     terminal: TerminalSession,
     sequence: i64,
     surface: TerminalSurfaceMetrics,
     closed: bool,
     debug_output: Vec<u8>,
-    render_resources: TerminalRenderResources,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PublicationSignal {
+    terminal_sequence: i64,
+    mutations: i64,
+    mutation_at: Instant,
+    full_resync: bool,
+}
+
+#[derive(Default)]
+struct PublicationHubState {
+    subscribers: BTreeMap<u64, watch::Sender<PublicationSignal>>,
+}
+
+struct PublicationHub {
+    state: Mutex<PublicationHubState>,
+    next_subscriber: AtomicU64,
+    mutations: AtomicI64,
+}
+
+impl PublicationHub {
+    fn new() -> Self {
+        Self {
+            state: Mutex::new(PublicationHubState::default()),
+            next_subscriber: AtomicU64::new(1),
+            mutations: AtomicI64::new(0),
+        }
+    }
+
+    fn register(&self, terminal_sequence: i64) -> (u64, watch::Receiver<PublicationSignal>) {
+        let subscriber_id = self.next_subscriber.fetch_add(1, Ordering::Relaxed);
+        let signal = PublicationSignal {
+            terminal_sequence,
+            mutations: self.mutations.load(Ordering::Acquire),
+            mutation_at: Instant::now(),
+            full_resync: true,
+        };
+        let (sender, receiver) = watch::channel(signal);
+        self.state
+            .lock()
+            .expect("terminal publication hub lock poisoned")
+            .subscribers
+            .insert(subscriber_id, sender);
+        (subscriber_id, receiver)
+    }
+
+    fn publish(&self, terminal_sequence: i64, full_resync: bool) {
+        let previous = self
+            .mutations
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+                Some(value.saturating_add(1))
+            })
+            .unwrap_or(i64::MAX);
+        let mutations = previous.saturating_add(1);
+        let signal = PublicationSignal {
+            terminal_sequence,
+            mutations,
+            mutation_at: Instant::now(),
+            full_resync,
+        };
+        let mut state = self
+            .state
+            .lock()
+            .expect("terminal publication hub lock poisoned");
+        state.subscribers.retain(|_, subscriber| {
+            if subscriber.receiver_count() == 0 {
+                return false;
+            }
+            subscriber.send_replace(signal);
+            true
+        });
+    }
+
+    fn unregister(&self, subscriber_id: u64) {
+        if let Ok(mut state) = self.state.lock() {
+            state.subscribers.remove(&subscriber_id);
+        }
+    }
+
+    fn close(&self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.subscribers.clear();
+        }
+    }
+
+    #[cfg(test)]
+    fn subscriber_count(&self) -> usize {
+        self.state.lock().map_or(0, |state| state.subscribers.len())
+    }
+}
+
+enum SessionActorMessage {
+    Pty(PtyEvent),
+    Shutdown,
+}
+
+struct TerminalSessionRuntime {
+    session_id: String,
+    connection_epoch: Arc<str>,
+    session_epoch: Arc<str>,
+    state: Mutex<TerminalSessionState>,
+    publication: PublicationHub,
+    explicit_render_resources: Mutex<Option<TerminalRenderResources>>,
+    actor_sender: SyncSender<SessionActorMessage>,
+    terminal_sequence: AtomicI64,
+    closed: AtomicBool,
+}
+
+impl TerminalSessionRuntime {
+    fn sequence(&self) -> i64 {
+        self.terminal_sequence.load(Ordering::Acquire)
+    }
+
+    fn publish_mutation(&self, sequence: i64, full_resync: bool) {
+        self.terminal_sequence.store(sequence, Ordering::Release);
+        self.publication.publish(sequence, full_resync);
+    }
+
+    fn take_explicit_render_resources(&self) -> TerminalRenderResources {
+        self.explicit_render_resources
+            .lock()
+            .ok()
+            .and_then(|mut resources| resources.take())
+            .unwrap_or_default()
+    }
+
+    fn return_explicit_render_resources(&self, resources: TerminalRenderResources) {
+        if let Ok(mut slot) = self.explicit_render_resources.lock()
+            && slot.is_none()
+        {
+            *slot = Some(resources);
+        }
+    }
+
+    fn explicit_render_resource_stats(&self) -> TerminalRenderResourceStats {
+        self.explicit_render_resources
+            .lock()
+            .ok()
+            .and_then(|resources| {
+                resources
+                    .as_ref()
+                    .map(TerminalRenderResources::snapshot_stats)
+            })
+            .unwrap_or_default()
+    }
+
+    fn shutdown(&self) {
+        if self.closed.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.publication.close();
+        let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
+        if let Ok(state) = self.state.lock() {
+            let _ = state.pty.kill();
+        }
+    }
+}
+
+impl Drop for TerminalSessionRuntime {
+    fn drop(&mut self) {
+        self.publication.close();
+        let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
+    }
+}
+
+struct SubscriptionGuard {
+    runtime: Weak<TerminalSessionRuntime>,
+    subscriber_id: u64,
+}
+
+impl Drop for SubscriptionGuard {
+    fn drop(&mut self) {
+        if let Some(runtime) = self.runtime.upgrade() {
+            runtime.publication.unregister(self.subscriber_id);
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -536,6 +721,42 @@ struct EncodedPng {
     resource_stats: TerminalRenderResourceStats,
 }
 
+struct CapturedTerminal {
+    snapshot: teamy_terminal_core::TerminalSnapshot,
+    surface: TerminalSurfaceMetrics,
+    terminal_sequence: i64,
+    mutations: i64,
+}
+
+#[derive(Default)]
+struct PublicationCounters {
+    renders_started: i64,
+    renders_completed: i64,
+    pre_render_coalesced: i64,
+    credit_blocked_sends: i64,
+    frames_pushed: i64,
+    pending_depth_max: u8,
+    mutation_to_send_us: i64,
+    credit_wait_us: i64,
+}
+
+impl PublicationCounters {
+    fn telemetry(&self, mutations: i64, pending_depth: u8) -> TerminalPublicationTelemetry {
+        TerminalPublicationTelemetry {
+            mutations,
+            renders_started: self.renders_started,
+            renders_completed: self.renders_completed,
+            pre_render_coalesced: self.pre_render_coalesced,
+            credit_blocked_sends: self.credit_blocked_sends,
+            frames_pushed: self.frames_pushed.saturating_add(1),
+            pending_depth,
+            pending_depth_max: self.pending_depth_max.max(pending_depth),
+            mutation_to_send_us: self.mutation_to_send_us,
+            credit_wait_us: self.credit_wait_us,
+        }
+    }
+}
+
 /// Machine-readable Rust-side evidence for one full-PNG snapshot.
 ///
 /// This stays on the diagnostic surface instead of enlarging every Vox
@@ -584,13 +805,45 @@ pub struct TerminalSnapshotTimingWitness {
     pub transport_payload_copies: u64,
 }
 
+fn process_epoch() -> Arc<str> {
+    Arc::from(
+        PROCESS_EPOCH
+            .get_or_init(|| {
+                let started = SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or(Duration::ZERO)
+                    .as_nanos();
+                format!("process-{}-{started}", std::process::id())
+            })
+            .as_str(),
+    )
+}
+
+fn next_connection_epoch(process_epoch: &str) -> Arc<str> {
+    Arc::from(format!(
+        "{process_epoch}:connection:{}",
+        NEXT_CONNECTION_EPOCH.fetch_add(1, Ordering::Relaxed)
+    ))
+}
+
 impl VoxTerminalService {
     #[must_use]
     pub fn new() -> Self {
+        let process_epoch = process_epoch();
         Self {
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
-            next_session: Arc::new(AtomicU64::new(1)),
+            connection_epoch: next_connection_epoch(&process_epoch),
+            process_epoch,
             latest_snapshot_timing: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    fn for_connection(&self) -> Self {
+        Self {
+            sessions: Arc::clone(&self.sessions),
+            process_epoch: Arc::clone(&self.process_epoch),
+            connection_epoch: next_connection_epoch(&self.process_epoch),
+            latest_snapshot_timing: Arc::clone(&self.latest_snapshot_timing),
         }
     }
 
@@ -609,8 +862,9 @@ impl VoxTerminalService {
         }
     }
 
-    fn session(&self, session_id: &str) -> Result<Arc<Mutex<TerminalSessionState>>, TerminalError> {
-        self.sessions
+    fn session(&self, session_id: &str) -> Result<Arc<TerminalSessionRuntime>, TerminalError> {
+        let session = self
+            .sessions
             .lock()
             .map_err(|_| {
                 Self::error(
@@ -627,13 +881,21 @@ impl VoxTerminalService {
                     "terminal session not found",
                     0,
                 )
-            })
+            })?;
+        if session.connection_epoch != self.connection_epoch {
+            return Err(Self::error(
+                TerminalErrorCode::SessionNotFound,
+                "terminal session not found for this connection",
+                0,
+            ));
+        }
+        Ok(session)
     }
 
     fn lock_session(
-        session: &Mutex<TerminalSessionState>,
+        session: &TerminalSessionRuntime,
     ) -> Result<std::sync::MutexGuard<'_, TerminalSessionState>, TerminalError> {
-        session.lock().map_err(|_| {
+        session.state.lock().map_err(|_| {
             Self::error(
                 TerminalErrorCode::Internal,
                 "terminal session lock poisoned",
@@ -701,64 +963,75 @@ impl VoxTerminalService {
         Ok(())
     }
 
-    fn drain_pty(session: &mut TerminalSessionState) -> Result<(), TerminalError> {
-        // PTY output is drained opportunistically.  In particular, an input
-        // request must not hold the session mutex while a long command such
-        // as `1..10000` is still producing output; snapshot requests need to
-        // be able to observe that output concurrently.
-        for event_index in 0..512 {
-            let event = session
-                .pty
-                .recv_timeout(if event_index == 0 {
-                    Duration::from_millis(10)
-                } else {
-                    Duration::ZERO
-                })
-                .map_err(|error| {
-                    Self::error(
-                        TerminalErrorCode::Internal,
-                        error.to_string(),
-                        session.sequence,
-                    )
-                })?;
-            let Some(event) = event else {
-                break;
-            };
-            match event {
-                PtyEvent::Output(bytes) => {
-                    Self::answer_terminal_queries(&session.pty, &bytes)?;
-                    session.debug_output.extend_from_slice(&bytes);
-                    if session.debug_output.len() > 64 * 1024 {
-                        let remove = session.debug_output.len() - 64 * 1024;
-                        session.debug_output.drain(..remove);
-                    }
-                    session.terminal.process_bytes(&bytes);
-                    Self::next_sequence(&mut session.sequence);
+    fn process_pty_event(runtime: &TerminalSessionRuntime, event: PtyEvent) {
+        let mut state = match runtime.state.lock() {
+            Ok(state) => state,
+            Err(_) => {
+                runtime.closed.store(true, Ordering::Release);
+                runtime.publication.close();
+                return;
+            }
+        };
+        match event {
+            PtyEvent::Output(bytes) => {
+                if let Err(error) = Self::answer_terminal_queries(&state.pty, &bytes) {
+                    tracing::warn!(session_id = %runtime.session_id, ?error, "terminal query response failed");
+                    state.closed = true;
+                    runtime.closed.store(true, Ordering::Release);
                 }
-                PtyEvent::Exited(status) => {
-                    session.closed = true;
-                    Self::next_sequence(&mut session.sequence);
-                    if !status.success {
-                        return Err(Self::error(
-                            TerminalErrorCode::Disconnected,
-                            format!("PowerShell exited with code {:?}", status.code),
-                            session.sequence,
-                        ));
-                    }
+                state.debug_output.extend_from_slice(&bytes);
+                if state.debug_output.len() > 64 * 1024 {
+                    let remove = state.debug_output.len() - 64 * 1024;
+                    state.debug_output.drain(..remove);
                 }
-                PtyEvent::Error(message) => {
-                    return Err(Self::error(
-                        TerminalErrorCode::Internal,
-                        message,
-                        session.sequence,
-                    ));
+                state.terminal.process_bytes(&bytes);
+            }
+            PtyEvent::Exited(status) => {
+                state.closed = true;
+                runtime.closed.store(true, Ordering::Release);
+                if !status.success {
+                    tracing::warn!(
+                        session_id = %runtime.session_id,
+                        exit_code = ?status.code,
+                        "terminal process exited unsuccessfully"
+                    );
                 }
             }
+            PtyEvent::Error(message) => {
+                state.closed = true;
+                runtime.closed.store(true, Ordering::Release);
+                tracing::warn!(session_id = %runtime.session_id, %message, "terminal PTY failed");
+            }
         }
-        Ok(())
+        let sequence = Self::next_sequence(&mut state.sequence);
+        drop(state);
+        runtime.publish_mutation(sequence, false);
     }
 
-    fn answer_terminal_queries(pty: &PtySession, bytes: &[u8]) -> Result<(), TerminalError> {
+    fn spawn_session_actor(
+        runtime: &Arc<TerminalSessionRuntime>,
+        events: teamy_terminal_pty::PtyEventReceiver,
+        actor_receiver: mpsc::Receiver<SessionActorMessage>,
+    ) {
+        let forwarder =
+            events.spawn_forwarder(runtime.actor_sender.clone(), SessionActorMessage::Pty);
+        let runtime = Arc::downgrade(runtime);
+        std::thread::spawn(move || {
+            while let Ok(message) = actor_receiver.recv() {
+                let Some(runtime) = runtime.upgrade() else {
+                    break;
+                };
+                match message {
+                    SessionActorMessage::Pty(event) => Self::process_pty_event(&runtime, event),
+                    SessionActorMessage::Shutdown => break,
+                }
+            }
+            drop(runtime);
+            let _ = forwarder.join();
+        });
+    }
+
+    fn answer_terminal_queries(pty: &PtySessionControl, bytes: &[u8]) -> Result<(), TerminalError> {
         let cursor_queries = bytes
             .windows(4)
             .filter(|window| *window == b"\x1b[6n")
@@ -826,6 +1099,119 @@ impl VoxTerminalService {
             command_status,
         }
     }
+
+    fn close_connection_sessions(&self) {
+        let removed = self
+            .sessions
+            .lock()
+            .map(|mut sessions| {
+                let session_ids: Vec<_> = sessions
+                    .iter()
+                    .filter(|(_, session)| session.connection_epoch == self.connection_epoch)
+                    .map(|(session_id, _)| session_id.clone())
+                    .collect();
+                session_ids
+                    .into_iter()
+                    .filter_map(|session_id| sessions.remove(&session_id))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        for session in removed {
+            session.shutdown();
+        }
+    }
+
+    fn capture_terminal(
+        runtime: &TerminalSessionRuntime,
+    ) -> Result<CapturedTerminal, TerminalError> {
+        let state = Self::lock_session(runtime)?;
+        Ok(CapturedTerminal {
+            snapshot: state.terminal.snapshot(),
+            surface: state.surface.clone(),
+            terminal_sequence: state.sequence,
+            mutations: runtime.publication.mutations.load(Ordering::Acquire),
+        })
+    }
+
+    fn render_captured(
+        resources: &mut TerminalRenderResources,
+        session_id: &str,
+        capture: &CapturedTerminal,
+        request_sequence: i64,
+        correlation_id: &str,
+        max_frame_bytes: u32,
+    ) -> Result<TerminalSnapshot, TerminalError> {
+        let started = Instant::now();
+        let encoded = resources
+            .encode_png(
+                &capture.snapshot,
+                capture.surface.panel_width,
+                capture.surface.panel_height,
+            )
+            .map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    error.to_string(),
+                    capture.terminal_sequence,
+                )
+            })?;
+        let max_frame_bytes = max_frame_bytes.min(MAX_FRAME_BYTES);
+        if max_frame_bytes == 0 || encoded.payload.len() > max_frame_bytes as usize {
+            return Err(Self::error(
+                TerminalErrorCode::CapacityExceeded,
+                "PNG snapshot exceeds requested frame bound",
+                capture.terminal_sequence,
+            ));
+        }
+        let total_us = i64::try_from(started.elapsed().as_micros()).unwrap_or(i64::MAX);
+        let width = encoded.width;
+        let height = encoded.height;
+        Ok(TerminalSnapshot {
+            session_id: session_id.to_string(),
+            sequence: capture.terminal_sequence,
+            request_sequence,
+            logical_columns: capture.snapshot.columns,
+            logical_rows: capture.snapshot.rows,
+            width,
+            height,
+            panel_width: capture.surface.panel_width,
+            panel_height: capture.surface.panel_height,
+            cell_width: encoded.cell_width,
+            cell_height: encoded.cell_height,
+            font_pixel_size: encoded.font_pixel_size,
+            correlation_id: correlation_id.to_string(),
+            encoding: TerminalFrameEncoding::Png,
+            kind: TerminalFrameKind::Full,
+            stride: encoded.stride,
+            tile_x: 0,
+            tile_y: 0,
+            tile_width: width,
+            tile_height: height,
+            payload: encoded.payload,
+            complete: true,
+            cursor: TerminalCursor {
+                x: capture.snapshot.cursor.column,
+                y: capture.snapshot.cursor.row,
+                visible: capture.snapshot.cursor_visible,
+            },
+            selection_present: false,
+            selection: TerminalSelection {
+                anchor_x: 0,
+                anchor_y: 0,
+                focus_x: 0,
+                focus_y: 0,
+            },
+            prompt: Self::prompt_metadata(&capture.snapshot.prompt),
+            timing: TerminalSnapshotTiming {
+                pty_drain_us: 0,
+                terminal_snapshot_us: 0,
+                font_load_us: i64::try_from(encoded.font_load_micros).unwrap_or(i64::MAX),
+                raster_us: i64::try_from(encoded.raster_micros).unwrap_or(i64::MAX),
+                png_encode_us: i64::try_from(encoded.png_encode_micros).unwrap_or(i64::MAX),
+                total_us,
+            },
+        })
+    }
 }
 
 impl Default for VoxTerminalService {
@@ -841,12 +1227,15 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalConnectResult, TerminalError> {
         Self::validate_dimensions(request.requested_width, request.requested_height)?;
         Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
-        let session_id = format!(
-            "sfm-terminal-{}",
-            self.next_session.fetch_add(1, Ordering::Relaxed)
-        );
+        let epoch_sequence = NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed);
+        let session_id = format!("sfm-terminal-{epoch_sequence}");
+        let session_epoch: Arc<str> =
+            Arc::from(format!("{}:session:{epoch_sequence}", self.process_epoch));
         let pty = PtySession::spawn(&PtyConfig::interactive())
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
+        pty.resize(request.requested_width, request.requested_height, 0, 0)
+            .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
+        let (pty, events) = pty.split();
         let surface = TerminalSurfaceMetrics {
             columns: request.requested_width,
             rows: request.requested_height,
@@ -856,26 +1245,33 @@ impl Terminal for VoxTerminalService {
             cell_height: 0,
             font_pixel_size: 0,
         };
-        let mut state = TerminalSessionState {
+        let state = TerminalSessionState {
             pty,
             terminal: TerminalSession::new(
                 TerminalLimits::default(),
                 request.requested_width,
                 request.requested_height,
             ),
-            sequence: 0,
+            sequence: 1,
             surface,
             closed: false,
             debug_output: Vec::new(),
-            render_resources: TerminalRenderResources::default(),
         };
-        state
-            .pty
-            .resize(request.requested_width, request.requested_height, 0, 0)
-            .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        Self::drain_pty(&mut state)?;
-        let sequence = Self::next_sequence(&mut state.sequence);
+        let sequence = state.sequence;
         let connected_surface = state.surface.clone();
+        let (actor_sender, actor_receiver) = mpsc::sync_channel(SESSION_ACTOR_CAPACITY);
+        let runtime = Arc::new(TerminalSessionRuntime {
+            session_id: session_id.clone(),
+            connection_epoch: Arc::clone(&self.connection_epoch),
+            session_epoch,
+            state: Mutex::new(state),
+            publication: PublicationHub::new(),
+            explicit_render_resources: Mutex::new(Some(TerminalRenderResources::default())),
+            actor_sender,
+            terminal_sequence: AtomicI64::new(sequence),
+            closed: AtomicBool::new(false),
+        });
+        Self::spawn_session_actor(&runtime, events, actor_receiver);
         self.sessions
             .lock()
             .map_err(|_| {
@@ -885,7 +1281,7 @@ impl Terminal for VoxTerminalService {
                     sequence,
                 )
             })?
-            .insert(session_id.clone(), Arc::new(Mutex::new(state)));
+            .insert(session_id.clone(), runtime);
         Ok(TerminalConnectResult {
             session_id,
             capabilities: Self::capabilities(),
@@ -915,8 +1311,8 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalResizeResult, TerminalError> {
         Self::validate_dimensions(request.width, request.height)?;
         Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
-        let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let runtime = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&runtime)?;
         session.surface.columns = request.width;
         session.surface.rows = request.height;
         session.surface.panel_width = request.surface.panel_width;
@@ -936,11 +1332,14 @@ impl Terminal for VoxTerminalService {
             })?;
         session.terminal.resize(request.width, request.height);
         let sequence = Self::next_sequence(&mut session.sequence);
+        let surface = session.surface.clone();
+        drop(session);
+        runtime.publish_mutation(sequence, true);
         Ok(TerminalResizeResult {
             session_id: request.session_id,
             width: request.width,
             height: request.height,
-            surface: session.surface.clone(),
+            surface,
             server_sequence: sequence,
             correlation_id: request.correlation_id,
         })
@@ -958,7 +1357,7 @@ impl Terminal for VoxTerminalService {
             ));
         }
         let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let session = Self::lock_session(&session)?;
         let text = request.text.into_bytes();
         session.pty.write_input(&text).map_err(|error| {
             Self::error(
@@ -967,8 +1366,7 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             )
         })?;
-        Self::drain_pty(&mut session)?;
-        let sequence = Self::next_sequence(&mut session.sequence);
+        let sequence = session.sequence;
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
@@ -982,9 +1380,8 @@ impl Terminal for VoxTerminalService {
         request: TerminalKeyInput,
     ) -> Result<TerminalInputResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let session = Self::lock_session(&session)?;
         let bytes = key_input_bytes(request.key_code, request.modifiers, request.pressed);
-        let input_changed = !bytes.is_empty();
         if !bytes.is_empty() {
             session.pty.write_input(&bytes).map_err(|error| {
                 Self::error(
@@ -994,12 +1391,7 @@ impl Terminal for VoxTerminalService {
                 )
             })?;
         }
-        Self::drain_pty(&mut session)?;
-        let sequence = if input_changed {
-            Self::next_sequence(&mut session.sequence)
-        } else {
-            session.sequence
-        };
+        let sequence = session.sequence;
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
@@ -1013,7 +1405,7 @@ impl Terminal for VoxTerminalService {
         request: TerminalMouseInput,
     ) -> Result<TerminalInputResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let session = Self::lock_session(&session)?;
         let bytes = mouse_input_bytes(
             &session.terminal,
             request.x,
@@ -1025,7 +1417,6 @@ impl Terminal for VoxTerminalService {
             request.wheel_x,
             request.wheel_y,
         );
-        let input_changed = !bytes.is_empty();
         if !bytes.is_empty() {
             session.pty.write_input(&bytes).map_err(|error| {
                 Self::error(
@@ -1035,12 +1426,7 @@ impl Terminal for VoxTerminalService {
                 )
             })?;
         }
-        Self::drain_pty(&mut session)?;
-        let sequence = if input_changed {
-            Self::next_sequence(&mut session.sequence)
-        } else {
-            session.sequence
-        };
+        let sequence = session.sequence;
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
@@ -1054,15 +1440,13 @@ impl Terminal for VoxTerminalService {
         request: TerminalSnapshotRequest,
     ) -> Result<TerminalSnapshot, TerminalError> {
         let snapshot_started = Instant::now();
-        let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
-        let drain_started = Instant::now();
-        Self::drain_pty(&mut session)?;
-        let pty_drain_micros = drain_started.elapsed().as_micros() as u64;
+        let runtime = self.session(&request.session_id)?;
+        let session = Self::lock_session(&runtime)?;
+        let pty_drain_micros = 0;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
             let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
-            let resources = session.render_resources.snapshot_stats();
+            let resources = runtime.explicit_render_resource_stats();
             tracing::debug!(
                 terminal_event = "snapshot_empty",
                 session_id = %request.session_id,
@@ -1171,14 +1555,16 @@ impl Terminal for VoxTerminalService {
         let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
         let terminal_snapshot_micros = terminal_snapshot_started.elapsed().as_micros() as u64;
-        let panel_width = session.surface.panel_width;
-        let panel_height = session.surface.panel_height;
-        let encoded = session
-            .render_resources
-            .encode_png(&terminal_snapshot, panel_width, panel_height)
-            .map_err(|error| {
-                Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
-            })?;
+        let surface = session.surface.clone();
+        let panel_width = surface.panel_width;
+        let panel_height = surface.panel_height;
+        drop(session);
+        let mut render_resources = runtime.take_explicit_render_resources();
+        let encoded = render_resources.encode_png(&terminal_snapshot, panel_width, panel_height);
+        runtime.return_explicit_render_resources(render_resources);
+        let encoded = encoded.map_err(|error| {
+            Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
+        })?;
         let EncodedPng {
             width,
             height,
@@ -1247,8 +1633,8 @@ impl Terminal for VoxTerminalService {
             correlation_id: request.correlation_id.clone(),
             logical_columns: terminal_snapshot.columns,
             logical_rows: terminal_snapshot.rows,
-            panel_width: session.surface.panel_width,
-            panel_height: session.surface.panel_height,
+            panel_width: surface.panel_width,
+            panel_height: surface.panel_height,
             frame_width: width,
             frame_height: height,
             cell_width,
@@ -1290,8 +1676,8 @@ impl Terminal for VoxTerminalService {
             logical_rows: terminal_snapshot.rows,
             width,
             height,
-            panel_width: session.surface.panel_width,
-            panel_height: session.surface.panel_height,
+            panel_width: surface.panel_width,
+            panel_height: surface.panel_height,
             cell_width,
             cell_height,
             font_pixel_size,
@@ -1329,12 +1715,169 @@ impl Terminal for VoxTerminalService {
         })
     }
 
+    async fn subscribe_frames(
+        &self,
+        request: TerminalSubscribeRequest,
+        frames: vox::Tx<TerminalFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError> {
+        if request.max_frame_bytes == 0 {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                "subscription max_frame_bytes must be non-zero",
+                0,
+            ));
+        }
+        let runtime = self.session(&request.session_id)?;
+        if runtime.closed.load(Ordering::Acquire) {
+            return Err(Self::error(
+                TerminalErrorCode::Disconnected,
+                "terminal session is closed",
+                runtime.sequence(),
+            ));
+        }
+        let (subscriber_id, mut signals) = runtime.publication.register(runtime.sequence());
+        let _subscription = SubscriptionGuard {
+            runtime: Arc::downgrade(&runtime),
+            subscriber_id,
+        };
+        if runtime.closed.load(Ordering::Acquire) {
+            return Err(Self::error(
+                TerminalErrorCode::Disconnected,
+                "terminal session closed while the subscription was opening",
+                runtime.sequence(),
+            ));
+        }
+        let mut resources = TerminalRenderResources::default();
+        let mut counters = PublicationCounters::default();
+        let mut first = true;
+        let mut last_terminal_sequence = request.after_terminal_sequence;
+        let mut last_mutations = 0_i64;
+        let mut frame_sequence = 0_i64;
+
+        loop {
+            let signal = if first {
+                *signals.borrow_and_update()
+            } else {
+                if signals.changed().await.is_err() {
+                    break;
+                }
+                *signals.borrow_and_update()
+            };
+            if !first && signal.terminal_sequence <= last_terminal_sequence {
+                continue;
+            }
+
+            let capture = Self::capture_terminal(&runtime)?;
+            let coalesced_this_frame = if first {
+                0
+            } else {
+                capture
+                    .mutations
+                    .max(signal.mutations)
+                    .saturating_sub(last_mutations)
+                    .saturating_sub(1)
+            };
+            counters.pre_render_coalesced = counters
+                .pre_render_coalesced
+                .saturating_add(coalesced_this_frame);
+            counters.renders_started = counters.renders_started.saturating_add(1);
+            let session_id = request.session_id.clone();
+            let correlation_id = request.correlation_id.clone();
+            let request_sequence = request.client_sequence;
+            let max_frame_bytes = request.max_frame_bytes;
+            let render = tokio::task::spawn_blocking(move || {
+                let result = Self::render_captured(
+                    &mut resources,
+                    &session_id,
+                    &capture,
+                    request_sequence,
+                    &correlation_id,
+                    max_frame_bytes,
+                );
+                (resources, capture, result)
+            })
+            .await
+            .map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    format!("terminal render worker failed: {error}"),
+                    runtime.sequence(),
+                )
+            })?;
+            resources = render.0;
+            let capture = render.1;
+            let frame = render.2?;
+            counters.renders_completed = counters.renders_completed.saturating_add(1);
+            let pending_depth = u8::from(signals.has_changed().unwrap_or(false));
+            counters.pending_depth_max = counters.pending_depth_max.max(pending_depth);
+            counters.mutation_to_send_us =
+                i64::try_from(signal.mutation_at.elapsed().as_micros()).unwrap_or(i64::MAX);
+            frame_sequence = frame_sequence.saturating_add(1).max(1);
+            let full_resync = first || signal.full_resync || coalesced_this_frame > 0;
+            let mut event = TerminalFrameEvent {
+                session_id: request.session_id.clone(),
+                connection_epoch: runtime.connection_epoch.to_string(),
+                session_epoch: runtime.session_epoch.to_string(),
+                terminal_sequence: capture.terminal_sequence,
+                frame_sequence,
+                full_resync,
+                max_frame_bytes: request.max_frame_bytes.min(MAX_FRAME_BYTES),
+                backend_id: "rust.cpu.fontdue".to_string(),
+                transport_id: "vox.txrx".to_string(),
+                correlation_id: request.correlation_id.clone(),
+                frame,
+                publication: counters.telemetry(capture.mutations, pending_depth),
+            };
+
+            match frames.try_send(event) {
+                Ok(()) => {
+                    counters.credit_wait_us = 0;
+                }
+                Err(vox::TrySendError::Full(returned)) => {
+                    event = returned;
+                    // Facet's typed Tx deliberately collapses exhausted credit
+                    // and a full bounded runtime conduit into `Full`; either
+                    // outcome requires this publication to await Vox
+                    // backpressure rather than growing another frame queue.
+                    counters.credit_blocked_sends = counters.credit_blocked_sends.saturating_add(1);
+                    event.publication.credit_blocked_sends = counters.credit_blocked_sends;
+                    let credit_wait_started = Instant::now();
+                    if frames.send(event).await.is_err() {
+                        break;
+                    }
+                    counters.credit_wait_us =
+                        i64::try_from(credit_wait_started.elapsed().as_micros())
+                            .unwrap_or(i64::MAX);
+                }
+                Err(vox::TrySendError::Closed(_)) => break,
+            }
+            counters.frames_pushed = counters.frames_pushed.saturating_add(1);
+            last_terminal_sequence = capture.terminal_sequence;
+            last_mutations = capture.mutations;
+            first = false;
+            if runtime.closed.load(Ordering::Acquire) {
+                break;
+            }
+        }
+
+        let _ = frames.close(vox::Metadata::default()).await;
+        Ok(TerminalOperationResult {
+            session_id: request.session_id,
+            state: if runtime.closed.load(Ordering::Acquire) {
+                TerminalState::Closed
+            } else {
+                TerminalState::Ready
+            },
+            server_sequence: runtime.sequence(),
+        })
+    }
+
     async fn get_content(
         &self,
         request: TerminalContentRequest,
     ) -> Result<TerminalContentResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let session = Self::lock_session(&session)?;
         if request.max_chars == 0 {
             return Err(Self::error(
                 TerminalErrorCode::InvalidRequest,
@@ -1342,7 +1885,6 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             ));
         }
-        Self::drain_pty(&mut session)?;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
             return Ok(TerminalContentResult {
@@ -1374,12 +1916,11 @@ impl Terminal for VoxTerminalService {
         request: TerminalCancelRequest,
     ) -> Result<TerminalOperationResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let mut session = Self::lock_session(&session)?;
+        let session = Self::lock_session(&session)?;
         // Cancellation is a terminal input operation, not merely a state
         // acknowledgement. Ctrl+C is deliberately encoded through the same
         // generic key path as a client key event so every terminal control
         // sequence retains one source of truth.
-        Self::drain_pty(&mut session)?;
         let interrupt_down = key_input_bytes(67, GLFW_MOD_CONTROL, true);
         session.pty.write_input(&interrupt_down).map_err(|error| {
             Self::error(
@@ -1397,8 +1938,7 @@ impl Terminal for VoxTerminalService {
                 session.sequence,
             )
         })?;
-        Self::drain_pty(&mut session)?;
-        let sequence = Self::next_sequence(&mut session.sequence);
+        let sequence = session.sequence;
         Ok(TerminalOperationResult {
             session_id: request.session_id,
             state: TerminalState::Ready,
@@ -1417,23 +1957,29 @@ impl Terminal for VoxTerminalService {
                 0,
             )
         })?;
-        let session = sessions.remove(&request.session_id).ok_or_else(|| {
+        let session = sessions.get(&request.session_id).cloned().ok_or_else(|| {
             Self::error(
                 TerminalErrorCode::SessionNotFound,
                 "terminal session not found",
                 0,
             )
         })?;
+        if session.connection_epoch != self.connection_epoch {
+            return Err(Self::error(
+                TerminalErrorCode::SessionNotFound,
+                "terminal session not found for this connection",
+                0,
+            ));
+        }
+        sessions.remove(&request.session_id);
         drop(sessions);
-        let mut session = Self::lock_session(&session)?;
-        session.pty.kill().map_err(|error| {
-            Self::error(
-                TerminalErrorCode::Internal,
-                error.to_string(),
-                session.sequence,
-            )
-        })?;
-        let sequence = Self::next_sequence(&mut session.sequence);
+        let sequence = {
+            let mut state = Self::lock_session(&session)?;
+            state.closed = true;
+            Self::next_sequence(&mut state.sequence)
+        };
+        session.terminal_sequence.store(sequence, Ordering::Release);
+        session.shutdown();
         Ok(TerminalOperationResult {
             session_id: request.session_id,
             state: TerminalState::Closed,
@@ -1460,10 +2006,11 @@ pub async fn serve(listen: &str) -> Result<()> {
             .context("failed to accept Vox terminal connection")?;
         eprintln!("VOX_TERMINAL_CONNECTION_ACCEPTED peer={peer}");
         stream.set_nodelay(true).ok();
-        let service = service.clone();
+        let service = service.for_connection();
         tokio::spawn(async move {
+            let dispatcher_service = service.clone();
             let result = vox::acceptor_on(vox::transport::tcp::StreamLink::tcp(stream))
-                .on_lane(TerminalDispatcher::new(service))
+                .on_lane(TerminalDispatcher::new(dispatcher_service))
                 .establish_connection()
                 .await;
             match result {
@@ -1472,10 +2019,12 @@ pub async fn serve(listen: &str) -> Result<()> {
                     connection.closed().await;
                     eprintln!("VOX_TERMINAL_CONNECTION_CLOSED peer={peer}");
                     connection.shutdown().ok();
+                    service.close_connection_sessions();
                 }
                 Err(error) => {
                     eprintln!("VOX_TERMINAL_CONNECTION_FAILED peer={peer} error={error:?}");
                     tracing::warn!(?peer, ?error, "Vox terminal connection failed");
+                    service.close_connection_sessions();
                 }
             }
         });
@@ -1487,6 +2036,13 @@ mod tests {
     use super::*;
     use spec_proto::terminal::TerminalClient;
     use teamy_terminal_core::Color;
+
+    fn own_frame(event: vox::SelfRef<TerminalFrameEvent>) -> TerminalFrameEvent {
+        let json = event.map(|event| {
+            facet_json::to_string(&event).expect("pushed frame should serialize in its own test")
+        });
+        facet_json::from_str(json.get()).expect("pushed frame test JSON should decode")
+    }
 
     fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
         TerminalConnectRequest {
@@ -1534,6 +2090,121 @@ mod tests {
             normalize_listen_address("localhost:63946").unwrap(),
             "localhost:63946"
         );
+    }
+
+    #[tokio::test]
+    async fn publication_hub_is_idle_when_unchanged_and_keeps_only_the_newest_mutation() {
+        let hub = PublicationHub::new();
+        let (_subscriber_id, mut signals) = hub.register(1);
+        assert_eq!(signals.borrow_and_update().terminal_sequence, 1);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), signals.changed())
+                .await
+                .is_err(),
+            "an idle publication must block instead of producing synthetic timer work"
+        );
+
+        for sequence in 2..=100 {
+            hub.publish(sequence, sequence == 100);
+        }
+        signals
+            .changed()
+            .await
+            .expect("the newest mutation should wake the subscriber");
+        let newest = *signals.borrow_and_update();
+        assert_eq!(newest.terminal_sequence, 100);
+        assert_eq!(newest.mutations, 99);
+        assert!(newest.full_resync);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), signals.changed())
+                .await
+                .is_err(),
+            "replaced mutations must not survive as an unbounded queue"
+        );
+    }
+
+    #[tokio::test]
+    async fn publication_hubs_keep_two_sessions_isolated() {
+        let first = PublicationHub::new();
+        let second = PublicationHub::new();
+        let (_, mut first_signals) = first.register(1);
+        let (_, mut second_signals) = second.register(10);
+        first_signals.borrow_and_update();
+        second_signals.borrow_and_update();
+
+        first.publish(2, false);
+        first_signals
+            .changed()
+            .await
+            .expect("the first session should receive its own mutation");
+        assert_eq!(first_signals.borrow_and_update().terminal_sequence, 2);
+        assert!(
+            tokio::time::timeout(Duration::from_millis(25), second_signals.changed())
+                .await
+                .is_err(),
+            "a first-session mutation must not wake the second session"
+        );
+    }
+
+    #[test]
+    fn service_epochs_are_process_scoped_and_connection_unique() {
+        let first = VoxTerminalService::new();
+        let second = VoxTerminalService::new();
+        assert_eq!(first.process_epoch, second.process_epoch);
+        assert_ne!(first.connection_epoch, second.connection_epoch);
+        assert!(
+            first
+                .connection_epoch
+                .starts_with(first.process_epoch.as_ref())
+        );
+        assert!(
+            second
+                .connection_epoch
+                .starts_with(second.process_epoch.as_ref())
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_scoped_services_cannot_access_or_disconnect_each_others_sessions() {
+        let root = VoxTerminalService::new();
+        let owner = root.for_connection();
+        let other = root.for_connection();
+        let connected = owner
+            .connect(test_connect_request("connection-owner", 1))
+            .await
+            .expect("the owning connection should create a terminal session");
+
+        let lookup_error = other
+            .capabilities(TerminalCapabilitiesRequest {
+                session_id: connected.session_id.clone(),
+                client_sequence: 2,
+            })
+            .await
+            .expect_err("another connection must not access the session");
+        assert_eq!(lookup_error.code, TerminalErrorCode::SessionNotFound);
+
+        let disconnect_error = other
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id.clone(),
+                reason: "wrong connection".to_string(),
+                client_sequence: 2,
+            })
+            .await
+            .expect_err("another connection must not remove the session");
+        assert_eq!(disconnect_error.code, TerminalErrorCode::SessionNotFound);
+        assert!(
+            owner.session(&connected.session_id).is_ok(),
+            "a rejected foreign disconnect must leave the owner's session intact"
+        );
+
+        owner
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "owner cleanup".to_string(),
+                client_sequence: 3,
+            })
+            .await
+            .expect("the owning connection should disconnect its session");
     }
 
     #[test]
@@ -1629,7 +2300,12 @@ mod tests {
         let first_state = service
             .session(&first.session_id)
             .expect("first session should remain registered");
-        let first_guard = first_state.lock().expect("first session lock");
+        let second_state = service
+            .session(&second.session_id)
+            .expect("second session should remain registered");
+        assert_ne!(first_state.session_epoch, second_state.session_epoch);
+        assert_eq!(first_state.connection_epoch, second_state.connection_epoch);
+        let first_guard = first_state.state.lock().expect("first session lock");
         let second_capabilities = tokio::time::timeout(
             Duration::from_millis(250),
             service.capabilities(TerminalCapabilitiesRequest {
@@ -1715,6 +2391,84 @@ mod tests {
             })
             .await
             .expect("terminal session should connect");
+        let (frame_tx, mut frame_rx) = vox::channel::<TerminalFrameEvent>();
+        let subscription_client = client.clone();
+        let subscription_session = connected.session_id.clone();
+        let subscription = tokio::spawn(async move {
+            subscription_client
+                .subscribe_frames(
+                    TerminalSubscribeRequest {
+                        session_id: subscription_session,
+                        after_terminal_sequence: 0,
+                        max_frame_bytes: MAX_FRAME_BYTES,
+                        client_sequence: 2,
+                        correlation_id: "push-01".to_string(),
+                    },
+                    frame_tx,
+                )
+                .await
+        });
+        let initial = tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
+            .await
+            .expect("initial pushed frame should arrive without polling")
+            .expect("initial pushed frame receive should succeed")
+            .expect("initial pushed frame should be present");
+        let initial = own_frame(initial);
+        assert!(initial.full_resync);
+        assert!(initial.frame.complete);
+        assert_eq!(initial.frame.kind, TerminalFrameKind::Full);
+        assert!(initial.frame.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let initial_terminal_sequence = initial.terminal_sequence;
+        let initial_frame_sequence = initial.frame_sequence;
+
+        let (cancelled_tx, cancelled_rx) = vox::channel::<TerminalFrameEvent>();
+        let cancelled_client = client.clone();
+        let cancelled_session = connected.session_id.clone();
+        let cancelled_subscription = tokio::spawn(async move {
+            cancelled_client
+                .subscribe_frames(
+                    TerminalSubscribeRequest {
+                        session_id: cancelled_session,
+                        after_terminal_sequence: initial_terminal_sequence,
+                        max_frame_bytes: MAX_FRAME_BYTES,
+                        client_sequence: 3,
+                        correlation_id: "cancelled-push-01".to_string(),
+                    },
+                    cancelled_tx,
+                )
+                .await
+        });
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should remain registered");
+        for _ in 0..100 {
+            if runtime.publication.subscriber_count() == 2 {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert_eq!(runtime.publication.subscriber_count(), 2);
+        drop(cancelled_rx);
+        runtime
+            .actor_sender
+            .send(SessionActorMessage::Pty(PtyEvent::Output(b"\r\n".to_vec())))
+            .expect("a mutation should probe the dropped request-scoped channel");
+        for _ in 0..200 {
+            if runtime.publication.subscriber_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            runtime.publication.subscriber_count(),
+            1,
+            "dropping the channel receiver must unregister its request-scoped publisher"
+        );
+        tokio::time::timeout(Duration::from_secs(5), cancelled_subscription)
+            .await
+            .expect("dropped receiver should finish the subscription request")
+            .expect("dropped receiver subscription task should not panic")
+            .expect("dropped receiver subscription should complete cleanly");
         client
             .send_text(TerminalTextInput {
                 session_id: connected.session_id.clone(),
@@ -1726,36 +2480,50 @@ mod tests {
             .await
             .expect("PowerShell puppet input should be accepted");
 
-        let mut snapshot = None;
-        for client_sequence in 3..=600 {
-            let candidate = client
-                .snapshot(TerminalSnapshotRequest {
-                    session_id: connected.session_id.clone(),
-                    after_sequence: 0,
-                    max_frame_bytes: MAX_FRAME_BYTES,
-                    client_sequence,
-                    correlation_id: format!("snapshot-{client_sequence}"),
-                })
+        let mut pushed = None;
+        for _ in 0..600 {
+            let candidate = tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
                 .await
-                .expect("terminal PNG snapshot should be returned");
+                .expect("PTY mutation should push a frame without another RPC")
+                .expect("pushed frame receive should succeed")
+                .expect("pushed frame should be present");
+            let candidate = own_frame(candidate);
             let output_ready = service
                 .session(&connected.session_id)
                 .ok()
                 .and_then(|session| {
-                    session
-                        .lock()
-                        .ok()
-                        .map(|session| session.terminal.snapshot().visible_text().contains("100"))
+                    session.state.lock().ok().map(|session| {
+                        let text = session.terminal.snapshot().visible_text();
+                        text.lines().any(|line| line.trim() == "100")
+                            && text.contains("hello, world!")
+                    })
                 })
                 .unwrap_or(false);
-            if output_ready && !candidate.payload.is_empty() {
-                snapshot = Some(candidate);
+            if output_ready && !candidate.frame.payload.is_empty() {
+                pushed = Some(candidate);
                 break;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
         }
-        let snapshot =
-            snapshot.expect("PowerShell output should arrive in a bounded polling window");
+        let pushed = pushed.expect("PowerShell output should arrive through pushed frames");
+        assert!(pushed.terminal_sequence > initial_terminal_sequence);
+        assert!(pushed.frame_sequence > initial_frame_sequence);
+        assert_eq!(pushed.connection_epoch, service.connection_epoch.as_ref());
+        assert!(
+            pushed
+                .session_epoch
+                .starts_with(service.process_epoch.as_ref())
+        );
+        assert!(pushed.publication.pre_render_coalesced > 0);
+        assert!(pushed.publication.mutations > 0);
+        assert!(pushed.publication.renders_started >= pushed.publication.renders_completed);
+        assert!(pushed.publication.renders_completed >= pushed.publication.frames_pushed);
+        assert!(pushed.publication.pending_depth <= 1);
+        assert!(pushed.publication.pending_depth_max <= 1);
+        assert_eq!(
+            pushed.frame.timing.font_load_us, 0,
+            "the request-scoped publisher should retain its warmed font renderer"
+        );
+        let snapshot = pushed.frame;
         assert_eq!(snapshot.encoding, TerminalFrameEncoding::Png);
         assert_eq!(snapshot.kind, TerminalFrameKind::Full);
         assert!(snapshot.payload.starts_with(b"\x89PNG\r\n\x1a\n"));
@@ -1768,7 +2536,7 @@ mod tests {
             .get(&connected.session_id)
             .cloned()
             .expect("session should remain available");
-        let session = session.lock().expect("terminal session lock");
+        let session = session.state.lock().expect("terminal session lock");
         let terminal_snapshot = session.terminal.snapshot();
         let visible_text = terminal_snapshot.visible_text();
         assert!(
@@ -1815,12 +2583,22 @@ mod tests {
             content.text
         );
 
+        let explicit_snapshot = client
+            .snapshot(TerminalSnapshotRequest {
+                session_id: connected.session_id.clone(),
+                after_sequence: 0,
+                max_frame_bytes: MAX_FRAME_BYTES,
+                client_sequence: 5,
+                correlation_id: "explicit-capture-01".to_string(),
+            })
+            .await
+            .expect("explicit capture should remain available for diagnostics/resync");
         let timing = service
             .latest_snapshot_timing()
             .expect("Rust snapshot timing witness should be recorded");
         assert_eq!(
             timing.correlation_id.as_str(),
-            snapshot.correlation_id.as_str()
+            explicit_snapshot.correlation_id.as_str()
         );
         assert!(timing.frame_width > 0);
         assert!(timing.frame_height > 0);
@@ -1832,10 +2610,16 @@ mod tests {
             .disconnect(TerminalDisconnectRequest {
                 session_id: connected.session_id,
                 reason: "test complete".to_string(),
-                client_sequence: 5,
+                client_sequence: 6,
             })
             .await
             .expect("terminal session should disconnect");
+        let subscription_result = tokio::time::timeout(Duration::from_secs(5), subscription)
+            .await
+            .expect("session close should terminate the request-scoped subscription")
+            .expect("subscription task should not panic")
+            .expect("subscription RPC should complete cleanly");
+        assert_eq!(subscription_result.state, TerminalState::Closed);
         connection.shutdown().ok();
         server_guard.shutdown().ok();
     }
