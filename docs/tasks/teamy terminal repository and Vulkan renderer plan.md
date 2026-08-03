@@ -1127,7 +1127,7 @@ next implementation slice should evaluate the swapchain/persistent-target
 design before attempting further partial-upload changes, while retaining the
 current CPU dirty-rendering result as the default interactive optimization.
 
-### [ ] 3.5.6 Couple external frame size to logical cells and font metrics
+### [~] 3.5.6 Couple external frame size to logical cells and font metrics
 
 **Work:** Extend the portable frame/bridge contract so an SFM panel provides
 logical dimensions and terminal cell metrics, and the Rust renderer selects a
@@ -1148,6 +1148,15 @@ prove that font size, not post-render bitmap stretching, is responding to the
 available panel size; the logical-size contract is documented and covered by
 focused tests; and no GPU/slug implementation is required to pass this gate.
 
+**Progress notes — 2026-08-02:** The initial contract slice is implemented in
+Facet/Vox commit `bb0807657`: a panel carries logical columns/rows and physical
+panel dimensions, Rust derives native frame/cell/font metrics from that target,
+and the Java PNG presenter refuses to enlarge a smaller frame. The canonical
+SFM compile and 17 focused terminal Java tests pass against the refreshed
+artifact. The remaining part of this item is live visual validation at normal
+scale and GUI scale 7, including the stretched-frame negative control; no
+GPU/slug work is required for that validation.
+
 ## Phase 3.6 — Cross-renderer evidence laboratory and GPU text path [ ]
 
 This phase turns terminal performance into a reproducible comparison rather
@@ -1167,7 +1176,7 @@ readback, PNG encoding, transfer, Java decoding, or texture upload, while a
 Java semantic-cell renderer may save bandwidth but spend more time in
 Minecraft font/layout calls. Measure the complete path and every major stage.
 
-### [ ] 3.6.1 Capture the perceived multi-second bridge delay
+### [~] 3.6.1 Capture the perceived multi-second bridge delay
 
 **Work:** Add a cross-process correlation id and terminal/frame sequence to the
 current Rust CPU full-PNG path. Record the local monotonic timestamps or
@@ -1202,7 +1211,28 @@ so.
 durations that account for the visible delay. No backend is promoted and no
 GPU performance claim is accepted before this witness exists.
 
-### [ ] 3.6.2 Freeze renderer-neutral snapshot, request, and result contracts
+**Progress notes — 2026-08-02:** Teamy Terminal commit `8c45304` now emits a
+bounded machine-readable `SFM_TERMINAL_TIMING_WITNESS` from the real PowerShell
+Vox puppet. The reproducible command
+`cargo test -p teamy-terminal-cli --lib vox_server --offline -j 1 -- --nocapture`
+produced request sequence 5 / server sequence 142 at a 1200×760 panel with
+120×40 logical cells: `total_us=2853889`, `font_load_us=2278390`,
+`raster_us=136599`, `png_encode_us=393669`, `pty_drain_us=512`,
+`terminal_snapshot_us=5`, and `payload_bytes=27706`. This computationally
+reproduces the perceived multi-second range and identifies cold font loading as
+the dominant measured Rust stage in this sample; it is evidence, not yet an
+optimization decision.
+
+The SFM side now propagates the same request/correlation vocabulary through
+polling, native frame metadata, PNG decode, dynamic-texture allocation and
+registration, upload, presentation, stale/drop/coalesce counters, and bounded
+Java timing logs. The canonical SFM compile and focused terminal test run pass
+with Vox hash `blake3:400629d4488f9544ff098e47c9478ba799f4171e`. The Java live
+panel capture that joins the Rust stage log to decode/upload/present numbers is
+still outstanding, so this item remains partial; clocks are never subtracted
+across processes.
+
+### [~] 3.6.2 Freeze renderer-neutral snapshot, request, and result contracts
 
 **Work:** Keep PTY ownership, VT parsing, scrollback, cursor, selection, color,
 style, wide-cell occupancy, and damage calculation in the renderer-free core.
@@ -1230,6 +1260,15 @@ Minecraft, or Vox dependencies.
 **Completion criteria:** Rust CPU, Rust GPU/slug, and imported Java comparison
 results can share one fixture identity and one semantic correctness oracle
 without sharing application-specific renderer objects.
+
+**Progress notes — 2026-08-02:** The initial reviewed contract is implemented
+and generated in Facet/Vox commit `bb0807657`. It adds bounded
+`TerminalSurfaceMetrics`, explicit backend/transport identifiers, request and
+frame correlation IDs, native frame dimensions/cell/font metrics, and Java
+compatibility constructors for newly defaulted fields. Facet protocol tests,
+Java conformance/smoke/package tests, and the SFM compile pass. The broader
+multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
+remain intentionally open; this initial slice does not claim those renderers.
 
 ### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
 
