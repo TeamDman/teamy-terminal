@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-08-02
+**Last updated:** 2026-08-03
 
 ## How to update this plan
 
@@ -21,13 +21,29 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Use the completed current-path witness and native-size contract
-as the baseline for Phase 3.6's renderer comparison work in parallel with the
-remaining Phase 4 integration. Do not assume that CPU `fontdue`
-rasterization is the dominant bridged cost merely because it is a plausible
-hypothesis: the Rust glyph pass, PNG/readback/encoding, Vox transfer, Java PNG
-decode, Minecraft texture allocation/upload, render-thread scheduling, and
-final presentation must be independently observable. The code-level input mapping,
+**Next slice:** Fix the two concrete baseline defects exposed by the completed
+current-path witness before beginning the renderer race. First complete
+3.6.2a: retain loaded font faces, size-specific rasterizers, glyph caches,
+frame storage, and encoding buffers instead of reconstructing them for every
+changed snapshot or throwing them away on reversible resizes. In parallel,
+complete the Facet prerequisite in 3.6.2b and then replace SFM's 50 ms unary
+snapshot poller with a bounded Vox `Tx`/`Rx` frame subscription. Rust must
+observe PTY/VT sequence changes continuously and begin publishing the newest
+state immediately; there is no frame debounce interval. Backpressure is
+latest-state bounded: at most one frame is rendering/sending and one newer
+sequence is pending, so output floods cannot queue obsolete full PNGs. The
+one-shot `snapshot` operation remains for explicit capture, bootstrap, and
+resynchronization, not periodic live delivery. Re-run the correlated witness
+after each repair before starting GPU/slug or Java renderer implementation.
+The resource-retention work and Facet Java-channel runtime/codegen work are
+parallelizable; the Rust producer and SFM consumer integration depend on the
+reviewed generated channel contract.
+
+Do not assume that CPU `fontdue` rasterization is the dominant bridged cost
+merely because it is a plausible hypothesis: the Rust glyph pass,
+PNG/readback/encoding, Vox transfer, Java PNG decode, Minecraft texture
+allocation/upload, render-thread scheduling, and final presentation must be
+independently observable. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
 contract, portable frame encoding, visible-grid selection, and mouse selection
 are complete. The elevated live control-plane gate now
@@ -46,8 +62,10 @@ window without initially presenting it or adding a taskbar tab.
 The first Phase 4 bridge slice is now defined as Rust-authoritative terminal
 state plus bounded full-PNG snapshots: Rust owns the PTY, VT parsing, colors,
 scrollback, and rasterization; Java sends input/resize and displays the PNG.
-Dirty-cell/tile, unchanged-glyph, and GPU-sharing optimizations are deferred
-until the end-to-end correctness proof is captured.
+Dirty-cell/tile and GPU-sharing optimizations remain later comparison work,
+but retaining reusable CPU/Java resources and replacing polling with bounded
+push delivery are immediate repairs justified by the completed end-to-end
+witness.
 SFM manual testing now adds a presentation constraint: at high Minecraft GUI
 scale, the Java panel must not stretch a smaller Rust PNG. The bridge contract
 must carry logical panel dimensions and cell metrics so Rust increases font
@@ -58,11 +76,14 @@ The interactive follow-up now uses the existing Vox `send_key` and `send_mouse`
 operations rather than buffering a Java command line: printable code points are
 sent as exact text, control/navigation keys are sent as key transitions, and
 mouse reports are encoded by Rust only when the terminal requests mouse mode.
-SFM independently polls `snapshot(after_sequence)` every 50 ms, so Rust output
-can advance the displayed frame during a long-running command without another
-Java input event. Triple Esc closes the hosted panel and triple Tab returns the
-event to Minecraft's normal focus traversal; both sequences use a 1.5-second
-window and single/double presses remain terminal input.
+The measured baseline has SFM poll `snapshot(after_sequence)` every 50 ms. That
+proved Rust output can advance during a long-running command without another
+Java input event, but it is not the target architecture: 3.6.2b replaces the
+poller with a request-scoped Vox channel that pushes sequence-bearing frames
+from Rust as soon as terminal state changes. Triple Esc closes the hosted panel
+and triple Tab returns the event to Minecraft's normal focus traversal; both
+sequences use a 1.5-second window and single/double presses remain terminal
+input.
 **Automation rendering decision:** `--hidden` is the supported near-term
 background mode. It still creates a native winit window, Vulkan surface, and
 swapchain so the production renderer path remains identical, but the window is
@@ -1275,6 +1296,127 @@ compile, and the live CPU/full-PNG bridge proof pass. The broader
 multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
 remain intentionally open; this initial slice does not claim those renderers.
 
+### [ ] 3.6.2a Retain reusable font, glyph, frame, and encoding resources
+
+**Work:** Remove per-snapshot resource reconstruction from the CPU/full-PNG
+reference before comparing it with other renderers. Split immutable font-face
+discovery and byte loading from size-specific raster state. Scan the system
+font database and resolve the primary/fallback face set once per process (or
+once per immutable font identity), then retain a bounded renderer cache keyed
+by the exact font identity/hash, fallback set, backend, and effective pixel
+size. A repeated frame at the same size must reuse the same `TerminalFont`,
+`ScaleContext`, and per-glyph bitmaps. A resize from A to B and back to A must
+reuse A while it remains inside the documented bounded cache; resize may
+invalidate layout/frame contents without discarding reusable font faces or
+glyphs.
+
+Retain and resize CPU frame storage and PNG output scratch capacity rather
+than allocating fresh backing vectors for every frame. Keep renderer state on
+the terminal session (or in an explicitly bounded shared renderer pool), and
+do not hold the global session-map lock while rasterizing or encoding. Record
+constructor/cache-hit/cache-miss/eviction counters and separate one-time font
+discovery, size-renderer creation, new-glyph rasterization, cell composition,
+and PNG encoding durations. On the SFM side, retain one registered
+`DynamicTexture` and its reusable upload storage while dimensions are
+compatible; replace and close it only when dimensions/capabilities require a
+new allocation. If PNG decoding necessarily creates a temporary
+`NativeImage`, measure and dispose that temporary explicitly rather than
+mistaking texture reuse for decode-buffer reuse.
+
+**Discovery notes — 2026-08-03:** The measured delay is an object-lifetime
+bug, not a one-second frame timer. `VoxTerminalService::encode_png` currently
+constructs `TerminalFont::new(DEFAULT_PIXEL_SIZE)` for every non-empty
+snapshot and can construct a second font for a scaled panel. Each constructor
+rescans system fonts, starts with an empty glyph `HashMap`, and both objects
+are discarded after the PNG is returned. This accounts for roughly
+`0.7–1.0 s` of every warm live frame in the existing witness. The frame and
+PNG vectors are likewise newly allocated on that path. Java also decodes,
+allocates, and registers a new dynamic texture on sequence changes even when
+the dimensions are unchanged; its measured cost is smaller but its lifetime
+is still needlessly tied to a frame.
+
+**Validation:** Add focused constructor/cache tests and counters proving that
+two same-size renders perform one font-face discovery and one size-renderer
+construction, that repeated characters hit retained glyphs, and that A→B→A
+resize reuses A without stale pixels or metrics. Exercise multiple sessions
+and enough sizes to prove the cache bound and deterministic eviction. Re-run
+the Rust timing witness and the real SFM puppet with cold and warm manifests;
+after the first construction, unchanged-size frames must report no font-face
+discovery or renderer reconstruction, while visual/content fixtures remain
+equivalent. Java telemetry must show texture registration/allocation does not
+grow once per frame at stable dimensions and that every replaced resource is
+closed exactly once.
+
+**Completion criteria:** Repeated changed frames at a stable size retain the
+font/glyph renderer and compatible frame/texture storage; reversible resizes
+reuse bounded cached state; the warm correlated witness no longer attributes
+hundreds of milliseconds to font loading; and no cache is unbounded, stale,
+or silently shared across incompatible font/size/backend identities.
+
+### [ ] 3.6.2b Replace live snapshot polling with bounded Vox Tx/Rx push
+
+**Work:** Extend the generated Facet/Vox terminal service with a typed
+request-scoped frame subscription, expected to have the directional shape
+`subscribe_frames(request, frames: Tx<TerminalFrameEvent>)`: the Java caller
+creates the channel pair, passes `Tx` to the server call, and consumes the
+paired `Rx`; the Rust handler owns the bound `Tx` and sends toward Java. The
+event carries session/connection epoch, monotonically increasing terminal and
+frame sequences, correlation id, full-versus-damage metadata, negotiated
+bounds/backend/transport, frame payload, and local stage timings. The initial
+event after subscribe/re-subscribe is a complete latest-state frame. Raw Vox
+channels are request-scoped rather than durable: disconnect closes the call,
+reconnect opens a fresh subscription, and Rust sends a full resynchronization
+frame instead of claiming transparent stream resume.
+
+Facet's current Java runtime explicitly rejects non-empty request-channel
+metadata as outside its unary slice. Implement and test credit-controlled Java
+`Tx`/`Rx` runtime support plus generated terminal client bindings first, then
+package and pin that reviewed Facet revision before changing SFM. Preserve the
+unary `snapshot(after_sequence)` method for explicit screenshots, diagnostics,
+bootstrap compatibility, and recovery checks, but remove it from the normal
+live-frame loop; final SFM production code must have no
+`FRAME_POLL_MILLIS`-style frame scheduler.
+
+Refactor each Rust terminal session so PTY events are drained continuously by
+the session owner rather than opportunistically only when unary calls arrive.
+Every VT mutation advances the authoritative sequence and immediately marks
+the newest state ready for publication. Do not add a debounce/minimum frame
+interval. Bound work with one render/send in flight and one newest pending
+sequence: if output changes while a frame is rendering or blocked on Vox
+credit, supersede intermediate pending states and render the latest state as
+soon as the in-flight operation completes. Never queue one full PNG per PTY
+chunk. Resize/input/cancellation/alternate-screen transitions use the same
+sequence and publication path. Separate the global session registry from
+per-session mutation/render synchronization so one slow client/session cannot
+block unrelated sessions.
+
+On Java, consume the `Rx` on a dedicated connection/receiver executor, reject
+wrong-epoch and non-monotonic frames, retain only the newest acceptable frame
+awaiting render-thread presentation, and schedule Minecraft work without
+blocking the Vox driver. Channel closure or connection replacement clears the
+old epoch and follows the existing disconnected/retry UI. Keep bounded
+counters for mutations, renders started/completed, pre-render coalescing,
+credit-blocked sends, pushed/received/superseded/presented frames, queue depth,
+and output-change-to-first-present latency so the push conversion remains
+comparable to the completed polling witness.
+
+**Validation:** Add Facet Rust/Java generated round trips that exceed the
+default channel credit, propagate close/drop/error correctly, and prove the
+terminal event schema. Add a real endpoint test in which PowerShell emits
+output after subscription without any further Java request: Java must receive
+intermediate and final sequences, while instrumentation proves zero periodic
+snapshot calls and no idle busy loop. Cover slow receiver/backpressure,
+`1..10000`, Ctrl+C, resize, alternate screen, channel cancellation,
+disconnect/reconnect with full resync, stale old-epoch delivery, and two
+independent sessions. Compare p50/p95/max change-to-present latency and CPU
+use against the 50 ms polling baseline after 3.6.2a is enabled.
+
+**Completion criteria:** Live frames are delivered solely by the Vox channel,
+begin publication immediately on Rust sequence mutation, remain bounded under
+an output flood or stalled Java receiver, recover through an explicit fresh
+subscription, and require no timer-driven Java frame polling. One-shot
+snapshot remains functional but is absent from steady-state live telemetry.
+
 ### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
 
 **Work:** Retain full-frame and dirty-cell `fontdue` rendering as explicit
@@ -1404,15 +1546,20 @@ canonical plan or generated Vox output concurrently.
 | Track | May start after | Primary ownership | Parallel deliverable |
 | --- | --- | --- | --- |
 | P0 — correlation and benchmark contract | immediately | shared manifest, ids, stage vocabulary, lag reproducer | 3.6.1 plus the first reviewed 3.6.2 contract |
-| P1 — Rust CPU/transport baselines | P0 contract draft | teamy-terminal font/frame/CPU paths | 3.6.3 full/dirty PNG/raw evidence |
+| P1a — retained CPU resources | completed 3.6.1 witness | teamy-terminal font/frame/CPU session state | 3.6.2a retained face/size/glyph/frame/encode caches and warm witness |
+| P1b — Rust push producer | reviewed P5 channel contract; may prototype behind Rust-only tests earlier | teamy-terminal PTY/session/publication path | 3.6.2b immediate latest-state producer with bounded coalescing/backpressure |
+| P1c — Rust CPU/transport baselines | P1a/P1b integrated | teamy-terminal font/frame/CPU paths | 3.6.3 full/dirty PNG/raw evidence |
 | P2 — Rust GPU/slug | P0 render-request draft | isolated Teamy Studio audit and teamy-terminal Vulkan/slug backend | 3.6.4 GPU fixtures and timings |
 | P3 — Java vanilla renderer | P0 semantic snapshot draft | canonical-oldest SFM Java panel backend | vanilla-font artifacts and Java timings |
 | P4 — Java Caskaydia renderer | font identity and licensing frozen | SFM resources/font adapter, separate from P3 where practical | same-font Java artifacts and metrics |
-| P5 — Vox cell/damage transport | P0 semantic snapshot draft | isolated Facet/Vox contract worktree plus generated Java/Rust fixtures | bounded semantic-cell capability and round trips |
+| P5 — Vox channel and cell/damage transport | immediately for Java `Tx`/`Rx`; P0 semantic draft for cells/damage | isolated Facet/Vox runtime/codegen/contract worktree plus generated Java/Rust fixtures | credit-controlled Java channels, terminal frame subscription, then bounded semantic-cell capability |
+| P5b — SFM push consumer and retained texture | reviewed/generated P5 frame subscription; texture work may start against a fake receiver | canonical-oldest SFM terminal service/presenter | no frame poller, latest-only Rx consumption, stable-dimension texture reuse, reconnect/full-resync proof |
 | P6 — report and visual-diff tooling | fixture ids and manifest schema frozen | renderer-independent artifact/report tooling | HTML/JSON matrix, diffs, and comparison summaries |
 
-P1–P6 may proceed concurrently. Integration waits for a reviewed contract
-revision and imports immutable commits/artifacts from each track. P3/P4 must
+P1a, the Facet Java-channel portion of P5, and P6 may start concurrently.
+P1b and P5b integrate only after the reviewed generated subscription contract;
+P2–P4 may continue in isolated work after their shared request/snapshot seams
+are frozen. Integration imports immutable commits/artifacts from each track. P3/P4 must
 follow SFM's oldest-branch-first rule and must not propagate until the selected
 canonical implementation is accepted. P5 must not modify Cloud Terrastodon.
 The final matrix and default decision in 3.6.6 are integration work and remain
@@ -1512,9 +1659,10 @@ captures. Record the endpoint address and exact capture names.
 
 **Completion criteria:** The Java-local mode remains useful with no Rust
 process; the optional mode proves input round-trip, resize, disconnect/stale-
-frame handling, and fallback without native GPU-handle interop. Only after
-this evidence is complete may dirty-cell/tile or unchanged-glyph optimization
-be promoted into the bridge.
+frame handling, and fallback without native GPU-handle interop. The completed
+polling witness remains the baseline, but the accepted bridge uses the 3.6.2b
+Vox channel subscription for live frames and the 3.6.2a retained-resource
+rules; unary snapshots are explicit capture/resync operations only.
 
 **Current evidence (2026-07-27):** Java accepts only bounded full PNG frames,
 uploads them to a dynamic texture, explicitly binds the Minecraft shader
@@ -1529,6 +1677,13 @@ live cyan capture now visibly contains Rust-rendered range and `Write-Host`
 output. The deterministic focus-sequence tests cover triple Esc close and
 triple Tab Java focus escape. A live Minecraft control-key/mouse/long-output
 capture and stale/disconnect proof remain before this item is complete.
+
+**Next integration correction — 2026-08-03:** The 50 ms poller is now a
+historical evidence implementation, not the target. Complete 3.6.2a/3.6.2b,
+import the reviewed Facet Java `Tx`/`Rx` runtime and generated subscription,
+consume pushed frames on a dedicated Java receiver, and retain compatible
+dynamic-texture resources. Remove periodic snapshot calls from the live path
+while keeping the unary method for typed capture and full resynchronization.
 
 ### [~] 4.5 Consolidate the Rust endpoint into the normal CLI and lifecycle
 
@@ -1614,7 +1769,7 @@ overwritten by baseline code.
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
-| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG correctness baseline proven | pinned dependency, frame/bridge puppet proof, then Phase 3.6/V-4 renderer matrix | Input/lifecycle/full-PNG puppets pass; native-size and comparative performance evidence remain open |
+| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG correctness, native-size, and correlated lag baselines proven | retained resources plus Vox push subscription, then Phase 3.6/V-4 renderer matrix | Input/lifecycle/full-PNG/native-size puppets pass; per-frame font reconstruction and 50 ms Java polling are the next repairs before comparative renderer evidence |
 
 ## Overall completion criteria
 
@@ -1624,8 +1779,8 @@ default-profile PowerShell PTY and supports the agreed command/input/resize/
 cancellation/exit behavior. Portable frame encoding, SFM integration, and
 cross-platform renderer support are post-MVP work.
 
-The roadmap as a whole is not complete: the standalone Phase 3.4 boundary is
-complete, while 3.5.6, Phase 3.6, the remaining Phase 4 bridge work, and Phase
+The roadmap as a whole is not complete: the standalone Phase 3.4 and 3.5.6
+boundaries are complete, while Phase 3.6, the remaining Phase 4 bridge work, and Phase
 5 remain open. The current performance work is audited against the
 multi-second SFM lag witness and cross-renderer matrix, not retroactively folded
 into the already-complete standalone MVP. The live keyboard/control boundary
@@ -1638,12 +1793,15 @@ and app-owned selection/copy/zoom/visibility boundary are green.
   open until the broader phase evidence is green.
 - [ ] Font extraction and Vulkan/off-screen output have deterministic fixtures.
 - [ ] Portable frame data is validated without native GPU-handle interop.
-- [ ] The current SFM multi-second delay is reproduced with correlated
+- [x] The current SFM multi-second delay is reproduced with correlated
   Rust/Java stage evidence and no unsynchronized-clock arithmetic.
 - [ ] Rust CPU/fontdue, Rust GPU/slug, Java vanilla-font, and Java Caskaydia
   candidates have matched semantic, visual, and temporal reports.
 - [ ] The selected renderer/transport has no unexplained multi-second outlier
   in the matched workload and the rejected alternatives are documented.
+- [ ] Stable-size frames reuse font/glyph/frame/texture resources, reversible
+  resizes use bounded compatible caches, and live delivery uses bounded Vox
+  `Tx`/`Rx` push with no periodic frame poller.
 - [ ] SFM integration is optional, pinned, and never an absolute path in
   canonical or propagated source.
 - [ ] Java-local SFM functionality remains self-sufficient when Rust is absent.
@@ -1661,7 +1819,9 @@ and app-owned selection/copy/zoom/visibility boundary are green.
 | PTY crate grows renderer or shell-policy coupling | Keep teamy-terminal-pty portable-pty-only and expose terminal-oriented lifecycle types; CLI owns user-facing wiring | Phase 2.2–3.4 |
 | Absolute local path leaks into SFM or later versions | Cargo config override only; inspect diff/lockfile; baseline-first propagation audit | Phase 4.1–4.2 |
 | Font extraction couples the app to Teamy Studio | Renderer-neutral fixture and dependency-tree check before integration | Phase 3.1 |
-| PNG-per-keystroke causes latency or CPU pressure | PNG only for keyframes/artifacts; dirty-tile/raw frame path for live updates | Phase 3.3–4.3 |
+| Push publication queues one full PNG per PTY chunk | No debounce delay, but only one render/send in flight plus one newest pending sequence; use Vox credit and explicit coalescing counters before dirty/raw transports | Phase 3.6.2b–3.6.3 |
+| Retained resources return stale glyphs, metrics, pixels, or leak across resize/backend changes | Complete cache keys include font/fallback/hash/size/backend; bound eviction; A→B→A tests; exact close/replacement counters | Phase 3.6.2a |
+| Facet Rust supports channels while Java silently remains unary-only | Land credit-controlled Java `Tx`/`Rx` runtime/codegen tests and package the reviewed revision before generating/pinning the terminal subscription | Phase 3.6.2b/4.4 |
 | A plausible `fontdue` hypothesis hides Java decode/upload or scheduling cost | Require the correlated current-path lag witness before changing defaults; report every major Rust/Java stage | Phase 3.6.1 |
 | GPU glyph work looks fast internally but readback/encoding erases the gain | Measure GPU execution, readback, encode, transfer, Java upload, and end-to-end presentation separately | Phase 3.6.4–3.6.6 |
 | Cross-font pixel differences create false failures or hide real terminal errors | Pair semantic cell assertions with geometry/color/occupancy and perceptual reports; use exact pixels only where valid | Phase 3.6.5 |
@@ -1671,7 +1831,8 @@ and app-owned selection/copy/zoom/visibility boundary are green.
 The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
 core VT state, bounded replay, embedded font, Vulkan presenter, portable frame
 encoding, interactive wiring, and CPU full-PNG SFM correctness proof are
-implemented. The next required evidence is the correlated current-path SFM lag
-witness, native-size/cell-metric proof, and parallel renderer/transport
-candidate work defined by Phase 3.6; release/propagation decisions follow the
-matched integration matrix.
+implemented. The correlated lag witness and native-size/cell-metric proof are
+complete. The next required work is 3.6.2a resource retention and 3.6.2b Vox
+push delivery, followed by the parallel renderer/transport candidates defined
+by Phase 3.6; release/propagation decisions follow the matched integration
+matrix.
