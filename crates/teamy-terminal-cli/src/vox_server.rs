@@ -5,20 +5,22 @@
 //! back through the generated Vox contract.
 
 use eyre::{Context, Result};
+use facet::Facet;
 use spec_proto::terminal::{
     Terminal, TerminalCancelRequest, TerminalCapabilities, TerminalCapabilitiesRequest,
     TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult,
     TerminalContentRequest, TerminalContentResult, TerminalCursor, TerminalDisconnectRequest,
     TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding, TerminalFrameKind,
     TerminalInputResult, TerminalKeyInput, TerminalMouseInput, TerminalOperationResult,
-    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
-    TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest, TerminalState, TerminalTextInput,
+    TerminalPromptMetadata, TerminalRange, TerminalResizeRequest,
+    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
+    TerminalState, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_core::{TerminalLimits, TerminalSession};
 use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, TerminalFont};
@@ -29,6 +31,10 @@ const MAX_COLUMNS: u16 = 240;
 const MAX_ROWS: u16 = 120;
 const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_CONTENT_CHARS: u32 = 256 * 1024;
+const MAX_PIXEL_WIDTH: u16 = 4096;
+const MAX_PIXEL_HEIGHT: u16 = 4096;
+const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
+const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
 const GLFW_MOD_SHIFT: u32 = 0x0001;
@@ -268,14 +274,57 @@ pub fn normalize_listen_address(raw: &str) -> Result<String> {
 pub struct VoxTerminalService {
     sessions: Arc<Mutex<BTreeMap<String, TerminalSessionState>>>,
     next_session: Arc<AtomicU64>,
+    latest_snapshot_timing: Arc<Mutex<Option<TerminalSnapshotTimingWitness>>>,
 }
 
 struct TerminalSessionState {
     pty: PtySession,
     terminal: TerminalSession,
     sequence: i64,
+    surface: TerminalSurfaceMetrics,
     closed: bool,
     debug_output: Vec<u8>,
+}
+
+struct EncodedPng {
+    width: u16,
+    height: u16,
+    stride: u32,
+    payload: Vec<u8>,
+    font_load_micros: u64,
+    raster_micros: u64,
+    png_encode_micros: u64,
+    cell_width: u16,
+    cell_height: u16,
+    font_pixel_size: u16,
+}
+
+/// Machine-readable Rust-side evidence for one full-PNG snapshot.
+///
+/// This stays on the diagnostic surface instead of enlarging every Vox
+/// response. Java joins it to its own presentation measurements with the
+/// correlation ID and request sequence.
+#[derive(Clone, Debug, Facet)]
+pub struct TerminalSnapshotTimingWitness {
+    pub request_sequence: i64,
+    pub server_sequence: i64,
+    pub correlation_id: String,
+    pub logical_columns: u16,
+    pub logical_rows: u16,
+    pub panel_width: u16,
+    pub panel_height: u16,
+    pub frame_width: u16,
+    pub frame_height: u16,
+    pub cell_width: u16,
+    pub cell_height: u16,
+    pub font_pixel_size: u16,
+    pub payload_bytes: u64,
+    pub pty_drain_us: u64,
+    pub terminal_snapshot_us: u64,
+    pub font_load_us: u64,
+    pub raster_us: u64,
+    pub png_encode_us: u64,
+    pub total_us: u64,
 }
 
 impl VoxTerminalService {
@@ -284,6 +333,22 @@ impl VoxTerminalService {
         Self {
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             next_session: Arc::new(AtomicU64::new(1)),
+            latest_snapshot_timing: Arc::new(Mutex::new(None)),
+        }
+    }
+
+    /// Returns the most recent Rust-side full-PNG timing witness.
+    #[must_use]
+    pub fn latest_snapshot_timing(&self) -> Option<TerminalSnapshotTimingWitness> {
+        self.latest_snapshot_timing
+            .lock()
+            .ok()
+            .and_then(|timing| timing.clone())
+    }
+
+    fn record_snapshot_timing(&self, timing: TerminalSnapshotTimingWitness) {
+        if let Ok(mut latest) = self.latest_snapshot_timing.lock() {
+            *latest = Some(timing);
         }
     }
 
@@ -300,6 +365,8 @@ impl VoxTerminalService {
             max_width: MAX_COLUMNS,
             max_height: MAX_ROWS,
             max_frame_bytes: MAX_FRAME_BYTES,
+            backend_id: "rust.cpu.fontdue".to_string(),
+            transport_id: "vox".to_string(),
         }
     }
 
@@ -325,6 +392,19 @@ impl VoxTerminalService {
             return Err(Self::error(
                 TerminalErrorCode::InvalidRequest,
                 format!("terminal dimensions must be within 1..={MAX_COLUMNS} × 1..={MAX_ROWS}"),
+                0,
+            ));
+        }
+        Ok(())
+    }
+
+    fn validate_pixel_dimensions(width: u16, height: u16) -> Result<(), TerminalError> {
+        if width > MAX_PIXEL_WIDTH || height > MAX_PIXEL_HEIGHT {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                format!(
+                    "terminal pixel dimensions must be within 0..={MAX_PIXEL_WIDTH} × 0..={MAX_PIXEL_HEIGHT}"
+                ),
                 0,
             ));
         }
@@ -408,15 +488,44 @@ impl VoxTerminalService {
         Ok(())
     }
 
-    fn encode_png(terminal: &TerminalSession) -> Result<(u16, u16, u32, Vec<u8>), TerminalError> {
+    fn encode_png(
+        terminal: &TerminalSession,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+    ) -> Result<EncodedPng, TerminalError> {
         let snapshot = terminal.snapshot();
+        let font_started = Instant::now();
         let mut font = TerminalFont::new(DEFAULT_PIXEL_SIZE)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
+        let default_width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
+        let default_height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
+        let target_width = if requested_pixel_width == 0 {
+            default_width
+        } else {
+            u32::from(requested_pixel_width)
+        };
+        let target_height = if requested_pixel_height == 0 {
+            default_height
+        } else {
+            u32::from(requested_pixel_height)
+        };
+        let width_scale = target_width as f32 / default_width.max(1) as f32;
+        let height_scale = target_height as f32 / default_height.max(1) as f32;
+        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
+            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
+        if (font_pixel_size - DEFAULT_PIXEL_SIZE).abs() > f32::EPSILON {
+            font = TerminalFont::new(font_pixel_size)
+                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
+        }
+        let font_load_micros = font_started.elapsed().as_micros() as u64;
         let width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
         let height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
+        let raster_started = Instant::now();
         let frame = font.render(&snapshot, width, height);
+        let raster_micros = raster_started.elapsed().as_micros() as u64;
         let stride = width.saturating_mul(4);
         let mut bytes = Vec::new();
+        let png_encode_started = Instant::now();
         {
             let mut encoder = png::Encoder::new(Cursor::new(&mut bytes), frame.width, frame.height);
             encoder.set_color(png::ColorType::Rgba);
@@ -428,6 +537,7 @@ impl VoxTerminalService {
                 .write_image_data(&frame.pixels)
                 .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         }
+        let png_encode_micros = png_encode_started.elapsed().as_micros() as u64;
         let width = u16::try_from(width).map_err(|_| {
             Self::error(
                 TerminalErrorCode::CapacityExceeded,
@@ -442,7 +552,32 @@ impl VoxTerminalService {
                 0,
             )
         })?;
-        Ok((width, height, stride, bytes))
+        let cell_width = u16::try_from(font.cell_width()).map_err(|_| {
+            Self::error(
+                TerminalErrorCode::CapacityExceeded,
+                "terminal cell width exceeds protocol bounds",
+                0,
+            )
+        })?;
+        let cell_height = u16::try_from(font.cell_height()).map_err(|_| {
+            Self::error(
+                TerminalErrorCode::CapacityExceeded,
+                "terminal cell height exceeds protocol bounds",
+                0,
+            )
+        })?;
+        Ok(EncodedPng {
+            width,
+            height,
+            stride,
+            payload: bytes,
+            font_load_micros,
+            raster_micros,
+            png_encode_micros,
+            cell_width,
+            cell_height,
+            font_pixel_size: font_pixel_size.round() as u16,
+        })
     }
 
     fn empty_range() -> TerminalRange {
@@ -507,12 +642,22 @@ impl Terminal for VoxTerminalService {
         request: TerminalConnectRequest,
     ) -> Result<TerminalConnectResult, TerminalError> {
         Self::validate_dimensions(request.requested_width, request.requested_height)?;
+        Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
         let session_id = format!(
             "sfm-terminal-{}",
             self.next_session.fetch_add(1, Ordering::Relaxed)
         );
         let pty = PtySession::spawn(&PtyConfig::interactive())
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
+        let surface = TerminalSurfaceMetrics {
+            columns: request.requested_width,
+            rows: request.requested_height,
+            panel_width: request.surface.panel_width,
+            panel_height: request.surface.panel_height,
+            cell_width: 0,
+            cell_height: 0,
+            font_pixel_size: 0,
+        };
         let mut state = TerminalSessionState {
             pty,
             terminal: TerminalSession::new(
@@ -521,6 +666,7 @@ impl Terminal for VoxTerminalService {
                 request.requested_height,
             ),
             sequence: 0,
+            surface,
             closed: false,
             debug_output: Vec::new(),
         };
@@ -530,6 +676,7 @@ impl Terminal for VoxTerminalService {
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         Self::drain_pty(&mut state)?;
         let sequence = Self::next_sequence(&mut state.sequence);
+        let connected_surface = state.surface.clone();
         self.sessions
             .lock()
             .map_err(|_| {
@@ -543,10 +690,10 @@ impl Terminal for VoxTerminalService {
         Ok(TerminalConnectResult {
             session_id,
             capabilities: Self::capabilities(),
-            width: request.requested_width,
-            height: request.requested_height,
+            surface: connected_surface,
             server_sequence: sequence,
             state: TerminalState::Ready,
+            correlation_id: request.correlation_id,
         })
     }
 
@@ -580,6 +727,7 @@ impl Terminal for VoxTerminalService {
         request: TerminalResizeRequest,
     ) -> Result<TerminalResizeResult, TerminalError> {
         Self::validate_dimensions(request.width, request.height)?;
+        Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
         let mut sessions = self.sessions.lock().map_err(|_| {
             Self::error(
                 TerminalErrorCode::Internal,
@@ -594,6 +742,13 @@ impl Terminal for VoxTerminalService {
                 0,
             )
         })?;
+        session.surface.columns = request.width;
+        session.surface.rows = request.height;
+        session.surface.panel_width = request.surface.panel_width;
+        session.surface.panel_height = request.surface.panel_height;
+        session.surface.cell_width = request.surface.cell_width;
+        session.surface.cell_height = request.surface.cell_height;
+        session.surface.font_pixel_size = request.surface.font_pixel_size;
         session
             .pty
             .resize(request.width, request.height, 0, 0)
@@ -610,7 +765,9 @@ impl Terminal for VoxTerminalService {
             session_id: request.session_id,
             width: request.width,
             height: request.height,
+            surface: session.surface.clone(),
             server_sequence: sequence,
+            correlation_id: request.correlation_id,
         })
     }
 
@@ -653,6 +810,7 @@ impl Terminal for VoxTerminalService {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
+            correlation_id: request.correlation_id,
         })
     }
 
@@ -695,6 +853,7 @@ impl Terminal for VoxTerminalService {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
+            correlation_id: request.correlation_id,
         })
     }
 
@@ -747,6 +906,7 @@ impl Terminal for VoxTerminalService {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
+            correlation_id: request.correlation_id,
         })
     }
 
@@ -754,6 +914,7 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalSnapshotRequest,
     ) -> Result<TerminalSnapshot, TerminalError> {
+        let snapshot_started = Instant::now();
         let mut sessions = self.sessions.lock().map_err(|_| {
             Self::error(
                 TerminalErrorCode::Internal,
@@ -768,14 +929,58 @@ impl Terminal for VoxTerminalService {
                 0,
             )
         })?;
+        let drain_started = Instant::now();
         Self::drain_pty(session)?;
+        let pty_drain_micros = drain_started.elapsed().as_micros() as u64;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
+            let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
+            tracing::debug!(
+                terminal_event = "snapshot_empty",
+                session_id = %request.session_id,
+                client_sequence = request.client_sequence,
+                correlation_id = %request.correlation_id,
+                after_sequence = request.after_sequence,
+                server_sequence = sequence,
+                pty_drain_micros,
+                snapshot_total_micros,
+                "terminal snapshot has no newer sequence"
+            );
+            self.record_snapshot_timing(TerminalSnapshotTimingWitness {
+                request_sequence: request.client_sequence,
+                server_sequence: sequence,
+                correlation_id: request.correlation_id.clone(),
+                logical_columns: session.surface.columns,
+                logical_rows: session.surface.rows,
+                panel_width: session.surface.panel_width,
+                panel_height: session.surface.panel_height,
+                frame_width: 0,
+                frame_height: 0,
+                cell_width: 0,
+                cell_height: 0,
+                font_pixel_size: 0,
+                payload_bytes: 0,
+                pty_drain_us: pty_drain_micros,
+                terminal_snapshot_us: 0,
+                font_load_us: 0,
+                raster_us: 0,
+                png_encode_us: 0,
+                total_us: snapshot_total_micros,
+            });
             return Ok(TerminalSnapshot {
                 session_id: request.session_id,
                 sequence,
+                request_sequence: request.client_sequence,
+                logical_columns: session.surface.columns,
+                logical_rows: session.surface.rows,
                 width: 0,
                 height: 0,
+                panel_width: session.surface.panel_width,
+                panel_height: session.surface.panel_height,
+                cell_width: 0,
+                cell_height: 0,
+                font_pixel_size: 0,
+                correlation_id: request.correlation_id,
                 encoding: TerminalFrameEncoding::Png,
                 kind: TerminalFrameKind::Full,
                 stride: 0,
@@ -807,12 +1012,30 @@ impl Terminal for VoxTerminalService {
                 },
             });
         }
+        let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
-        let (width, height, stride, payload) =
-            Self::encode_png(&session.terminal).map_err(|mut error| {
-                error.server_sequence = sequence;
-                error
-            })?;
+        let terminal_snapshot_micros = terminal_snapshot_started.elapsed().as_micros() as u64;
+        let encoded = Self::encode_png(
+            &session.terminal,
+            session.surface.panel_width,
+            session.surface.panel_height,
+        )
+        .map_err(|mut error| {
+            error.server_sequence = sequence;
+            error
+        })?;
+        let EncodedPng {
+            width,
+            height,
+            stride,
+            payload,
+            font_load_micros,
+            raster_micros,
+            png_encode_micros,
+            cell_width,
+            cell_height,
+            font_pixel_size,
+        } = encoded;
         let max_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
         if max_bytes == 0 || payload.len() > max_bytes as usize {
             return Err(Self::error(
@@ -821,11 +1044,63 @@ impl Terminal for VoxTerminalService {
                 sequence,
             ));
         }
+        let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
+        tracing::debug!(
+            terminal_event = "snapshot_timing",
+            session_id = %request.session_id,
+            client_sequence = request.client_sequence,
+            correlation_id = %request.correlation_id,
+            after_sequence = request.after_sequence,
+            server_sequence = sequence,
+            logical_columns = terminal_snapshot.columns,
+            logical_rows = terminal_snapshot.rows,
+            frame_width = width,
+            frame_height = height,
+            stride,
+            payload_bytes = payload.len(),
+            pty_drain_micros,
+            terminal_snapshot_micros,
+            font_load_micros,
+            raster_micros,
+            png_encode_micros,
+            snapshot_total_micros,
+            "terminal snapshot timing"
+        );
+        self.record_snapshot_timing(TerminalSnapshotTimingWitness {
+            request_sequence: request.client_sequence,
+            server_sequence: sequence,
+            correlation_id: request.correlation_id.clone(),
+            logical_columns: terminal_snapshot.columns,
+            logical_rows: terminal_snapshot.rows,
+            panel_width: session.surface.panel_width,
+            panel_height: session.surface.panel_height,
+            frame_width: width,
+            frame_height: height,
+            cell_width,
+            cell_height,
+            font_pixel_size,
+            payload_bytes: payload.len() as u64,
+            pty_drain_us: pty_drain_micros,
+            terminal_snapshot_us: terminal_snapshot_micros,
+            font_load_us: font_load_micros,
+            raster_us: raster_micros,
+            png_encode_us: png_encode_micros,
+            total_us: snapshot_total_micros,
+        });
         Ok(TerminalSnapshot {
             session_id: request.session_id,
             sequence,
+            request_sequence: request.client_sequence,
+            logical_columns: terminal_snapshot.columns,
+            logical_rows: terminal_snapshot.rows,
             width,
             height,
+            panel_width: session.surface.panel_width,
+            panel_height: session.surface.panel_height,
+            cell_width,
+            cell_height,
+            font_pixel_size,
+            correlation_id: request.correlation_id,
             encoding: TerminalFrameEncoding::Png,
             kind: TerminalFrameKind::Full,
             stride,
@@ -1069,6 +1344,13 @@ mod tests {
                 endpoint: "test".to_string(),
                 requested_width: 120,
                 requested_height: 40,
+                surface: TerminalSurfaceMetrics {
+                    columns: 120,
+                    rows: 40,
+                    panel_width: 1200,
+                    panel_height: 760,
+                    ..TerminalSurfaceMetrics::default()
+                },
                 capabilities: TerminalCapabilities {
                     text_input: true,
                     key_input: true,
@@ -1081,8 +1363,11 @@ mod tests {
                     max_width: MAX_COLUMNS,
                     max_height: MAX_ROWS,
                     max_frame_bytes: MAX_FRAME_BYTES,
+                    backend_id: "".to_string(),
+                    transport_id: "".to_string(),
                 },
                 client_sequence: 1,
+                correlation_id: "connect-01".to_string(),
             })
             .await
             .expect("terminal session should connect");
@@ -1092,6 +1377,7 @@ mod tests {
                 text: "1..100; Write-Host -ForegroundColor Cyan \"hello, world!\"; exit\r"
                     .to_string(),
                 client_sequence: 2,
+                correlation_id: "output-01".to_string(),
             })
             .await
             .expect("PowerShell puppet input should be accepted");
@@ -1104,6 +1390,7 @@ mod tests {
                     after_sequence: 0,
                     max_frame_bytes: MAX_FRAME_BYTES,
                     client_sequence,
+                    correlation_id: format!("snapshot-{client_sequence}"),
                 })
                 .await
                 .expect("terminal PNG snapshot should be returned");
@@ -1176,6 +1463,16 @@ mod tests {
             content.text
         );
 
+        let timing = service
+            .latest_snapshot_timing()
+            .expect("Rust snapshot timing witness should be recorded");
+        assert_eq!(timing.correlation_id.as_str(), snapshot.correlation_id.as_str());
+        assert!(timing.frame_width > 0);
+        assert!(timing.frame_height > 0);
+        assert!(timing.payload_bytes > 0);
+        let timing_json = facet_json::to_string(&timing).expect("timing witness should be JSON");
+        println!("SFM_TERMINAL_TIMING_WITNESS {timing_json}");
+
         client
             .disconnect(TerminalDisconnectRequest {
                 session_id: connected.session_id,
@@ -1214,6 +1511,13 @@ mod tests {
                 endpoint: "test-cancel".to_string(),
                 requested_width: 120,
                 requested_height: 40,
+                surface: TerminalSurfaceMetrics {
+                    columns: 120,
+                    rows: 40,
+                    panel_width: 1200,
+                    panel_height: 760,
+                    ..TerminalSurfaceMetrics::default()
+                },
                 capabilities: TerminalCapabilities {
                     text_input: true,
                     key_input: true,
@@ -1226,8 +1530,11 @@ mod tests {
                     max_width: MAX_COLUMNS,
                     max_height: MAX_ROWS,
                     max_frame_bytes: MAX_FRAME_BYTES,
+                    backend_id: "".to_string(),
+                    transport_id: "".to_string(),
                 },
                 client_sequence: 1,
+                correlation_id: "connect-cancel-01".to_string(),
             })
             .await
             .expect("terminal session should connect");
@@ -1237,6 +1544,7 @@ mod tests {
                 session_id: connected.session_id.clone(),
                 text: "Write-Output READY\r".to_string(),
                 client_sequence: 2,
+                correlation_id: "ready-01".to_string(),
             })
             .await
             .expect("PowerShell readiness input should be accepted");
@@ -1266,6 +1574,7 @@ mod tests {
                     "1..10000 | ForEach-Object { Write-Output $_; Start-Sleep -Milliseconds 10 }\r"
                         .to_string(),
                 client_sequence: 101,
+                correlation_id: "long-running-01".to_string(),
             })
             .await
             .expect("long-running PowerShell input should be accepted");
@@ -1277,6 +1586,7 @@ mod tests {
                 request_sequence: 2,
                 reason: "puppet cancellation proof".to_string(),
                 client_sequence: 3,
+                correlation_id: "cancel-01".to_string(),
             })
             .await
             .expect("terminal cancellation should be accepted");
