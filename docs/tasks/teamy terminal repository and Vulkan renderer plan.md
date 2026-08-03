@@ -1468,20 +1468,37 @@ checked into SFM as
 
 ### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
 
-**Work:** Retain full-frame and dirty-cell `fontdue` rendering as explicit
-named reference backends. Make full PNG, raw full pixels, and raw or losslessly
-compressed dirty regions selectable transport outputs where the frame
-contract supports them. Keep Caskaydia Cove Nerd Font Mono version/provenance,
-font size, fallback choice, and glyph-cache state explicit. Measure persistent
-render targets and partial uploads separately from glyph rasterization so an
-upload improvement is not reported as a font improvement.
+**Work:** Retain `rust-cpu-fontdue` as the explicit renderer identity, with
+`full` and `dirty` raster/damage modes kept separate from transport selection.
+Implement stable `full-png`, `full-raw-rgba`, and `dirty-raw-rgba` transport ids
+for this slice. A losslessly compressed dirty transport is a later candidate,
+not an alternative left undecided inside this item. Raw pixels use a bounded,
+versioned RGBA8 contract with explicit origin, dimensions, row stride, alpha
+interpretation, frame/base sequence, and ordered dirty-region coordinates;
+malformed lengths, bounds, and base sequences are rejected. Keep Caskaydia Cove
+Nerd Font Mono version/provenance, font size, fallback choice, and glyph-cache
+state explicit. Measure persistent render targets and partial uploads separately
+from glyph rasterization so an upload improvement is not reported as a font
+improvement.
+
+The subscription contract must expose stable transport ids and capabilities so
+an SFM terminal panel can select its desired transport independently of other
+terminal panels. A selection change keeps the Rust terminal session/PTY alive,
+creates a fresh transport generation, and begins with a complete
+resynchronization frame in the selected encoding. Frames from the retired
+generation are stale even if their numeric sequence is higher. Distinguish the
+requested transport from the transport proven active by an accepted frame;
+unsupported combinations fail explicitly and never fall back silently.
 
 **Validation:** Full-frame and dirty paths are pixel-equivalent for the same
 fontdue request after composing dirty regions. The fixture suite covers ANSI
 colors, bold, underline, inverse, cursor variants, selection, wide glyphs,
 combining/fallback characters, scroll, alternate screen, resize, and forced
 full refresh. Existing `--no-default-features` and dirty-rendering baselines
-remain reproducible.
+remain reproducible. A transport switch preserves the terminal session and
+input stream, accepts a full frame in the newly selected encoding, rejects late
+old-generation frames, and leaves another panel's independently selected
+subscription unchanged.
 
 **Completion criteria:** The CPU reference can be run headlessly and through
 the real bridge with stable backend/transport names, comparable manifests,
