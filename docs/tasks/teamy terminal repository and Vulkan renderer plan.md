@@ -21,13 +21,11 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Fix the two concrete baseline defects exposed by the completed
-current-path witness before beginning the renderer race. First complete
-3.6.2a: retain loaded font faces, size-specific rasterizers, glyph caches,
-frame storage, and encoding buffers instead of reconstructing them for every
-changed snapshot or throwing them away on reversible resizes. In parallel,
-complete the Facet prerequisite in 3.6.2b and then replace SFM's 50 ms unary
-snapshot poller with a bounded Vox `Tx`/`Rx` frame subscription. Rust must
+**Next slice:** Complete the Facet prerequisite in 3.6.2b and then replace
+SFM's 50 ms unary snapshot poller with a bounded Vox `Tx`/`Rx` frame
+subscription. The current CPU/full-PNG path now retains its reusable Rust and
+Minecraft presentation resources, so the remaining baseline defect is live
+delivery. Rust must
 observe PTY/VT sequence changes continuously and begin publishing the newest
 state immediately; there is no frame debounce interval. Backpressure is
 latest-state bounded: at most one frame is rendering/sending and one newer
@@ -1296,7 +1294,7 @@ compile, and the live CPU/full-PNG bridge proof pass. The broader
 multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
 remain intentionally open; this initial slice does not claim those renderers.
 
-### [ ] 3.6.2a Retain reusable font, glyph, frame, and encoding resources
+### [x] 3.6.2a Retain reusable font, glyph, frame, and encoding resources
 
 **Work:** Remove per-snapshot resource reconstruction from the CPU/full-PNG
 reference before comparing it with other renderers. Split immutable font-face
@@ -1352,6 +1350,38 @@ font/glyph renderer and compatible frame/texture storage; reversible resizes
 reuse bounded cached state; the warm correlated witness no longer attributes
 hundreds of milliseconds to font loading; and no cache is unbounded, stale,
 or silently shared across incompatible font/size/backend identities.
+
+**Completion evidence — 2026-08-03:** Teamy Terminal commit `1c5fd0d` splits
+process-wide immutable font discovery/faces from size-specific renderers,
+retains a four-entry per-session size LRU and 4,096-entry per-renderer glyph
+LRU, reuses frame and PNG backing storage, and drops the global session-map
+lock before render/encode work. The focused warm witness reports one process
+catalog load, one renderer construction, nine renderer-cache hits, 70 glyph
+hits versus 19 initial misses, retained frame/PNG buffers, and
+`font_load_us=0` on request sequence 7. The font tests pass 8/8 and the Vox
+server tests pass 9/9, including stable size, bounded eviction, multiple
+sessions, and A→B→A reuse. The installed executable identifies the exact clean
+revision `1c5fd0d`.
+
+SFM commits `ce8c53f44`, `343f10f72`, and `4c2846618` retain and instrument
+the compatible Minecraft texture/upload path and make the restart witness
+deterministic. The passing normal puppet run
+`sfm-title_screen-20260803-112610-670` contains 139 correlated presentation
+samples: 137 warm samples report zero font-load time, the two expected cold
+samples correspond to the initial and deliberately restarted Rust processes,
+and 139 uploads use only two texture allocations/registrations (the one
+replacement is the deliberate resize) with 137 in-place reuses. The passing
+GUI-scale-7 run `sfm-title_screen-20260803-113254-252` reaches effective scale
+7 and a native 547×303 panel, completes all 13 visual captures and content
+assertions, and records 134 uploads with two registrations and 132 reuses;
+132 of 134 correlated samples report `rust_font_load_us=0`, and the final warm
+raster/encode stages are sub-millisecond/about two milliseconds rather than
+the former recurring 0.7–1.0-second font load. PNG decoding still requires a
+measured, explicitly closed temporary `NativeImage`; that unavoidable
+full-PNG cost remains visible for later transport comparisons. A full
+workspace Rust test attempt also exposed only the unrelated pre-existing
+stochastic `fuzz_cli_args_roundtrip` zero-valid-sample failure; all 23 library
+tests and every focused resource/lifecycle test passed.
 
 ### [ ] 3.6.2b Replace live snapshot polling with bounded Vox Tx/Rx push
 
@@ -1832,7 +1862,7 @@ The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
 core VT state, bounded replay, embedded font, Vulkan presenter, portable frame
 encoding, interactive wiring, and CPU full-PNG SFM correctness proof are
 implemented. The correlated lag witness and native-size/cell-metric proof are
-complete. The next required work is 3.6.2a resource retention and 3.6.2b Vox
-push delivery, followed by the parallel renderer/transport candidates defined
+complete. The next required work is 3.6.2b Vox push delivery, followed by the
+parallel renderer/transport candidates defined
 by Phase 3.6; release/propagation decisions follow the matched integration
 matrix.
