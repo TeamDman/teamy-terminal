@@ -7,15 +7,19 @@
 use eyre::{Context, Result};
 use facet::Facet;
 use spec_proto::terminal::{
-    Terminal, TerminalCancelRequest, TerminalCapabilities, TerminalCapabilitiesRequest,
-    TerminalCapabilitiesResult, TerminalConnectRequest, TerminalConnectResult,
-    TerminalContentRequest, TerminalContentResult, TerminalCursor, TerminalDisconnectRequest,
-    TerminalDispatcher, TerminalError, TerminalErrorCode, TerminalFrameEncoding,
-    TerminalFrameEvent, TerminalFrameKind, TerminalInputResult, TerminalKeyInput,
-    TerminalMouseInput, TerminalOperationResult, TerminalPromptMetadata,
-    TerminalPublicationTelemetry, TerminalRange, TerminalResizeRequest, TerminalResizeResult,
-    TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming,
-    TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
+    Terminal, TerminalAlphaMode, TerminalCancelRequest, TerminalCapabilities,
+    TerminalCapabilitiesRequest, TerminalCapabilitiesResult, TerminalColorSpace,
+    TerminalConnectRequest, TerminalConnectResult, TerminalContentRequest, TerminalContentResult,
+    TerminalCursor, TerminalDisconnectRequest, TerminalDispatcher, TerminalError,
+    TerminalErrorCode, TerminalFrameEncoding, TerminalFrameEvent, TerminalFrameKind,
+    TerminalFrameOrigin, TerminalInputResult, TerminalKeyInput, TerminalMouseInput,
+    TerminalOperationResult, TerminalPresentationCapabilitiesRequest,
+    TerminalPresentationCapabilitiesResult, TerminalPresentationMode, TerminalPromptMetadata,
+    TerminalPublicationTelemetry, TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent,
+    TerminalRasterFrameKind, TerminalRasterRegion, TerminalRasterSnapshotTiming,
+    TerminalRasterSubscribeRequest, TerminalResizeRequest, TerminalResizeResult, TerminalSelection,
+    TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming, TerminalState,
+    TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -25,7 +29,14 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_core::{TerminalLimits, TerminalSession};
-use teamy_terminal_font::{DEFAULT_PIXEL_SIZE, RasterizedFrame, TerminalFont, TerminalFontCatalog};
+use teamy_terminal_font::{
+    DEFAULT_PIXEL_SIZE, EMBEDDED_FONT_ID, EMBEDDED_FONT_SHA256, RasterizedFrame, TerminalFont,
+    TerminalFontCatalog, damage_regions,
+};
+use teamy_terminal_frame::{
+    FrameCompression, MAX_DIRTY_REGIONS, RASTER_FRAME_CONTRACT_VERSION, RasterFrameUpdate,
+    RasterRect, RasterUpdateKind,
+};
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
 use tokio::sync::watch;
 use vox_terminal as vox;
@@ -40,6 +51,13 @@ const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
 const SESSION_ACTOR_CAPACITY: usize = 64;
+const RASTER_TRANSPORT_VERSION: u16 = 1;
+const RENDERER_ID: &str = "rust-cpu-fontdue";
+const DAMAGE_FULL: &str = "full";
+const DAMAGE_DIRTY: &str = "dirty";
+const TRANSPORT_FULL_PNG: &str = "full-png";
+const TRANSPORT_FULL_RAW_RGBA: &str = "full-raw-rgba";
+const TRANSPORT_DIRTY_RAW_RGBA: &str = "dirty-raw-rgba";
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
 static PROCESS_EPOCH: OnceLock<String> = OnceLock::new();
@@ -705,6 +723,162 @@ impl TerminalRenderResources {
             resource_stats: self.snapshot_stats(),
         })
     }
+
+    fn render_raster_update(
+        &mut self,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+        transport: RasterTransport,
+        previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
+        frame_sequence: u64,
+        base_frame_sequence: u64,
+        force_full: bool,
+        max_regions: u16,
+    ) -> Result<Option<RenderedRasterUpdate>> {
+        let font_started = Instant::now();
+        let constructions_before = self.stats.font_renderer_constructions;
+        let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
+        let default_font = &self.fonts[default_font_index].font;
+        let default_width = u32::from(snapshot.columns).saturating_mul(default_font.cell_width());
+        let default_height = u32::from(snapshot.rows).saturating_mul(default_font.cell_height());
+        let target_width = if requested_pixel_width == 0 {
+            default_width
+        } else {
+            u32::from(requested_pixel_width)
+        };
+        let target_height = if requested_pixel_height == 0 {
+            default_height
+        } else {
+            u32::from(requested_pixel_height)
+        };
+        let width_scale = target_width as f32 / default_width.max(1) as f32;
+        let height_scale = target_height as f32 / default_height.max(1) as f32;
+        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
+            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
+        let font_index = self.ensure_font(font_pixel_size)?;
+        let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
+            font_started.elapsed().as_micros() as u64
+        } else {
+            0
+        };
+        let font = &self.fonts[font_index].font;
+        let cell_width = font.cell_width();
+        let cell_height = font.cell_height();
+        let width = u32::from(snapshot.columns).saturating_mul(cell_width);
+        let height = u32::from(snapshot.rows).saturating_mul(cell_height);
+        let dimensions_changed = self.frame.width != width || self.frame.height != height;
+        let damage_started = Instant::now();
+        let (cell_regions, damage_forces_full) =
+            if transport == RasterTransport::DirtyRawRgba && !force_full && !dimensions_changed {
+                damage_regions(previous_snapshot, snapshot)
+            } else {
+                (Vec::new(), true)
+            };
+        let damage_micros = damage_started.elapsed().as_micros() as u64;
+        let negotiated_region_fallback = transport == RasterTransport::DirtyRawRgba
+            && cell_regions.len() > usize::from(max_regions);
+        let render_full = transport != RasterTransport::DirtyRawRgba
+            || force_full
+            || dimensions_changed
+            || damage_forces_full
+            || negotiated_region_fallback;
+        let full_recovery = force_full
+            || (transport == RasterTransport::DirtyRawRgba
+                && (dimensions_changed || damage_forces_full || negotiated_region_fallback));
+        if !render_full && cell_regions.is_empty() {
+            return Ok(None);
+        }
+
+        let raster_started = Instant::now();
+        let frame_capacity_before = self.frame.pixels.capacity();
+        if render_full {
+            self.fonts[font_index]
+                .font
+                .render_into(snapshot, &mut self.frame, width, height);
+        } else {
+            self.fonts[font_index]
+                .font
+                .render_cells(snapshot, &mut self.frame, &cell_regions);
+        }
+        if self.frame.pixels.capacity() > frame_capacity_before {
+            self.stats.frame_buffer_grows = self.stats.frame_buffer_grows.saturating_add(1);
+        } else {
+            self.stats.frame_buffer_reuses = self.stats.frame_buffer_reuses.saturating_add(1);
+        }
+        let raster_micros = raster_started.elapsed().as_micros() as u64;
+
+        let encode_started = Instant::now();
+        let update = if render_full && transport == RasterTransport::FullPng {
+            let png_capacity_before = self.png_scratch.capacity();
+            self.png_scratch.clear();
+            {
+                let mut encoder =
+                    png::Encoder::new(Cursor::new(&mut self.png_scratch), width, height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header()?;
+                writer.write_image_data(&self.frame.pixels)?;
+            }
+            if self.png_scratch.capacity() > png_capacity_before {
+                self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
+            } else {
+                self.stats.png_buffer_reuses = self.stats.png_buffer_reuses.saturating_add(1);
+            }
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::full_png(frame_sequence, width, height, self.png_scratch.clone())?
+        } else if render_full {
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::full_rgba(
+                frame_sequence,
+                width,
+                height,
+                &self.frame.pixels,
+                FrameCompression::Raw,
+            )?
+        } else {
+            let rects = cell_regions
+                .iter()
+                .map(|region| RasterRect {
+                    x: u32::from(region.column).saturating_mul(cell_width),
+                    y: u32::from(region.row).saturating_mul(cell_height),
+                    width: u32::from(region.columns).saturating_mul(cell_width),
+                    height: u32::from(region.rows).saturating_mul(cell_height),
+                })
+                .collect::<Vec<_>>();
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::dirty_rgba(
+                frame_sequence,
+                base_frame_sequence,
+                width,
+                height,
+                &self.frame.pixels,
+                &rects,
+            )?
+        };
+        let encode_micros = encode_started.elapsed().as_micros() as u64;
+        let (png_encode_micros, payload_pack_micros) = if transport == RasterTransport::FullPng {
+            (encode_micros, 0)
+        } else {
+            (0, encode_micros)
+        };
+
+        Ok(Some(RenderedRasterUpdate {
+            update,
+            full_recovery,
+            cell_width: u16::try_from(cell_width)?,
+            cell_height: u16::try_from(cell_height)?,
+            font_pixel_size: font_pixel_size.round() as u16,
+            font_load_micros,
+            damage_micros,
+            raster_micros,
+            png_encode_micros,
+            payload_pack_micros,
+        }))
+    }
 }
 
 struct EncodedPng {
@@ -719,6 +893,105 @@ struct EncodedPng {
     cell_height: u16,
     font_pixel_size: u16,
     resource_stats: TerminalRenderResourceStats,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RasterTransport {
+    FullPng,
+    FullRawRgba,
+    DirtyRawRgba,
+}
+
+impl RasterTransport {
+    const fn transport_id(self) -> &'static str {
+        match self {
+            Self::FullPng => TRANSPORT_FULL_PNG,
+            Self::FullRawRgba => TRANSPORT_FULL_RAW_RGBA,
+            Self::DirtyRawRgba => TRANSPORT_DIRTY_RAW_RGBA,
+        }
+    }
+
+    const fn damage_mode_id(self) -> &'static str {
+        match self {
+            Self::FullPng | Self::FullRawRgba => DAMAGE_FULL,
+            Self::DirtyRawRgba => DAMAGE_DIRTY,
+        }
+    }
+
+    const fn encoding(self) -> TerminalFrameEncoding {
+        match self {
+            Self::FullPng => TerminalFrameEncoding::Png,
+            Self::FullRawRgba | Self::DirtyRawRgba => TerminalFrameEncoding::Rgba8,
+        }
+    }
+
+    const fn steady_frame_kind(self) -> TerminalRasterFrameKind {
+        match self {
+            Self::FullPng | Self::FullRawRgba => TerminalRasterFrameKind::Full,
+            Self::DirtyRawRgba => TerminalRasterFrameKind::DirtyRegions,
+        }
+    }
+
+    fn from_request(request: &TerminalRasterSubscribeRequest) -> Result<Self, TerminalError> {
+        if request.requested_renderer_id != RENDERER_ID {
+            return Err(VoxTerminalService::error(
+                TerminalErrorCode::UnsupportedCapability,
+                format!(
+                    "unsupported terminal renderer: {}",
+                    request.requested_renderer_id
+                ),
+                0,
+            ));
+        }
+        if request.requested_transport_version != RASTER_TRANSPORT_VERSION {
+            return Err(VoxTerminalService::error(
+                TerminalErrorCode::UnsupportedCapability,
+                format!(
+                    "unsupported terminal transport version: {}",
+                    request.requested_transport_version
+                ),
+                0,
+            ));
+        }
+        let transport = match request.requested_transport_id.as_str() {
+            TRANSPORT_FULL_PNG => Self::FullPng,
+            TRANSPORT_FULL_RAW_RGBA => Self::FullRawRgba,
+            TRANSPORT_DIRTY_RAW_RGBA => Self::DirtyRawRgba,
+            unsupported => {
+                return Err(VoxTerminalService::error(
+                    TerminalErrorCode::UnsupportedCapability,
+                    format!("unsupported terminal transport: {unsupported}"),
+                    0,
+                ));
+            }
+        };
+        if request.requested_damage_mode_id != transport.damage_mode_id() {
+            return Err(VoxTerminalService::error(
+                TerminalErrorCode::UnsupportedCapability,
+                format!(
+                    "transport {} requires damage mode {} instead of {}",
+                    transport.transport_id(),
+                    transport.damage_mode_id(),
+                    request.requested_damage_mode_id
+                ),
+                0,
+            ));
+        }
+        Ok(transport)
+    }
+}
+
+struct RenderedRasterUpdate {
+    update: RasterFrameUpdate,
+    full_recovery: bool,
+    cell_width: u16,
+    cell_height: u16,
+    font_pixel_size: u16,
+    font_load_micros: u64,
+    damage_micros: u64,
+    raster_micros: u64,
+    png_encode_micros: u64,
+    payload_pack_micros: u64,
 }
 
 struct CapturedTerminal {
@@ -849,6 +1122,7 @@ impl VoxTerminalService {
 
     /// Returns the most recent Rust-side full-PNG timing witness.
     #[must_use]
+    #[cfg(test)]
     pub fn latest_snapshot_timing(&self) -> Option<TerminalSnapshotTimingWitness> {
         self.latest_snapshot_timing
             .lock()
@@ -913,13 +1187,39 @@ impl VoxTerminalService {
             raster_frames: true,
             selection: false,
             scrollback: true,
-            dirty_frames: false,
+            dirty_frames: true,
             max_width: MAX_COLUMNS,
             max_height: MAX_ROWS,
             max_frame_bytes: MAX_FRAME_BYTES,
-            backend_id: "rust.cpu.fontdue".to_string(),
-            transport_id: "vox".to_string(),
+            backend_id: RENDERER_ID.to_string(),
+            transport_id: TRANSPORT_FULL_PNG.to_string(),
         }
+    }
+
+    fn presentation_modes() -> Vec<TerminalPresentationMode> {
+        [
+            RasterTransport::FullPng,
+            RasterTransport::FullRawRgba,
+            RasterTransport::DirtyRawRgba,
+        ]
+        .into_iter()
+        .map(|transport| TerminalPresentationMode {
+            renderer_id: RENDERER_ID.to_string(),
+            damage_mode_id: transport.damage_mode_id().to_string(),
+            transport_id: transport.transport_id().to_string(),
+            transport_version: RASTER_TRANSPORT_VERSION,
+            encoding: transport.encoding(),
+            steady_frame_kind: transport.steady_frame_kind(),
+            frame_contract_version: RASTER_FRAME_CONTRACT_VERSION,
+            origin: TerminalFrameOrigin::TopLeft,
+            alpha_mode: TerminalAlphaMode::Straight,
+            color_space: TerminalColorSpace::Srgb,
+            max_pixel_width: MAX_PIXEL_WIDTH,
+            max_pixel_height: MAX_PIXEL_HEIGHT,
+            max_frame_bytes: MAX_FRAME_BYTES,
+            max_regions: MAX_DIRTY_REGIONS as u16,
+        })
+        .collect()
     }
 
     fn next_sequence(sequence: &mut i64) -> i64 {
@@ -1212,6 +1512,123 @@ impl VoxTerminalService {
             },
         })
     }
+
+    fn raster_frame(
+        capture: &CapturedTerminal,
+        rendered: RenderedRasterUpdate,
+        total_us: i64,
+    ) -> Result<TerminalRasterFrame, TerminalError> {
+        let descriptor = rendered.update.descriptor;
+        let encoding = match descriptor.compression {
+            FrameCompression::Raw => TerminalFrameEncoding::Rgba8,
+            FrameCompression::Png => TerminalFrameEncoding::Png,
+        };
+        let kind = match descriptor.kind {
+            RasterUpdateKind::Full => TerminalRasterFrameKind::Full,
+            RasterUpdateKind::DirtyRegions => TerminalRasterFrameKind::DirtyRegions,
+        };
+        let regions = rendered
+            .update
+            .regions
+            .iter()
+            .map(|region| {
+                Ok(TerminalRasterRegion {
+                    x: u16::try_from(region.x).map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::Internal,
+                            error.to_string(),
+                            capture.terminal_sequence,
+                        )
+                    })?,
+                    y: u16::try_from(region.y).map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::Internal,
+                            error.to_string(),
+                            capture.terminal_sequence,
+                        )
+                    })?,
+                    width: u16::try_from(region.width).map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::Internal,
+                            error.to_string(),
+                            capture.terminal_sequence,
+                        )
+                    })?,
+                    height: u16::try_from(region.height).map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::Internal,
+                            error.to_string(),
+                            capture.terminal_sequence,
+                        )
+                    })?,
+                    stride: region.stride,
+                    payload_offset: region.payload_offset,
+                    payload_length: region.payload_length,
+                })
+            })
+            .collect::<Result<Vec<_>, TerminalError>>()?;
+        Ok(TerminalRasterFrame {
+            logical_columns: capture.snapshot.columns,
+            logical_rows: capture.snapshot.rows,
+            width: u16::try_from(descriptor.width).map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    error.to_string(),
+                    capture.terminal_sequence,
+                )
+            })?,
+            height: u16::try_from(descriptor.height).map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    error.to_string(),
+                    capture.terminal_sequence,
+                )
+            })?,
+            surface: TerminalSurfaceMetrics {
+                columns: capture.snapshot.columns,
+                rows: capture.snapshot.rows,
+                panel_width: capture.surface.panel_width,
+                panel_height: capture.surface.panel_height,
+                cell_width: rendered.cell_width,
+                cell_height: rendered.cell_height,
+                font_pixel_size: rendered.font_pixel_size,
+            },
+            encoding,
+            kind,
+            stride: descriptor.stride,
+            origin: TerminalFrameOrigin::TopLeft,
+            alpha_mode: TerminalAlphaMode::Straight,
+            color_space: TerminalColorSpace::Srgb,
+            font_id: EMBEDDED_FONT_ID.to_string(),
+            font_sha256: EMBEDDED_FONT_SHA256.to_string(),
+            payload: rendered.update.bytes,
+            regions,
+            complete: true,
+            cursor: TerminalCursor {
+                x: capture.snapshot.cursor.column,
+                y: capture.snapshot.cursor.row,
+                visible: capture.snapshot.cursor_visible,
+            },
+            selection_present: false,
+            selection: TerminalSelection {
+                anchor_x: 0,
+                anchor_y: 0,
+                focus_x: 0,
+                focus_y: 0,
+            },
+            prompt: Self::prompt_metadata(&capture.snapshot.prompt),
+            timing: TerminalRasterSnapshotTiming {
+                pty_drain_us: 0,
+                terminal_snapshot_us: 0,
+                font_load_us: i64::try_from(rendered.font_load_micros).unwrap_or(i64::MAX),
+                damage_us: i64::try_from(rendered.damage_micros).unwrap_or(i64::MAX),
+                raster_us: i64::try_from(rendered.raster_micros).unwrap_or(i64::MAX),
+                png_encode_us: i64::try_from(rendered.png_encode_micros).unwrap_or(i64::MAX),
+                payload_pack_us: i64::try_from(rendered.payload_pack_micros).unwrap_or(i64::MAX),
+                total_us,
+            },
+        })
+    }
 }
 
 impl Default for VoxTerminalService {
@@ -1301,6 +1718,20 @@ impl Terminal for VoxTerminalService {
         Ok(TerminalCapabilitiesResult {
             session_id: request.session_id,
             capabilities: Self::capabilities(),
+            server_sequence: session.sequence,
+        })
+    }
+
+    async fn presentation_capabilities(
+        &self,
+        request: TerminalPresentationCapabilitiesRequest,
+    ) -> Result<TerminalPresentationCapabilitiesResult, TerminalError> {
+        let session = self.session(&request.session_id)?;
+        let session = Self::lock_session(&session)?;
+        Ok(TerminalPresentationCapabilitiesResult {
+            session_id: request.session_id,
+            default_transport_id: TRANSPORT_FULL_PNG.to_string(),
+            modes: Self::presentation_modes(),
             server_sequence: session.sequence,
         })
     }
@@ -1872,6 +2303,225 @@ impl Terminal for VoxTerminalService {
         })
     }
 
+    async fn subscribe_raster_frames(
+        &self,
+        request: TerminalRasterSubscribeRequest,
+        frames: vox::Tx<TerminalRasterFrameEvent>,
+    ) -> Result<TerminalOperationResult, TerminalError> {
+        if request.transport_generation.trim().is_empty() {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                "raster subscription transport_generation must not be blank",
+                0,
+            ));
+        }
+        if request.max_frame_bytes == 0 {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                "raster subscription max_frame_bytes must be non-zero",
+                0,
+            ));
+        }
+        if request.max_regions == 0 {
+            return Err(Self::error(
+                TerminalErrorCode::InvalidRequest,
+                "raster subscription max_regions must be non-zero",
+                0,
+            ));
+        }
+        let transport = RasterTransport::from_request(&request)?;
+        let runtime = self.session(&request.session_id)?;
+        if runtime.closed.load(Ordering::Acquire) {
+            return Err(Self::error(
+                TerminalErrorCode::Disconnected,
+                "terminal session is closed",
+                runtime.sequence(),
+            ));
+        }
+        let max_frame_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
+        let max_regions = request.max_regions.min(MAX_DIRTY_REGIONS as u16);
+        let (subscriber_id, mut signals) = runtime.publication.register(runtime.sequence());
+        let _subscription = SubscriptionGuard {
+            runtime: Arc::downgrade(&runtime),
+            subscriber_id,
+        };
+        if runtime.closed.load(Ordering::Acquire) {
+            return Err(Self::error(
+                TerminalErrorCode::Disconnected,
+                "terminal session closed while the raster subscription was opening",
+                runtime.sequence(),
+            ));
+        }
+
+        let mut resources = TerminalRenderResources::default();
+        let mut counters = PublicationCounters::default();
+        let mut first = true;
+        let mut last_terminal_sequence = request.after_terminal_sequence;
+        let mut last_mutations = 0_i64;
+        let mut frame_sequence = request.after_frame_sequence.max(0);
+        let mut last_delivered_snapshot: Option<teamy_terminal_core::TerminalSnapshot> = None;
+        let mut last_delivered_frame_sequence = 0_i64;
+
+        loop {
+            let signal = if first {
+                *signals.borrow_and_update()
+            } else {
+                if signals.changed().await.is_err() {
+                    break;
+                }
+                *signals.borrow_and_update()
+            };
+            if !first && signal.terminal_sequence <= last_terminal_sequence {
+                continue;
+            }
+
+            let capture = Self::capture_terminal(&runtime)?;
+            let coalesced_this_frame = if first {
+                0
+            } else {
+                capture
+                    .mutations
+                    .max(signal.mutations)
+                    .saturating_sub(last_mutations)
+                    .saturating_sub(1)
+            };
+            counters.pre_render_coalesced = counters
+                .pre_render_coalesced
+                .saturating_add(coalesced_this_frame);
+            counters.renders_started = counters.renders_started.saturating_add(1);
+            let next_frame_sequence = frame_sequence.saturating_add(1).max(1);
+            let previous_snapshot = last_delivered_snapshot.clone();
+            let force_full = first || signal.full_resync || last_delivered_frame_sequence == 0;
+            let base_frame_sequence = if force_full {
+                0
+            } else {
+                last_delivered_frame_sequence
+            };
+            let panel_width = capture.surface.panel_width;
+            let panel_height = capture.surface.panel_height;
+            let render_started = Instant::now();
+            let render = tokio::task::spawn_blocking(move || {
+                let result = resources.render_raster_update(
+                    &capture.snapshot,
+                    panel_width,
+                    panel_height,
+                    transport,
+                    previous_snapshot.as_ref(),
+                    u64::try_from(next_frame_sequence).unwrap_or(u64::MAX),
+                    u64::try_from(base_frame_sequence).unwrap_or(0),
+                    force_full,
+                    max_regions,
+                );
+                (resources, capture, result)
+            })
+            .await
+            .map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    format!("terminal raster worker failed: {error}"),
+                    runtime.sequence(),
+                )
+            })?;
+            resources = render.0;
+            let capture = render.1;
+            let Some(rendered) = render.2.map_err(|error| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    error.to_string(),
+                    capture.terminal_sequence,
+                )
+            })?
+            else {
+                last_terminal_sequence = capture.terminal_sequence;
+                last_mutations = capture.mutations;
+                last_delivered_snapshot = Some(capture.snapshot);
+                first = false;
+                continue;
+            };
+            counters.renders_completed = counters.renders_completed.saturating_add(1);
+            if rendered.update.bytes.len() > max_frame_bytes as usize {
+                return Err(Self::error(
+                    TerminalErrorCode::CapacityExceeded,
+                    format!(
+                        "{} raster payload has {} bytes, exceeding the negotiated {} byte bound",
+                        transport.transport_id(),
+                        rendered.update.bytes.len(),
+                        max_frame_bytes
+                    ),
+                    capture.terminal_sequence,
+                ));
+            }
+            let descriptor = rendered.update.descriptor;
+            let full_resync = descriptor.kind == RasterUpdateKind::Full && rendered.full_recovery;
+            let total_us = i64::try_from(render_started.elapsed().as_micros()).unwrap_or(i64::MAX);
+            let frame = Self::raster_frame(&capture, rendered, total_us)?;
+            let pending_depth = u8::from(signals.has_changed().unwrap_or(false));
+            counters.pending_depth_max = counters.pending_depth_max.max(pending_depth);
+            counters.mutation_to_send_us =
+                i64::try_from(signal.mutation_at.elapsed().as_micros()).unwrap_or(i64::MAX);
+            let mut event = TerminalRasterFrameEvent {
+                session_id: request.session_id.clone(),
+                connection_epoch: runtime.connection_epoch.to_string(),
+                session_epoch: runtime.session_epoch.to_string(),
+                transport_generation: request.transport_generation.clone(),
+                terminal_sequence: capture.terminal_sequence,
+                frame_sequence: i64::try_from(descriptor.sequence).unwrap_or(i64::MAX),
+                base_frame_sequence: i64::try_from(descriptor.base_sequence).unwrap_or(i64::MAX),
+                full_resync,
+                renderer_id: RENDERER_ID.to_string(),
+                damage_mode_id: transport.damage_mode_id().to_string(),
+                transport_id: transport.transport_id().to_string(),
+                transport_version: RASTER_TRANSPORT_VERSION,
+                frame_contract_version: RASTER_FRAME_CONTRACT_VERSION,
+                max_frame_bytes,
+                max_regions,
+                correlation_id: request.correlation_id.clone(),
+                frame,
+                publication: counters.telemetry(capture.mutations, pending_depth),
+            };
+
+            match frames.try_send(event) {
+                Ok(()) => {
+                    counters.credit_wait_us = 0;
+                }
+                Err(vox::TrySendError::Full(returned)) => {
+                    event = returned;
+                    counters.credit_blocked_sends = counters.credit_blocked_sends.saturating_add(1);
+                    event.publication.credit_blocked_sends = counters.credit_blocked_sends;
+                    let credit_wait_started = Instant::now();
+                    if frames.send(event).await.is_err() {
+                        break;
+                    }
+                    counters.credit_wait_us =
+                        i64::try_from(credit_wait_started.elapsed().as_micros())
+                            .unwrap_or(i64::MAX);
+                }
+                Err(vox::TrySendError::Closed(_)) => break,
+            }
+            counters.frames_pushed = counters.frames_pushed.saturating_add(1);
+            frame_sequence = next_frame_sequence;
+            last_delivered_frame_sequence = next_frame_sequence;
+            last_terminal_sequence = capture.terminal_sequence;
+            last_mutations = capture.mutations;
+            last_delivered_snapshot = Some(capture.snapshot);
+            first = false;
+            if runtime.closed.load(Ordering::Acquire) {
+                break;
+            }
+        }
+
+        let _ = frames.close(vox::Metadata::default()).await;
+        Ok(TerminalOperationResult {
+            session_id: request.session_id,
+            state: if runtime.closed.load(Ordering::Acquire) {
+                TerminalState::Closed
+            } else {
+                TerminalState::Ready
+            },
+            server_sequence: runtime.sequence(),
+        })
+    }
+
     async fn get_content(
         &self,
         request: TerminalContentRequest,
@@ -2036,12 +2686,21 @@ mod tests {
     use super::*;
     use spec_proto::terminal::TerminalClient;
     use teamy_terminal_core::Color;
+    use teamy_terminal_frame::ComposedRasterFrame;
 
     fn own_frame(event: vox::SelfRef<TerminalFrameEvent>) -> TerminalFrameEvent {
         let json = event.map(|event| {
             facet_json::to_string(&event).expect("pushed frame should serialize in its own test")
         });
         facet_json::from_str(json.get()).expect("pushed frame test JSON should decode")
+    }
+
+    fn own_raster_frame(event: vox::SelfRef<TerminalRasterFrameEvent>) -> TerminalRasterFrameEvent {
+        let json = event.map(|event| {
+            facet_json::to_string(&event)
+                .expect("pushed raster frame should serialize in its own test")
+        });
+        facet_json::from_str(json.get()).expect("pushed raster frame test JSON should decode")
     }
 
     fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
@@ -2076,6 +2735,23 @@ mod tests {
         }
     }
 
+    fn test_raster_request(transport: RasterTransport) -> TerminalRasterSubscribeRequest {
+        TerminalRasterSubscribeRequest {
+            session_id: "session-01".to_string(),
+            requested_renderer_id: RENDERER_ID.to_string(),
+            requested_damage_mode_id: transport.damage_mode_id().to_string(),
+            requested_transport_id: transport.transport_id().to_string(),
+            requested_transport_version: RASTER_TRANSPORT_VERSION,
+            transport_generation: "generation-01".to_string(),
+            after_terminal_sequence: 0,
+            after_frame_sequence: 0,
+            max_frame_bytes: MAX_FRAME_BYTES,
+            max_regions: MAX_DIRTY_REGIONS as u16,
+            client_sequence: 1,
+            correlation_id: "raster-01".to_string(),
+        }
+    }
+
     #[test]
     fn normalize_listen_address_accepts_loopback_shorthand() {
         assert_eq!(
@@ -2090,6 +2766,271 @@ mod tests {
             normalize_listen_address("localhost:63946").unwrap(),
             "localhost:63946"
         );
+    }
+
+    #[test]
+    fn raster_capabilities_and_requests_use_stable_exact_combinations() {
+        let modes = VoxTerminalService::presentation_modes();
+        assert_eq!(modes.len(), 3);
+        assert_eq!(modes[0].transport_id, TRANSPORT_FULL_PNG);
+        assert_eq!(modes[1].transport_id, TRANSPORT_FULL_RAW_RGBA);
+        assert_eq!(modes[2].transport_id, TRANSPORT_DIRTY_RAW_RGBA);
+        assert_eq!(modes[2].damage_mode_id, DAMAGE_DIRTY);
+        assert_eq!(
+            modes[2].steady_frame_kind,
+            TerminalRasterFrameKind::DirtyRegions
+        );
+        for transport in [
+            RasterTransport::FullPng,
+            RasterTransport::FullRawRgba,
+            RasterTransport::DirtyRawRgba,
+        ] {
+            assert_eq!(
+                RasterTransport::from_request(&test_raster_request(transport)),
+                Ok(transport)
+            );
+        }
+        let mut unsupported = test_raster_request(RasterTransport::FullPng);
+        unsupported.requested_damage_mode_id = DAMAGE_DIRTY.to_string();
+        assert_eq!(
+            RasterTransport::from_request(&unsupported)
+                .expect_err("a mismatched damage mode must not silently fall back")
+                .code,
+            TerminalErrorCode::UnsupportedCapability
+        );
+    }
+
+    #[test]
+    fn dirty_raster_update_composes_to_the_exact_retained_full_frame() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 3);
+        terminal.process_bytes(b"\x1b[1;36mhello\x1b[0m");
+        let previous = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+        let full = resources
+            .render_raster_update(
+                &previous,
+                0,
+                0,
+                RasterTransport::DirtyRawRgba,
+                None,
+                1,
+                0,
+                true,
+                MAX_DIRTY_REGIONS as u16,
+            )
+            .expect("initial raster render")
+            .expect("initial render is a complete resync");
+        assert_eq!(full.update.descriptor.kind, RasterUpdateKind::Full);
+        assert!(full.full_recovery);
+        let mut composed =
+            ComposedRasterFrame::from_full(&full.update).expect("compose full frame");
+
+        terminal.process_bytes(b"\x1b[2D!\x1b[4m?\x1b[0m");
+        let current = terminal.snapshot();
+        let dirty = resources
+            .render_raster_update(
+                &current,
+                0,
+                0,
+                RasterTransport::DirtyRawRgba,
+                Some(&previous),
+                2,
+                1,
+                false,
+                MAX_DIRTY_REGIONS as u16,
+            )
+            .expect("incremental raster render")
+            .expect("visible mutation emits a dirty update");
+        assert_eq!(dirty.update.descriptor.kind, RasterUpdateKind::DirtyRegions);
+        assert!(!dirty.full_recovery);
+        assert_eq!(dirty.update.descriptor.base_sequence, 1);
+        composed.apply(&dirty.update).expect("compose dirty update");
+        assert_eq!(composed.pixels, resources.frame.pixels);
+    }
+
+    #[test]
+    fn negotiated_dirty_region_overflow_falls_back_to_a_full_raw_resync() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 4);
+        terminal.process_bytes(b"\x1b[?25l");
+        let previous = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+        resources
+            .render_raster_update(
+                &previous,
+                0,
+                0,
+                RasterTransport::DirtyRawRgba,
+                None,
+                1,
+                0,
+                true,
+                1,
+            )
+            .expect("initial raster render")
+            .expect("initial render is a complete resync");
+
+        terminal.process_bytes(b"\x1b[1;1HA\x1b[4;12HZ");
+        let current = terminal.snapshot();
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+        assert!(!full_refresh);
+        assert!(
+            regions.len() > 1,
+            "fixture must exceed the negotiated bound"
+        );
+
+        let fallback = resources
+            .render_raster_update(
+                &current,
+                0,
+                0,
+                RasterTransport::DirtyRawRgba,
+                Some(&previous),
+                2,
+                1,
+                false,
+                1,
+            )
+            .expect("region overflow should be recoverable")
+            .expect("region overflow should publish a full refresh");
+        assert_eq!(fallback.update.descriptor.kind, RasterUpdateKind::Full);
+        assert_eq!(
+            fallback.update.descriptor.compression,
+            FrameCompression::Raw
+        );
+        assert_eq!(fallback.update.descriptor.base_sequence, 0);
+        assert!(fallback.update.regions.is_empty());
+        assert!(fallback.full_recovery);
+    }
+
+    #[test]
+    fn ordinary_full_mode_frames_are_not_resyncs_after_the_initial_frame() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 3);
+        terminal.process_bytes(b"\x1b[?25lA");
+        let first_snapshot = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+        let first = resources
+            .render_raster_update(
+                &first_snapshot,
+                0,
+                0,
+                RasterTransport::FullRawRgba,
+                None,
+                1,
+                0,
+                true,
+                MAX_DIRTY_REGIONS as u16,
+            )
+            .expect("initial full-mode render")
+            .expect("initial full-mode frame");
+        assert!(first.full_recovery);
+
+        terminal.process_bytes(b"B");
+        let second_snapshot = terminal.snapshot();
+        let second = resources
+            .render_raster_update(
+                &second_snapshot,
+                0,
+                0,
+                RasterTransport::FullRawRgba,
+                Some(&first_snapshot),
+                2,
+                1,
+                false,
+                MAX_DIRTY_REGIONS as u16,
+            )
+            .expect("steady full-mode render")
+            .expect("steady full-mode frame");
+        assert_eq!(second.update.descriptor.kind, RasterUpdateKind::Full);
+        assert!(!second.full_recovery);
+    }
+
+    #[tokio::test]
+    async fn v3_subscription_pushes_initial_full_frame_with_exact_generation() {
+        let (client_link, server_link) = vox::memory_link_pair(16);
+        let service = VoxTerminalService::new();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            vox::acceptor_on(server_link)
+                .on_lane(TerminalDispatcher::new(server_service))
+                .establish_connection()
+                .await
+                .expect("Vox server connection should establish")
+        });
+        let connection = vox::initiator_on(client_link)
+            .establish_connection()
+            .await
+            .expect("Vox client connection should establish");
+        let server_guard = server.await.expect("Vox server task should establish");
+        let client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("terminal service lane should open");
+
+        let mut connect_request = test_connect_request("v3-initial", 1);
+        connect_request.requested_width = 20;
+        connect_request.requested_height = 6;
+        connect_request.surface.columns = 20;
+        connect_request.surface.rows = 6;
+        connect_request.surface.panel_width = 240;
+        connect_request.surface.panel_height = 120;
+        let connected = client
+            .connect(connect_request)
+            .await
+            .expect("terminal session should connect");
+        let capabilities = client
+            .presentation_capabilities(TerminalPresentationCapabilitiesRequest {
+                session_id: connected.session_id.clone(),
+                client_sequence: 2,
+            })
+            .await
+            .expect("V3 capabilities should be available for the session");
+        assert_eq!(capabilities.default_transport_id, TRANSPORT_FULL_PNG);
+        assert_eq!(capabilities.modes, VoxTerminalService::presentation_modes());
+
+        let mut request = test_raster_request(RasterTransport::DirtyRawRgba);
+        request.session_id = connected.session_id.clone();
+        request.transport_generation = "generation-switch-17".to_string();
+        request.client_sequence = 3;
+        request.correlation_id = "v3-initial-01".to_string();
+        let (frame_tx, mut frame_rx) = vox::channel::<TerminalRasterFrameEvent>();
+        let subscription_client = client.clone();
+        let subscription = tokio::spawn(async move {
+            subscription_client
+                .subscribe_raster_frames(request, frame_tx)
+                .await
+        });
+
+        let initial = tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
+            .await
+            .expect("initial V3 frame should arrive without polling")
+            .expect("initial V3 frame receive should succeed")
+            .expect("initial V3 frame should be present");
+        let initial = own_raster_frame(initial);
+        assert_eq!(initial.transport_generation, "generation-switch-17");
+        assert_eq!(initial.renderer_id, RENDERER_ID);
+        assert_eq!(initial.damage_mode_id, DAMAGE_DIRTY);
+        assert_eq!(initial.transport_id, TRANSPORT_DIRTY_RAW_RGBA);
+        assert_eq!(initial.frame.kind, TerminalRasterFrameKind::Full);
+        assert_eq!(initial.frame.encoding, TerminalFrameEncoding::Rgba8);
+        assert_eq!(initial.base_frame_sequence, 0);
+        assert!(initial.frame_sequence > 0);
+        assert!(initial.full_resync);
+
+        client
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "V3 initial-frame test complete".to_string(),
+                client_sequence: 4,
+            })
+            .await
+            .expect("test session should disconnect");
+        tokio::time::timeout(Duration::from_secs(5), subscription)
+            .await
+            .expect("V3 subscription should stop with its session")
+            .expect("V3 subscription task should not panic")
+            .expect("V3 subscription should close cleanly");
+        connection.shutdown().ok();
+        server_guard.shutdown().ok();
     }
 
     #[tokio::test]

@@ -24,6 +24,8 @@ use teamy_terminal_core::TerminalSession;
 #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
 use teamy_terminal_core::TerminalSnapshot;
 #[cfg(feature = "dirty_rendering")]
+use teamy_terminal_font::damage_regions;
+#[cfg(all(test, feature = "dirty_rendering"))]
 use teamy_terminal_font::CellRect;
 use teamy_terminal_font::DEFAULT_PIXEL_SIZE;
 #[cfg(feature = "dirty_rendering")]
@@ -986,90 +988,6 @@ fn frame_stats(previous: Option<&TerminalSnapshot>, current: &TerminalSnapshot) 
     (changed_cells, cursor_changed)
 }
 
-#[cfg(feature = "dirty_rendering")]
-const MAX_DIRTY_RECTS: usize = 64;
-
-#[cfg(feature = "dirty_rendering")]
-fn damage_regions(
-    previous: Option<&TerminalSnapshot>,
-    current: &TerminalSnapshot,
-) -> (Vec<CellRect>, bool) {
-    let Some(previous) = previous else {
-        return (vec![CellRect::full(current.columns, current.rows)], true);
-    };
-    if previous.columns != current.columns || previous.rows != current.rows {
-        return (vec![CellRect::full(current.columns, current.rows)], true);
-    }
-    if previous.selection != current.selection {
-        return (vec![CellRect::full(current.columns, current.rows)], true);
-    }
-
-    let columns = usize::from(current.columns);
-    let rows = usize::from(current.rows);
-    let mut changed = vec![false; current.cells.len()];
-    for (index, (previous, current)) in previous.cells.iter().zip(&current.cells).enumerate() {
-        changed[index] = previous != current;
-    }
-    if previous.cursor_visible || current.cursor_visible {
-        mark_cursor_cell(&mut changed, current.columns, previous.cursor);
-        mark_cursor_cell(&mut changed, current.columns, current.cursor);
-    }
-    let changed_count = changed.iter().filter(|changed| **changed).count();
-    if changed_count == 0 {
-        return (Vec::new(), false);
-    }
-    if changed_count.saturating_mul(3) >= changed.len() {
-        return (vec![CellRect::full(current.columns, current.rows)], true);
-    }
-
-    let mut regions = Vec::new();
-    for row in 0..rows {
-        let row_start = row * columns;
-        let mut column = 0;
-        while column < columns {
-            while column < columns && !changed[row_start + column] {
-                column += 1;
-            }
-            if column == columns {
-                break;
-            }
-            let start = column;
-            while column < columns && changed[row_start + column] {
-                column += 1;
-            }
-            let end = column;
-            let expanded_start = start.saturating_sub(1);
-            let expanded_end = (end + 1).min(columns);
-            regions.push(CellRect::new(
-                u16::try_from(expanded_start).expect("terminal column fits in u16"),
-                u16::try_from(row).expect("terminal row fits in u16"),
-                u16::try_from(expanded_end - expanded_start)
-                    .expect("dirty rectangle width fits in u16"),
-                1,
-            ));
-            if regions.len() > MAX_DIRTY_RECTS {
-                return (vec![CellRect::full(current.columns, current.rows)], true);
-            }
-        }
-    }
-    (regions, false)
-}
-
-#[cfg(feature = "dirty_rendering")]
-fn mark_cursor_cell(
-    changed: &mut [bool],
-    columns: u16,
-    cursor: teamy_terminal_core::CursorPosition,
-) {
-    if cursor.column >= columns {
-        return;
-    }
-    let index = usize::from(cursor.row) * usize::from(columns) + usize::from(cursor.column);
-    if let Some(cell) = changed.get_mut(index) {
-        *cell = true;
-    }
-}
-
 fn terminal_input(
     event: &KeyEvent,
     modifiers: ModifiersState,
@@ -2008,15 +1926,15 @@ mod tests {
             8,
             2,
         );
-        terminal.process_bytes(b"\x1b[?25labcdefgh");
+        terminal.process_bytes("\x1b[?25lab界efgh".as_bytes());
         let previous = terminal.snapshot();
-        terminal.process_bytes(b"\x1b[1GZ");
+        terminal.process_bytes("\x1b[1;3H語".as_bytes());
         let current = terminal.snapshot();
 
         let (regions, full_refresh) = damage_regions(Some(&previous), &current);
 
         assert!(!full_refresh);
-        assert_eq!(regions, vec![CellRect::new(0, 0, 2, 1)]);
+        assert_eq!(regions, vec![CellRect::new(1, 0, 3, 1)]);
     }
 
     #[cfg(feature = "dirty_rendering")]

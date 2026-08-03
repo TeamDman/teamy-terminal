@@ -41,8 +41,17 @@ const FALLBACK_FONT_FAMILIES: &[&str] = &[
 
 /// The default embedded font size in physical pixels.
 pub const DEFAULT_PIXEL_SIZE: f32 = 16.0;
+/// Stable identity of the deterministic embedded primary face.
+pub const EMBEDDED_FONT_ID: &str = "CaskaydiaCoveNerdFontMono-Regular";
+/// SHA-256 of the embedded primary font bytes.
+pub const EMBEDDED_FONT_SHA256: &str =
+    "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea";
 /// Maximum rasterized glyphs retained by one size-specific renderer.
 pub const MAX_CACHED_GLYPHS: usize = 4_096;
+/// Maximum partial cell rectangles returned by one CPU damage plan.
+///
+/// Damage exceeding this bound is represented by one full-refresh rectangle.
+pub const MAX_DAMAGE_REGIONS: usize = 64;
 
 static SHARED_SYSTEM_FONT_CATALOG: OnceLock<Result<Arc<TerminalFontCatalog>, String>> =
     OnceLock::new();
@@ -95,6 +104,120 @@ impl CellRect {
             && u32::from(row) >= u32::from(self.row)
             && u32::from(column) < u32::from(self.column) + u32::from(self.columns)
             && u32::from(row) < u32::from(self.row) + u32::from(self.rows)
+    }
+}
+
+/// Compute bounded cell damage between two terminal snapshots.
+///
+/// The returned boolean is `true` when the complete visible grid must be
+/// refreshed. Partial regions are deterministic, ordered top-to-bottom then
+/// left-to-right, non-overlapping, and horizontally canonicalized after the
+/// one-cell expansion required for wide glyph and cursor safety. More than
+/// [`MAX_DAMAGE_REGIONS`] canonical regions falls back to one full refresh.
+#[must_use]
+pub fn damage_regions(
+    previous: Option<&TerminalSnapshot>,
+    current: &TerminalSnapshot,
+) -> (Vec<CellRect>, bool) {
+    let full_refresh = || (vec![CellRect::full(current.columns, current.rows)], true);
+    let Some(previous) = previous else {
+        return full_refresh();
+    };
+    if previous.columns != current.columns
+        || previous.rows != current.rows
+        || previous.cells.len() != current.cells.len()
+        || current.cells.len()
+            != usize::from(current.columns).saturating_mul(usize::from(current.rows))
+    {
+        return full_refresh();
+    }
+    if previous.selection != current.selection {
+        return full_refresh();
+    }
+
+    let columns = usize::from(current.columns);
+    let rows = usize::from(current.rows);
+    let mut changed = vec![false; current.cells.len()];
+    for (index, (previous, current)) in previous.cells.iter().zip(&current.cells).enumerate() {
+        changed[index] = previous != current;
+    }
+    if previous.cursor_visible || current.cursor_visible {
+        mark_cursor_cell(&mut changed, current.columns, previous.cursor);
+        mark_cursor_cell(&mut changed, current.columns, current.cursor);
+    }
+    let changed_count = changed.iter().filter(|changed| **changed).count();
+    if changed_count == 0 {
+        return (Vec::new(), false);
+    }
+    if changed_count.saturating_mul(3) >= changed.len() {
+        return full_refresh();
+    }
+
+    let mut regions: Vec<CellRect> = Vec::new();
+    for row in 0..rows {
+        let row_start = row * columns;
+        let mut column = 0;
+        while column < columns {
+            while column < columns && !changed[row_start + column] {
+                column += 1;
+            }
+            if column == columns {
+                break;
+            }
+            let start = column;
+            while column < columns && changed[row_start + column] {
+                column += 1;
+            }
+            let end = column;
+            let expanded_start = start.saturating_sub(1);
+            let expanded_end = (end + 1).min(columns);
+            push_canonical_row_region(
+                &mut regions,
+                CellRect::new(
+                    u16::try_from(expanded_start).expect("terminal column fits in u16"),
+                    u16::try_from(row).expect("terminal row fits in u16"),
+                    u16::try_from(expanded_end - expanded_start)
+                        .expect("dirty rectangle width fits in u16"),
+                    1,
+                ),
+            );
+            if regions.len() > MAX_DAMAGE_REGIONS {
+                return full_refresh();
+            }
+        }
+    }
+    (regions, false)
+}
+
+fn push_canonical_row_region(regions: &mut Vec<CellRect>, region: CellRect) {
+    if let Some(previous) = regions.last_mut()
+        && previous.row == region.row
+        && previous.rows == 1
+        && region.rows == 1
+    {
+        let previous_end = u32::from(previous.column) + u32::from(previous.columns);
+        let region_start = u32::from(region.column);
+        if region_start <= previous_end {
+            let merged_end = previous_end.max(region_start + u32::from(region.columns));
+            previous.columns = u16::try_from(merged_end - u32::from(previous.column))
+                .expect("canonical dirty rectangle width fits in u16");
+            return;
+        }
+    }
+    regions.push(region);
+}
+
+fn mark_cursor_cell(
+    changed: &mut [bool],
+    columns: u16,
+    cursor: teamy_terminal_core::CursorPosition,
+) {
+    if cursor.column >= columns {
+        return;
+    }
+    let index = usize::from(cursor.row) * usize::from(columns) + usize::from(cursor.column);
+    if let Some(cell) = changed.get_mut(index) {
+        *cell = true;
     }
 }
 
@@ -176,11 +299,13 @@ impl TerminalFontCatalog {
 
         let mut database = Database::new();
         database.load_system_fonts();
-        let mut fonts = Vec::new();
+        // The embedded, hashed face is always primary so a system-installed
+        // Caskaydia version cannot silently change reference pixels. Installed
+        // faces remain bounded fallbacks after the deterministic baseline.
+        let mut fonts = vec![embedded_face];
         if let Some(font) = load_system_font(&database, PRIMARY_FONT_FAMILY) {
             fonts.push(font);
         }
-        fonts.push(embedded_face);
         fonts.extend(
             FALLBACK_FONT_FAMILIES
                 .iter()
@@ -857,8 +982,23 @@ fn rounded_i32(value: f32, fallback: i32) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use teamy_terminal_core::CursorPosition;
+    use teamy_terminal_core::PromptMetadata;
     use teamy_terminal_core::TerminalLimits;
     use teamy_terminal_core::TerminalSession;
+
+    fn blank_snapshot(columns: u16, rows: u16) -> TerminalSnapshot {
+        TerminalSnapshot {
+            columns,
+            rows,
+            cursor: CursorPosition::default(),
+            cursor_visible: false,
+            cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
+            scrollback_rows: 0,
+            selection: None,
+            prompt: PromptMetadata::default(),
+        }
+    }
 
     #[test]
     fn embedded_font_has_monospace_metrics_and_renders_pixels() {
@@ -951,6 +1091,60 @@ mod tests {
     }
 
     #[test]
+    fn damage_regions_use_full_refresh_at_the_changed_cell_threshold() {
+        let previous = blank_snapshot(6, 1);
+        let mut current = previous.clone();
+        current.cells[1].character = 'A';
+        current.cells[4].character = 'B';
+
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+
+        assert!(full_refresh);
+        assert_eq!(regions, vec![CellRect::full(6, 1)]);
+    }
+
+    #[test]
+    fn damage_regions_fall_back_when_the_canonical_region_bound_is_exceeded() {
+        let previous = blank_snapshot(4, 65);
+        let mut current = previous.clone();
+        for row in 0..65_usize {
+            current.cells[row * 4].character = 'X';
+        }
+
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+
+        assert!(full_refresh);
+        assert_eq!(regions, vec![CellRect::full(4, 65)]);
+    }
+
+    #[test]
+    fn damage_regions_are_canonical_ordered_and_non_overlapping() {
+        let previous = blank_snapshot(10, 2);
+        let mut current = previous.clone();
+        current.cells[1].character = 'A';
+        current.cells[4].character = 'B';
+        current.cells[18].character = 'C';
+
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+
+        assert!(!full_refresh);
+        assert_eq!(
+            regions,
+            vec![CellRect::new(0, 0, 6, 1), CellRect::new(7, 1, 3, 1)]
+        );
+        for pair in regions.windows(2) {
+            let previous = pair[0];
+            let current = pair[1];
+            assert!(
+                previous.row < current.row
+                    || (previous.row == current.row
+                        && u32::from(previous.column) + u32::from(previous.columns)
+                            < u32::from(current.column))
+            );
+        }
+    }
+
+    #[test]
     fn dirty_cell_render_matches_a_full_render() {
         let mut font = TerminalFont::embedded().expect("embedded font should parse");
         let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 1);
@@ -961,7 +1155,9 @@ mod tests {
         terminal.process_bytes(b"\rZ");
         let second = terminal.snapshot();
         let expected = font.render(&second, 64, 32);
-        font.render_cells(&second, &mut cached, &[CellRect::new(0, 0, 2, 1)]);
+        let (regions, full_refresh) = damage_regions(Some(&first), &second);
+        assert!(!full_refresh);
+        font.render_cells(&second, &mut cached, &regions);
 
         assert_eq!(cached, expected);
     }
