@@ -1,0 +1,88 @@
+{
+  "schema": "teamy-terminal.rust-cpu-raster-transports.v1",
+  "captured_at": "2026-08-03",
+  "revision": "008cc64",
+  "renderer_id": "rust-cpu-fontdue",
+  "contract_version": 1,
+  "command_template": "teamy-terminal.exe render-fixture --transport <transport> --output target\\transport-evidence\\3.6.3\\<artifact> --manifest target\\transport-evidence\\3.6.3\\<transport>.manifest.json",
+  "fixture": {
+    "logical_columns": 40,
+    "logical_rows": 12,
+    "width": 400,
+    "height": 228,
+    "frame_stride": 1600,
+    "origin": "top-left",
+    "alpha_mode": "straight",
+    "color_space": "srgb",
+    "font_id": "CaskaydiaCoveNerdFontMono-Regular",
+    "font_sha256": "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea",
+    "font_pixel_size_milli": 16000,
+    "cell_width": 10,
+    "cell_height": 19,
+    "process_font_catalog_loads": 1,
+    "cache_hits": {
+      "after_base_render": 23,
+      "after_dirty_render": 28,
+      "after_direct_full_render": 71
+    }
+  },
+  "composition_proof": {
+    "base_sequence": 1,
+    "dirty_sequence": 2,
+    "base_rgba_fnv1a64": "910a99445f957881",
+    "dirty_payload_fnv1a64": "a549d1f912b8c32a",
+    "direct_full_rgba_fnv1a64": "7baf134396475c74",
+    "composed_rgba_fnv1a64": "7baf134396475c74",
+    "exact_equivalence": true
+  },
+  "transports": [
+    {
+      "transport_id": "full-png",
+      "damage_mode": "full",
+      "encoding": "png",
+      "sequence": 2,
+      "base_sequence": 0,
+      "wire_stride": 0,
+      "payload_bytes": 6374,
+      "payload_fnv1a64": "5c57fa3b056fca06",
+      "region_count": 0,
+      "exact_equivalence": true
+    },
+    {
+      "transport_id": "full-raw-rgba",
+      "damage_mode": "full",
+      "encoding": "rgba8",
+      "sequence": 2,
+      "base_sequence": 0,
+      "wire_stride": 1600,
+      "payload_bytes": 364800,
+      "payload_fnv1a64": "7baf134396475c74",
+      "region_count": 0,
+      "exact_equivalence": true
+    },
+    {
+      "transport_id": "dirty-raw-rgba",
+      "damage_mode": "dirty",
+      "encoding": "rgba8",
+      "sequence": 2,
+      "base_sequence": 1,
+      "wire_stride": 0,
+      "payload_bytes": 6080,
+      "payload_fnv1a64": "a549d1f912b8c32a",
+      "region_count": 1,
+      "exact_equivalence": true
+    }
+  ],
+  "validation": {
+    "result": "passed",
+    "commands": [
+      "cargo test -p teamy-terminal-core",
+      "cargo test -p teamy-terminal-frame -p teamy-terminal-font -p teamy-terminal-cli"
+    ],
+    "notes": [
+      "The full and dirty paths compose to the same direct full-frame hash.",
+      "PNG carries no raw row stride; full RGBA8 carries the frame stride; dirty RGBA8 carries per-region strides.",
+      "Font catalog and glyph caches remain warm across the base, dirty, and direct-full renders."
+    ]
+  }
+}

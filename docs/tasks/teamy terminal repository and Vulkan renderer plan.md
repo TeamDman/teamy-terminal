@@ -21,13 +21,15 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** 3.6.2b is complete: the retained CPU/full-PNG baseline now uses
-bounded Vox `Tx`/`Rx` push delivery with no steady snapshot poller. Proceed to
-3.6.3 by preserving and naming the CPU reference renderer/transport variants
-before comparing GPU/slug and Java rendering candidates. Keep renderer and
-transport selection independent, retain the completed correlated witness, and
-do not infer that GPU glyph work wins until readback, encoding, transport, Java
-upload, scheduling, and presentation are measured end to end.
+**Next slice:** 3.6.3 is complete: `rust-cpu-fontdue` now exposes independently
+named `full-png`, `full-raw-rgba`, and `dirty-raw-rgba` transports over bounded
+Vox push subscriptions, with exact headless composition proof and normal/
+GUI-scale-7 SFM evidence. The next Teamy Terminal implementation item is 3.6.4,
+extracting Teamy Studio's slug algorithm behind a true `rust-gpu-slug` backend.
+SFM may pursue its independent V-4.2b semantic-cell contract in parallel. Do
+not choose a default renderer or transport until the later visual and temporal
+matrix measures readback, encoding, transport, Java upload, scheduling, and
+presentation end to end.
 
 Do not assume that CPU `fontdue` rasterization is the dominant bridged cost
 merely because it is a plausible hypothesis: the Rust glyph pass,
@@ -1466,7 +1468,45 @@ mutation-to-send sample is 4,321 microseconds. Machine-readable evidence is
 checked into SFM as
 `docs/architecture/evidence/vox-terminal-push-delivery-1.19.2.json`.
 
-### [ ] 3.6.3 Preserve and parameterize the Rust CPU reference paths
+### [x] 3.6.3 Preserve and parameterize the Rust CPU reference paths
+
+**Completion notes — 2026-08-03:** `rust-cpu-fontdue` remains the explicit CPU
+renderer while `full-png`, `full-raw-rgba`, and `dirty-raw-rgba` are stable,
+independently negotiated transport ids. Commits `0d9d10d`, `8722dda`, and
+`a4be3d6` add the versioned bounded raster contract, canonical dirty regions,
+fresh-generation/full-resync switching, retained size/glyph/frame resources,
+dedicated Vox raster service lanes, and PNG wire stride 0. Commit `008cc64`
+aligns the headless manifest with the wire stride contract and restores real
+Figue command-path fuzz coverage; its Ctrl+C oracle distinguishes the typed
+prompt from an output line equal to the range sentinel.
+
+The headless fixture at
+`docs/evidence/rust-cpu-raster-transports-3.6.3.json` records a 400×228,
+40×12 Caskaydia frame. Full raw is 364,800 bytes, the one-region dirty update
+is 6,080 bytes, and composing base sequence 1 plus dirty sequence 2 exactly
+matches the direct sequence-2 framebuffer hash `7baf134396475c74`. The font
+catalog loads once and glyph-cache hits increase from 23 to 28 to 71 across
+base, dirty, and direct-full renders. Full PNG reports no raw wire stride,
+full raw reports 1600, and dirty raw carries stride on its ordered region.
+
+Facet/Vox commit `71fc22e9d` supplies lane-scoped schema bindings and safe
+sibling-lane lifecycle; SFM commit `3a4255860` consumes the typed contract.
+The normal run `sfm-title_screen-20260803-182559-878` and GUI-scale-7 run
+`sfm-title_screen-20260803-182901-119` pass all three transport switches plus
+independent left/right panels. Each switch accepts a fresh full resync, all
+reported rejected-frame counts are zero, the one stale frame is from the
+intentionally retired generation, and queue depth never exceeds one. Their
+run-local manifests preserve captioned screenshots, terminal text, and push
+telemetry; SFM checks in the aggregate evidence as
+`docs/architecture/evidence/vox-terminal-raster-transports-1.19.2.json`.
+
+Validation passed with `cargo test -p teamy-terminal-core` (15 tests) and
+`cargo test -p teamy-terminal-frame -p teamy-terminal-font -p
+teamy-terminal-cli` (CLI 36 unit tests plus integration/fuzz/PTY/replay/version,
+font 11, frame 6). Repository-wide stable `rustfmt --check` still reports an
+untouched import-order difference in `cli/global_args.rs` and cannot resolve an
+unrelated missing Facet `vixen-primitives/src/leaf_overrides.rs`; the changed
+files and `git diff --check` are clean.
 
 **Work:** Retain `rust-cpu-fontdue` as the explicit renderer identity, with
 `full` and `dirty` raster/damage modes kept separate from transport selection.
