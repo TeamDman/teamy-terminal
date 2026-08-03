@@ -21,10 +21,9 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** Reproduce the current user-perceived multi-second SFM terminal
-delay with a machine-readable end-to-end witness, complete 3.5.6's native-size
-contract, and then run Phase 3.6's renderer comparison work in parallel with
-the remaining Phase 4 integration. Do not assume that CPU `fontdue`
+**Next slice:** Use the completed current-path witness and native-size contract
+as the baseline for Phase 3.6's renderer comparison work in parallel with the
+remaining Phase 4 integration. Do not assume that CPU `fontdue`
 rasterization is the dominant bridged cost merely because it is a plausible
 hypothesis: the Rust glyph pass, PNG/readback/encoding, Vox transfer, Java PNG
 decode, Minecraft texture allocation/upload, render-thread scheduling, and
@@ -1127,7 +1126,7 @@ next implementation slice should evaluate the swapchain/persistent-target
 design before attempting further partial-upload changes, while retaining the
 current CPU dirty-rendering result as the default interactive optimization.
 
-### [~] 3.5.6 Couple external frame size to logical cells and font metrics
+### [x] 3.5.6 Couple external frame size to logical cells and font metrics
 
 **Work:** Extend the portable frame/bridge contract so an SFM panel provides
 logical dimensions and terminal cell metrics, and the Rust renderer selects a
@@ -1148,14 +1147,19 @@ prove that font size, not post-render bitmap stretching, is responding to the
 available panel size; the logical-size contract is documented and covered by
 focused tests; and no GPU/slug implementation is required to pass this gate.
 
-**Progress notes — 2026-08-02:** The initial contract slice is implemented in
-Facet/Vox commit `bb0807657`: a panel carries logical columns/rows and physical
-panel dimensions, Rust derives native frame/cell/font metrics from that target,
-and the Java PNG presenter refuses to enlarge a smaller frame. The canonical
-SFM compile and 17 focused terminal Java tests pass against the refreshed
-artifact. The remaining part of this item is live visual validation at normal
-scale and GUI scale 7, including the stretched-frame negative control; no
-GPU/slug work is required for that validation.
+**Completion notes — 2026-08-02:** Facet/Vox commit `b59d4a1a6` carries the
+logical grid, physical panel target, cell metrics, font pixel size, and snapshot
+timings through the generated contract; Teamy Terminal commit `cc1409a`
+populates those fields on the CPU/full-PNG path. The normal-scale SFM puppet
+passed with native `425×238` frames, while the supported high-scale run at
+`3840×2130@7` reached effective GUI scale 7 and produced crisp native frames
+with `547×303` panel metrics, `91×27` logical cells, and `7×13` cells. The
+`1280×720@7` probe is intentionally recorded as a clamp diagnostic because
+Minecraft limits that viewport to GUI scale 3; the high-scale screenshot path
+does not rely on stretching a smaller PNG. The 4K full puppet later exceeded
+the harness action budget during its final capture, but the scale-7 terminal
+captures and metadata completed before that timeout. No GPU/slug work is
+required for this gate.
 
 ## Phase 3.6 — Cross-renderer evidence laboratory and GPU text path [ ]
 
@@ -1176,7 +1180,7 @@ readback, PNG encoding, transfer, Java decoding, or texture upload, while a
 Java semantic-cell renderer may save bandwidth but spend more time in
 Minecraft font/layout calls. Measure the complete path and every major stage.
 
-### [~] 3.6.1 Capture the perceived multi-second bridge delay
+### [x] 3.6.1 Capture the perceived multi-second bridge delay
 
 **Work:** Add a cross-process correlation id and terminal/frame sequence to the
 current Rust CPU full-PNG path. Record the local monotonic timestamps or
@@ -1211,26 +1215,26 @@ so.
 durations that account for the visible delay. No backend is promoted and no
 GPU performance claim is accepted before this witness exists.
 
-**Progress notes — 2026-08-02:** Teamy Terminal commit `8c45304` now emits a
-bounded machine-readable `SFM_TERMINAL_TIMING_WITNESS` from the real PowerShell
-Vox puppet. The reproducible command
-`cargo test -p teamy-terminal-cli --lib vox_server --offline -j 1 -- --nocapture`
-produced request sequence 5 / server sequence 142 at a 1200×760 panel with
-120×40 logical cells: `total_us=2853889`, `font_load_us=2278390`,
-`raster_us=136599`, `png_encode_us=393669`, `pty_drain_us=512`,
-`terminal_snapshot_us=5`, and `payload_bytes=27706`. This computationally
-reproduces the perceived multi-second range and identifies cold font loading as
-the dominant measured Rust stage in this sample; it is evidence, not yet an
-optimization decision.
-
-The SFM side now propagates the same request/correlation vocabulary through
-polling, native frame metadata, PNG decode, dynamic-texture allocation and
-registration, upload, presentation, stale/drop/coalesce counters, and bounded
-Java timing logs. The canonical SFM compile and focused terminal test run pass
-with Vox hash `blake3:400629d4488f9544ff098e47c9478ba799f4171e`. The Java live
-panel capture that joins the Rust stage log to decode/upload/present numbers is
-still outstanding, so this item remains partial; clocks are never subtracted
-across processes.
+**Completion notes — 2026-08-02:** Teamy Terminal commit `cc1409a` emits the
+snapshot timing fields from the real PowerShell Vox server, and the refreshed
+Facet/Vox artifact is Facet commit `b59d4a1a6` with SFM lock hash
+`blake3:d5c94d8fd6fad6671d5f7597180aadea4b7fec10`. The focused Rust witness
+measured the cold `1200×760 / 120×40` sample at `2,853,889 µs`, including
+`font_load_us=2,278,390`, `raster_us=136,599`, and
+`png_encode_us=393,669`. A clean headless SFM puppet then passed at normal
+scale with correlated `SFM_VOX_TERMINAL_TIMING` and
+`SFM_TERMINAL_PRESENTATION_TIMING` records. The live records show warm Rust
+totals around `0.75–1.1 s`, font loading around `0.7–1.0 s`, raster/encode in
+the low-millisecond range, Java PNG decode in sub-millisecond samples, Java
+texture allocation/registration also sub-millisecond, and Java render/present
+work in the low-millisecond range. Java wait/poll time is recorded separately;
+no unsynchronized Rust/Java clocks are subtracted. The machine-readable
+content witnesses and screenshots are under
+`platform/minecraft/runGameTestPreview/terminal-content/` and
+`platform/minecraft/runGameTestPreview/screenshots/`, with the full correlated
+console log at `platform/minecraft/build/sfm-toolchain/run/runGameTestPreview/console.log`.
+This closes the current-path lag gate without selecting a renderer or claiming
+that all future workload/transport matrix samples are complete.
 
 ### [~] 3.6.2 Freeze renderer-neutral snapshot, request, and result contracts
 
@@ -1262,11 +1266,12 @@ results can share one fixture identity and one semantic correctness oracle
 without sharing application-specific renderer objects.
 
 **Progress notes — 2026-08-02:** The initial reviewed contract is implemented
-and generated in Facet/Vox commit `bb0807657`. It adds bounded
+and generated in Facet/Vox commit `b59d4a1a6`. It adds bounded
 `TerminalSurfaceMetrics`, explicit backend/transport identifiers, request and
-frame correlation IDs, native frame dimensions/cell/font metrics, and Java
-compatibility constructors for newly defaulted fields. Facet protocol tests,
-Java conformance/smoke/package tests, and the SFM compile pass. The broader
+frame correlation IDs, native frame dimensions/cell/font metrics, snapshot
+timing metadata, and Java compatibility constructors for newly defaulted
+fields. Facet protocol tests, Java conformance/smoke/package tests, the SFM
+compile, and the live CPU/full-PNG bridge proof pass. The broader
 multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
 remain intentionally open; this initial slice does not claim those renderers.
 
