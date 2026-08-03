@@ -21,15 +21,19 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next slice:** 3.6.3 is complete: `rust-cpu-fontdue` now exposes independently
-named `full-png`, `full-raw-rgba`, and `dirty-raw-rgba` transports over bounded
-Vox push subscriptions, with exact headless composition proof and normal/
-GUI-scale-7 SFM evidence. The next Teamy Terminal implementation item is 3.6.4,
-extracting Teamy Studio's slug algorithm behind a true `rust-gpu-slug` backend.
-SFM may pursue its independent V-4.2b semantic-cell contract in parallel. Do
-not choose a default renderer or transport until the later visual and temporal
-matrix measures readback, encoding, transport, Java upload, scheduling, and
-presentation end to end.
+**Next goal-sized vertical slice:** complete 3.6.2c and 3.6.4a–3.6.4e here,
+plus SFM V-4.2c in the bridge plan. The resulting user-visible slice must let
+two Rust-terminal panels independently select `rust-cpu-fontdue` or
+`rust-gpu-slug` and any advertised compatible pixel transport, preserve the
+same PTY while switching, and render the GPU choice through the real Vox/SFM
+path. `teamy-terminal serve` must also render `rust-gpu-slug` into a true
+no-window Vulkan image: no winit window, Vulkan surface, swapchain, taskbar
+entry, or desktop automation is allowed in that proof. CPU/fontdue remains the
+initial default and correctness reference. V-4.2b semantic cells and the Java
+font comparators are independent later work and are not prerequisites for this
+slice. Do not choose the eventual default renderer or transport until the
+later visual and temporal matrix measures readback, encoding, transfer, Java
+upload, scheduling, and presentation end to end.
 
 Do not assume that CPU `fontdue` rasterization is the dominant bridged cost
 merely because it is a plausible hypothesis: the Rust glyph pass,
@@ -76,14 +80,20 @@ from Rust as soon as terminal state changes. Triple Esc closes the hosted panel
 and triple Tab returns the event to Minecraft's normal focus traversal; both
 sequences use a 1.5-second window and single/double presses remain terminal
 input.
-**Automation rendering decision:** `--hidden` is the supported near-term
-background mode. It still creates a native winit window, Vulkan surface, and
-swapchain so the production renderer path remains identical, but the window is
-not presented or registered in the taskbar until `invoke show`. This is not
-true headless GPU/Vulkan rendering: `VulkanRenderer` still requires a window
-surface, while `OffscreenFrame` and the `fontdue` terminal rasterization path
-are CPU-visible deterministic seams. A future no-window Vulkan device/image
-renderer remains a separate post-MVP slice.
+**Automation rendering decision:** `--hidden` remains the windowed parity and
+interactive-lifecycle mode. It creates a native winit window, Vulkan surface,
+and swapchain but does not present or register a taskbar entry until `invoke
+show`; it must not be called headless. The next vertical slice adds a second,
+required `rust-gpu-slug` execution mode for `serve`: a Vulkan device, command
+queue, offscreen image, and bounded readback path that creates no window,
+surface, or swapchain. The existing `OffscreenFrame` name describes a
+CPU-visible portable frame wrapper and must not be mistaken for this GPU
+target; use an explicit abstraction such as `VulkanOffscreenContext` and
+`VulkanOffscreenTarget`. On supported Windows/Vulkan systems this is an
+acceptance requirement, not a conditional stretch goal. When Vulkan is
+unavailable, advertise `rust-gpu-slug` as unavailable with an actionable
+reason and keep CPU/core tests usable; never silently substitute CPU output
+for a requested GPU renderer.
 The `send-keys` grammar is intentionally explicit: every token is
 `down:<key>`, `up:<key>`, or `wait:<milliseconds>`. There are no implicit
 chords, delays, or text/numeric-key reinterpretations; the action keywords are
@@ -1256,7 +1266,7 @@ style, wide-cell occupancy, and damage calculation in the renderer-free core.
 Define a bounded render request containing session/sequence, logical
 columns/rows, physical pixel extent, requested cell/font metrics, font
 selection, complete-versus-damage state, cursor/selection overlays, and cache
-invalidation reason. Define a render result containing backend identity,
+invalidation reason. Define a render result containing renderer identity,
 native pixel dimensions, cell metrics, full-frame/dirty-region metadata,
 optional portable pixels or renderer-owned presentation data, visual hash,
 and bounded stage statistics.
@@ -1267,6 +1277,16 @@ inverse, width/continuation cells, cursor shape/location, selection, damage,
 sequence, and full-refresh semantics. Renderer and transport selection must
 be explicit in CLI/configuration and artifact manifests so changing one does
 not silently change the other.
+
+`renderer_id` names the final component that turns authoritative semantic
+terminal cells into pixels, regardless of process. Each renderer capability
+also carries non-selectable `rasterization_owner` metadata with the closed
+values `server` (Teamy Terminal/Rust rasterizes before Vox) or `client` (the
+consumer, currently SFM/Java, rasterizes after Vox). This is routing and
+observability metadata, not a third user-controlled axis. Pixel transports are
+valid only with server-owned renderers; semantic-cell transport is valid only
+with client-owned renderers. The Java texture uploader/blitter used for Rust
+pixels is a presenter/sink, not another renderer.
 
 **Validation:** The same deterministic snapshots and damage sequences are
 accepted by multiple test backends. Bounds, stale/out-of-order sequences,
@@ -1287,6 +1307,64 @@ fields. Facet protocol tests, Java conformance/smoke/package tests, the SFM
 compile, and the live CPU/full-PNG bridge proof pass. The broader
 multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
 remain intentionally open; this initial slice does not claim those renderers.
+
+### [ ] 3.6.2c Make renderer and transport an atomic presentation contract
+
+**Work:** Finish the pixel-raster portion of 3.6.2 before adding the second
+renderer. A presentation is one validated tuple of `renderer_id`,
+`damage_mode_id`, `transport_id`, and `transport_version`; renderer and
+transport remain independent axes, but a subscription selects the whole tuple
+atomically. Capabilities enumerate only valid tuples. A request that combines
+individually known but incompatible values is rejected and leaves the active
+presentation unchanged.
+
+Migrate the current Facet/Vox raster schema before it becomes a published
+compatibility burden:
+
+- add `default_renderer_id` beside `default_transport_id` in
+  `TerminalPresentationCapabilitiesResult`;
+- add the closed `rasterization_owner` value to each renderer/presentation
+  capability and generated binding, rejecting unknown values rather than
+  inferring ownership from `rust-`/`java-` id prefixes;
+- rename `transport_generation` to `presentation_generation` in the raster
+  subscribe request and frame event because either axis can retire a stream;
+- keep `renderer_id` as the canonical identity in raster requests, events,
+  capability modes, telemetry, and artifacts; `backend_id` is legacy snapshot
+  vocabulary only and must not leak into the new selection model; and
+- perform an explicit protocol/schema-version migration and regenerate both
+  Rust and Java bindings rather than carrying two ambiguous generation names.
+
+Use the isolated Facet/Vox integration worktree, record its starting revision
+(planning observed `71fc22e9d`), run the generated Rust/Java round-trip and
+lane-lifecycle gates, publish or otherwise make the reviewed Facet commit
+immutable, then repin the SFM toolchain lock to the exact produced artifact and
+hash. Do not modify Cloud Terrastodon. Do not construct a font, renderer,
+Vulkan device, or Vox connection while enumerating capabilities; capability
+data is a bounded cached value produced by server startup/background probing.
+
+**Lifecycle contract:** Each selection request combines the newly requested
+axis with the panel's currently requested value on the other axis and starts
+one fresh `presentation_generation`. The first accepted event in that
+generation is a complete resynchronization frame carrying the exact tuple.
+Events from every retired generation are stale even if their terminal/frame
+sequence is numerically newer. Requested and active tuples remain distinct
+until that frame is accepted. Unsupported tuples or initialization failures
+keep the previous active tuple and last accepted frame visible and report an
+explicit reason; there is no implicit fallback.
+
+**Validation:** Add schema round trips for both renderers and all three pixel
+transports, default identities, server/client rasterization-owner values,
+unknown-owner rejection, unsupported tuples, generation retirement, stale
+events, full-resync requirements, and independent sibling lanes. Verify that
+generated Java and Rust names contain `presentation_generation` only in the
+new raster API and that the SFM dependency migration/check commands accept the
+repinned artifact. This GPU slice advertises only server-owned Rust renderers;
+V-4.2b later defines the semantic source contract that SFM combines with its
+locally available client-owned Java renderers.
+
+**Completion criteria:** The generated contract can negotiate and switch CPU
+and GPU raster presentations without conflating renderer with transport, and
+one generation token unambiguously guards every renderer/transport change.
 
 ### [x] 3.6.2a Retain reusable font, glyph, frame, and encoding resources
 
@@ -1386,7 +1464,7 @@ creates the channel pair, passes `Tx` to the server call, and consumes the
 paired `Rx`; the Rust handler owns the bound `Tx` and sends toward Java. The
 event carries session/connection epoch, monotonically increasing terminal and
 frame sequences, correlation id, full-versus-damage metadata, negotiated
-bounds/backend/transport, frame payload, and local stage timings. The initial
+bounds/renderer/transport, frame payload, and local stage timings. The initial
 event after subscribe/re-subscribe is a complete latest-state frame. Raw Vox
 channels are request-scoped rather than durable: disconnect closes the call,
 reconnect opens a fresh subscription, and Rust sends a full resynchronization
@@ -1524,7 +1602,8 @@ improvement.
 The subscription contract must expose stable transport ids and capabilities so
 an SFM terminal panel can select its desired transport independently of other
 terminal panels. A selection change keeps the Rust terminal session/PTY alive,
-creates a fresh transport generation, and begins with a complete
+creates a fresh presentation generation (the 3.6.2c migration replaces the
+historical transport-only name), and begins with a complete
 resynchronization frame in the selected encoding. Frames from the retired
 generation are stale even if their numeric sequence is higher. Distinguish the
 requested transport from the transport proven active by an accepted frame;
@@ -1541,45 +1620,234 @@ old-generation frames, and leaves another panel's independently selected
 subscription unchanged.
 
 **Completion criteria:** The CPU reference can be run headlessly and through
-the real bridge with stable backend/transport names, comparable manifests,
+the real bridge with stable renderer/transport names, comparable manifests,
 and no accidental bitmap scaling.
 
-### [ ] 3.6.4 Extract Teamy Studio's slug algorithm into a true GPU backend
+### [ ] 3.6.4 Deliver the no-window `rust-gpu-slug` vertical slice
 
-**Work:** Audit the current Teamy Studio slug implementation and copy only the
-font geometry/coverage, shader, atlas/buffer, and test concepts needed behind
-the renderer-neutral request. Record source revision and file provenance.
-Exclude Teamy Studio application/window models and unrelated DirectX, CUDA,
-Burn, PyTorch, or UI dependencies. The new backend must generate glyph
-coverage/compositing on the GPU; Vulkan presentation of CPU-fontdue RGBA bytes
-does not satisfy this item.
+This parent item is complete only when 3.6.4a–3.6.4e are all complete. The
+slice is deliberately end to end: a standalone fixture and an isolated shader
+test are necessary but insufficient. The backend must be selectable through
+`teamy-terminal serve`, produce every portable pixel transport promised by its
+capabilities, and be consumable by the real SFM panel without opening a native
+Teamy Terminal window. The backend must generate glyph coverage and composite
+terminal visuals on the GPU; uploading RGBA pixels already rasterized by
+`fontdue` does not qualify as `rust-gpu-slug`.
 
-The planning audit found the current reference at Teamy Studio revision
-`c827d78c4b60b64348a82db9c7a961c01c8d0701`: the implementation and CPU
-oracles live in
-`crates/teamy_studio_shell/src/windows_d3d12_renderer.rs`, with design and
-known band/glyph regressions in `docs/notes/slug-font-renderer.md` and
-`docs/notes/text-rendering-glyphy-band-contract-plan.md`. Re-record the exact
-revision used when extraction begins rather than assuming this planning pin
-remains current.
+#### [ ] 3.6.4a Freeze provenance and correct the slug coverage contract
 
-Support damage, glyph caching, colors/styles, cursor/selection, wide cells,
-resize, font-size changes, and deterministic readback. Add a true no-window
-Vulkan device/image path for automated rendering if the platform supports it;
-retain `--hidden` production-window execution as a separate comparison rather
-than calling it headless. Because SFM cannot assume cross-process native GPU
-handle sharing, measure GPU readback, encoding, and portable transfer costs
-independently. Native-handle interop remains an optional later experiment.
+**Source boundary:** At implementation start, record the exact Teamy Studio
+revision, dirty-state caveat, source files, relevant function names, font
+identity/hash, and license provenance in a Teamy Terminal design note. The
+planning reference is Teamy Studio revision
+`c827d78c4b60b64348a82db9c7a961c01c8d0701`, primarily
+`crates/teamy_studio_shell/src/windows_d3d12_renderer.rs`,
+`docs/notes/slug-font-renderer.md`, and
+`docs/notes/text-rendering-glyphy-band-contract-plan.md`. Teamy Studio is a
+read-only reference for this goal: do not repair it, import its application or
+window model, or bring in DirectX, CUDA, Burn, PyTorch, or unrelated UI code.
 
-**Validation:** CPU/fontdue and GPU/slug consume the same fixtures. GPU
-readback artifacts are bounded and repeatable enough for visual comparison;
-shader/geometry tests include the known difficult glyphs and band-contract
-regressions documented by Teamy Studio. Missing Vulkan produces an actionable
-skip/diagnostic without invalidating CPU/core tests.
+**Correctness boundary:** Do not blindly port the reference's known-broken
+single-list band pruning. Implement the documented glyphy-style directional
+band contract in Teamy Terminal:
 
-**Completion criteria:** A selectable `rust-gpu-slug` backend renders terminal
-glyphs on Vulkan, produces native-sized visible artifacts, and reports raster,
-GPU execution/readback, encode, and transfer stages separately.
+- each horizontal/vertical band header carries curve count, descending-list
+  offset, ascending-list offset, and a split value;
+- descending lists are ordered by the relevant curve maximum, ascending lists
+  by the relevant minimum, and split selection minimizes the worse ray count;
+- the CPU oracle and GPU shader choose ray direction per sample, use the
+  corresponding early-exit predicate, and apply symmetric left/right coverage
+  accumulation; and
+- flat and transformed/reference fixtures share this coverage contract rather
+  than hiding defects behind transformed-only heuristics.
+
+Extract only the reusable outline-to-quadratic geometry, directional band
+construction, all-curves CPU oracle, and fixture ideas. Keep Caskaydia Cove
+Nerd Font Mono's exact embedded bytes as the primary identity and define
+fallback/missing-glyph behavior explicitly. Unit tests cover malformed curves,
+empty glyphs, flat segments, cubic-to-quadratic approximation where present,
+band bounds/offset overflow, and banded-versus-all-curve parity. Regression
+artifacts cover at least `g`, `/`, `b`, `r`, `6`, ASCII prompt text, box/
+Powerline characters, wide/combining Unicode, and fallback/missing glyphs. The
+old internal false-line artifact on `g` must have a direct machine-readable
+regression rather than only a broad screenshot.
+
+**Shader toolchain decision:** Port the production coverage/compositing shader
+to repository-owned WGSL and use a pinned `naga` build dependency to validate
+it and emit SPIR-V at build time. Embed those build outputs in the renderer.
+Runtime shader compilation, an installed DXC/shaderc executable, network
+downloads, and unchecked hand-edited SPIR-V are outside the contract. Build
+tests validate entry points, descriptor/buffer layouts, generated SPIR-V, and
+the source-to-artifact identity.
+
+**Completion criteria:** Teamy Terminal owns a documented, tested directional
+slug data contract and independent CPU oracle whose difficult-glyph artifacts
+no longer reproduce the known structural band defect. No Teamy Studio file was
+changed.
+
+#### [ ] 3.6.4b Add a retained true no-window Vulkan runtime
+
+Create an explicit no-window runtime (for example
+`VulkanOffscreenContext`) containing the Vulkan entry/instance, selected
+physical device, logical device, queue, command pool, descriptor/pipeline
+layouts, shader modules, and reusable synchronization/pipeline state. It must
+not require a winit `Window`, raw window/display handles, `ash-window`, a
+surface extension, or a swapchain. Keep the existing windowed
+`VulkanRenderer` and `--hidden` behavior intact as a separate parity path; do
+not overload the CPU-visible `OffscreenFrame` wrapper with GPU-device meaning.
+
+Retain one process-level context for `serve`, not one per frame, subscription,
+or terminal session. Give each render/session independent output state while
+sharing immutable/thread-safe device and shader resources. Use bounded caches
+for glyph geometry/bands and per-size offscreen color targets, staging/
+readback buffers, descriptors, and command resources. Cache keys include exact
+font/fallback identity, renderer id, effective size/metrics, format, and device
+identity. Same-size frames reuse allocations; A→B→A reuses A while it remains
+inside the documented bound. Destruction, eviction, replacement, and process
+shutdown wait only where required and free every Vulkan resource exactly once.
+Do not hold the global terminal-session registry lock while recording,
+submitting, waiting for, or reading back GPU work.
+
+Probe GPU capability once at server startup or through one bounded cached
+background initialization, never from SFM candidate enumeration, panel render,
+or each subscription. Record physical-device/driver/API/queue/format/limit
+facts needed to explain availability. Unsupported loader/device/features,
+allocation failure, timeout, and device loss produce typed actionable errors.
+Device loss retires affected GPU presentation generations and refreshes cached
+capability state; it does not kill CPU sessions or silently render their next
+frame on CPU.
+
+**Validation:** Focused tests prove no surface/swapchain extensions are needed,
+same-size and A→B→A reuse, bounded eviction, independent sessions, exact close
+counts, cancellation while work is in flight, startup failure, and simulated
+device loss. A Windows integration test starts `teamy-terminal serve`, renders
+a GPU frame, and uses typed Windows APIs to assert the server owns no top-level
+HWND/taskbar window during the proof. Missing Vulkan yields an explicit
+unavailable result/skip for GPU-only tests while CPU/core gates still run.
+
+**Completion criteria:** A long-lived `serve` process can repeatedly render and
+read back native-sized GPU images without ever creating a native window,
+surface, or swapchain and without recreating device/size resources per frame.
+
+#### [ ] 3.6.4c Implement the retained `rust-gpu-slug` renderer
+
+Implement `rust-gpu-slug` behind the renderer-neutral request/result boundary.
+The renderer consumes the same authoritative cells, damage, logical grid,
+physical target, requested cell/font metrics, font identity, cursor, and
+selection as `rust-cpu-fontdue`. GPU passes must cover background and glyph
+composition, ANSI/default/RGB colors, bold, underline, inverse, cursor shapes,
+selection, wide/continuation cells, combining characters, fallback/missing
+glyphs, clipping, scroll/alternate-screen content, resize, and forced full
+refresh. Preserve native panel sizing at normal and GUI scale 7; Java must not
+stretch a smaller raster.
+
+Retain font parsing and immutable outline/band data separately from size- and
+target-specific GPU state. Avoid rebuilding unchanged glyph geometry or
+uploading unchanged curve/band buffers. Full refresh may redraw the complete
+target. Damage requests use bounded scissor/region work and read back only the
+canonical changed regions needed by `dirty-raw-rgba`; the direct full frame and
+base-plus-dirty composition must agree semantically and geometrically. PNG and
+full raw are encoded from deterministic RGBA8 readback with the same origin,
+alpha, stride, bounds, frame/base sequence, and ordering rules as the CPU path.
+
+Add bounded telemetry for outline extraction, directional-band construction,
+geometry/cache hits/misses/evictions, upload bytes, command recording, queue
+submission, GPU completion, readback/map/copy, dirty/full composition, PNG/raw
+packing, and total renderer time. Label CPU submission and measured GPU
+completion separately. Preserve correlation, session, terminal/frame
+sequence, and presentation-generation fields through every result.
+
+Instrument the same stages with stable Tracy-visible spans using the existing
+`tracy` and `extended_observability` feature split and the repository's
+`add-tracy-spans` guidance. Keep coarse per-frame stages available for normal
+diagnostics, gate hot geometry/glyph/region detail behind
+`extended_observability`, never create a span per terminal cell, and avoid
+dynamic span names/fields that fragment aggregate statistics. Emit one bounded
+frame marker for completed GPU raster/readback work. Default builds must not
+link the Tracy layer.
+
+**Validation:** Both renderers consume one fixture identity and semantic
+oracle. Exact pixels are required for deterministic repeat runs of the same
+backend and for direct-full versus composed-dirty output from that backend;
+CPU-versus-GPU antialiasing need not be byte-identical. Cross-renderer checks
+assert dimensions/cell metrics, glyph occupancy, colors/styles, cursor/
+selection, wide/combining/fallback behavior, no known slug artifacts, and a
+bounded perceptual difference. Cold/warm manifests prove retained geometry,
+GPU targets, and readback storage rather than per-frame reconstruction.
+
+**Completion criteria:** `rust-gpu-slug` truthfully performs glyph coverage and
+terminal compositing on Vulkan, supports native full and dirty portable raster
+results, and exposes enough evidence to distinguish geometry, GPU execution,
+readback, packing, and transfer costs.
+
+#### [ ] 3.6.4d Integrate the renderer registry, Vox service, and switching lifecycle
+
+Register stable renderer ids `rust-cpu-fontdue` and `rust-gpu-slug` separately
+from `full-png`, `full-raw-rgba`, and `dirty-raw-rgba`. Advertise the valid
+presentation tuples from 3.6.2c and preserve CPU/full-PNG as the initial
+default. On a Vulkan-capable server, all six Rust renderer × pixel-transport
+tuples are expected; any deliberately unsupported tuple must be omitted with a
+specific reason and must not be substituted. GPU unavailability is cached and
+reported without removing the CPU tuples.
+
+`teamy-terminal serve` uses the no-window GPU context from 3.6.4b. A renderer
+switch keeps the PTY, terminal/session sequences, input stream, scrollback,
+and last accepted frame alive. It creates one fresh
+`presentation_generation`, produces a complete first frame for the requested
+renderer/transport tuple, and retires the old generation only through the
+defined handoff. CPU→GPU→CPU must not restart the shell or lose prompt/input/
+alternate-screen state. Failed GPU initialization or rendering keeps the old
+active presentation and last accepted frame, exposes requested-versus-active
+state plus the error, and performs no silent fallback. Two subscriptions or
+panels may independently choose CPU and GPU while sharing only safe bounded
+process resources.
+
+Extend run-local evidence with renderer/device/font/transport identities,
+presentation generation, cache state, native metrics, stage timing, queue/
+coalescing/credit counters, bytes read back/encoded/sent, and failure/fallback
+fields. Renderer work follows the existing one-in-flight plus one-newest-
+pending push bound; it adds no polling/debounce/minimum frame interval and does
+not block unrelated sessions on a global lock.
+
+**Completion criteria:** The real Vox service advertises, selects, streams,
+switches, and retires CPU/GPU presentation tuples correctly while preserving
+the Rust-authoritative terminal session and bounded push semantics.
+
+#### [ ] 3.6.4e Prove the complete Rust GPU slice before SFM integration sign-off
+
+Produce one durable headless evidence bundle containing source/toolchain/
+device revisions, exact font hash, fixture ids, screenshots/PNGs, terminal
+content witnesses, visual/semantic comparisons, cold/warm resource counters,
+push telemetry, and stage timings. Exercise:
+
+1. CPU and GPU renderers against the same difficult-glyph and terminal-state
+   fixtures, including ANSI/style, cursor/selection, wide/combining/fallback,
+   scroll, alternate screen, resize, and full refresh;
+2. `rust-gpu-slug` over `full-png`, `full-raw-rgba`, and
+   `dirty-raw-rgba`, including exact same-backend full-versus-dirty composition;
+3. a no-window `serve` process, no HWND/taskbar presence, output pushed after
+   subscription without another request, flood coalescing, and bounded credit;
+4. CPU→GPU→CPU switching with one preserved PowerShell session and a second
+   independent session using the other renderer; and
+5. actionable Vulkan-unavailable/device-loss behavior with no CPU regression
+   and no hidden fallback.
+
+Run focused core/font/frame/renderer/CLI/Vox tests plus the repository's
+documented quality gates. A GPU-specific gate may report an actionable skip on
+a machine with no usable Vulkan implementation, but the goal itself is not
+complete until the no-window Vulkan proof passes on a supported Windows/Vulkan
+machine. Run one bounded release capture through Teamy Profiler with
+`extended_observability,tracy`, inspect/export the top spans, and correlate its
+GPU stages with the portable manifest without treating unsynchronized Rust and
+Java clocks as one timeline. Record exact commands and artifact locations in
+completion notes; raw `.tracy` data remains local unless intentionally reviewed
+for retention.
+
+**Completion criteria:** Teamy Terminal can truthfully offer a retained,
+no-window `rust-gpu-slug` renderer through all supported portable pixel
+transports, with deterministic correctness evidence, bounded resources,
+complete lifecycle semantics, and timings suitable for the later CPU/GPU/Java
+decision. This item does not claim GPU is faster or make it the default.
 
 ### [ ] 3.6.5 Produce visual comparisons across every renderer/font pair
 
@@ -1655,21 +1923,28 @@ canonical plan or generated Vox output concurrently.
 | P1a — retained CPU resources | completed 3.6.1 witness | teamy-terminal font/frame/CPU session state | 3.6.2a retained face/size/glyph/frame/encode caches and warm witness |
 | P1b — Rust push producer | reviewed P5 channel contract; may prototype behind Rust-only tests earlier | teamy-terminal PTY/session/publication path | 3.6.2b immediate latest-state producer with bounded coalescing/backpressure |
 | P1c — Rust CPU/transport baselines | P1a/P1b integrated | teamy-terminal font/frame/CPU paths | 3.6.3 full/dirty PNG/raw evidence |
-| P2 — Rust GPU/slug | P0 render-request draft | isolated Teamy Studio audit and teamy-terminal Vulkan/slug backend | 3.6.4 GPU fixtures and timings |
+| P2a — slug provenance/oracle | immediately; Teamy Studio remains read-only | Teamy Terminal geometry/band note, CPU oracle, difficult-glyph fixtures | 3.6.4a corrected directional contract and source pin |
+| P2b — no-window Vulkan runtime | immediately against a trivial clear/readback shader | teamy-terminal-renderer device/target/resource lifecycle only | 3.6.4b retained context, no-HWND proof, failure seams |
+| P2c — GPU slug backend | P2a data contract plus P2b context interfaces | Teamy Terminal WGSL/SPIR-V, glyph buffers, raster/readback backend | 3.6.4c full/dirty fixtures and stage timings |
+| P2d — GPU Vox integration | reviewed 3.6.2c schema plus P2c backend | Teamy Terminal renderer registry, capabilities, session/subscription handoff | 3.6.4d service and lifecycle tests |
 | P3 — Java vanilla renderer | P0 semantic snapshot draft | canonical-oldest SFM Java panel backend | vanilla-font artifacts and Java timings |
 | P4 — Java Caskaydia renderer | font identity and licensing frozen | SFM resources/font adapter, separate from P3 where practical | same-font Java artifacts and metrics |
 | P5 — Vox channel and cell/damage transport | immediately for Java `Tx`/`Rx`; P0 semantic draft for cells/damage | isolated Facet/Vox runtime/codegen/contract worktree plus generated Java/Rust fixtures | credit-controlled Java channels, terminal frame subscription, then bounded semantic-cell capability |
+| P5c — presentation contract migration | immediately; one integration owner only | isolated Facet/Vox schema/codegen plus SFM lock pin | 3.6.2c default renderer, presentation generation, tuple round trips |
 | P5b — SFM push consumer and retained texture | reviewed/generated P5 frame subscription; texture work may start against a fake receiver | canonical-oldest SFM terminal service/presenter | no frame poller, latest-only Rx consumption, stable-dimension texture reuse, reconnect/full-resync proof |
 | P6 — report and visual-diff tooling | fixture ids and manifest schema frozen | renderer-independent artifact/report tooling | HTML/JSON matrix, diffs, and comparison summaries |
 
-P1a, the Facet Java-channel portion of P5, and P6 may start concurrently.
-P1b and P5b integrate only after the reviewed generated subscription contract;
-P2–P4 may continue in isolated work after their shared request/snapshot seams
-are frozen. Integration imports immutable commits/artifacts from each track. P3/P4 must
-follow SFM's oldest-branch-first rule and must not propagate until the selected
-canonical implementation is accepted. P5 must not modify Cloud Terrastodon.
-The final matrix and default decision in 3.6.6 are integration work and remain
-sequential after the candidate evidence is available.
+For the next goal, P2a, P2b, P5c, and SFM's Java model/UI work against fake
+capabilities may proceed concurrently in isolated worktrees. P2c waits for the
+P2a data layout and P2b runtime interfaces. P2d waits for the reviewed,
+generated P5c contract and P2c backend. The final Teamy 3.6.4e/SFM V-4.2c live
+matrix is a single integration gate after those imports. One integration owner
+edits canonical plans, generated Vox outputs, and lockfiles; no agent may use
+Teamy Studio as a writable implementation branch or modify Cloud Terrastodon.
+All integration imports immutable commits/artifacts. P3/P4 must follow SFM's
+oldest-branch-first rule and must not propagate until the selected canonical
+implementation is accepted. The full V-4.5/3.6.5 visual matrix and V-4.6/3.6.6
+default decision remain later sequential integration work.
 
 ## Phase 4 — Optional SFM integration [ ]
 
@@ -1875,7 +2150,7 @@ overwritten by baseline code.
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
-| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG correctness, native-size, and correlated lag baselines proven | retained resources plus Vox push subscription, then Phase 3.6/V-4 renderer matrix | Input/lifecycle/full-PNG/native-size puppets pass; per-frame font reconstruction and 50 ms Java polling are the next repairs before comparative renderer evidence |
+| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG/raw/dirty correctness, native sizing, retained resources, push delivery, and correlated lag baseline proven | Phase 3.6.2c/3.6.4 plus SFM V-4.2c renderer matrix | CPU transport puppets pass; next proof is true no-window GPU slug across the same transports with panel-local renderer selection |
 
 ## Overall completion criteria
 
