@@ -41,8 +41,9 @@ use teamy_terminal_frame::{
 };
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
 use teamy_terminal_renderer::{
-    GpuSlugRenderIdentity, GpuSlugRenderRequest, GpuSlugRenderer, GpuSlugRendererError,
-    GpuSlugRuntime, VulkanOffscreenContext, VulkanOffscreenError,
+    GpuSlugCacheStats, GpuSlugRenderIdentity, GpuSlugRenderRequest, GpuSlugRenderStats,
+    GpuSlugRenderer, GpuSlugRendererError, GpuSlugRuntime, VulkanOffscreenCancellation,
+    VulkanOffscreenContext, VulkanOffscreenError,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use vox_terminal as vox;
@@ -327,6 +328,12 @@ enum GpuRendererState {
     Unavailable(CachedGpuError),
 }
 
+#[derive(Clone, Debug)]
+enum GpuCapabilitySnapshot {
+    Available,
+    Unavailable(CachedGpuError),
+}
+
 struct GpuRendererRegistry {
     state: Mutex<GpuRendererState>,
 }
@@ -386,40 +393,51 @@ impl GpuRendererRegistry {
         }
     }
 
-    fn is_available(&self) -> bool {
-        self.state
-            .lock()
-            .is_ok_and(|state| matches!(*state, GpuRendererState::Available(_)))
-    }
-
-    fn unavailable_error(&self, server_sequence: i64) -> Option<TerminalError> {
-        let state = self.state.lock().ok()?;
-        match &*state {
-            GpuRendererState::Available(_) => None,
-            GpuRendererState::Unavailable(error) => Some(TerminalError {
-                code: error.code,
-                message: error.message.clone(),
-                retryable: error.retryable,
+    fn capability_snapshot(
+        &self,
+        server_sequence: i64,
+    ) -> Result<GpuCapabilitySnapshot, TerminalError> {
+        let state = self.state.lock().map_err(|_| {
+            VoxTerminalService::error(
+                TerminalErrorCode::Internal,
+                "GPU terminal renderer registry lock poisoned",
                 server_sequence,
-            }),
-        }
+            )
+        })?;
+        Ok(match &*state {
+            GpuRendererState::Available(_) => GpuCapabilitySnapshot::Available,
+            GpuRendererState::Unavailable(error) => {
+                GpuCapabilitySnapshot::Unavailable(error.clone())
+            }
+        })
     }
 
-    fn retire_on_device_loss(&self, error: &eyre::Report) {
+    fn retire_on_device_loss(
+        &self,
+        error: &eyre::Report,
+        server_sequence: i64,
+    ) -> Option<TerminalError> {
         let Some(GpuSlugRendererError::Vulkan(VulkanOffscreenError::DeviceLost { operation })) =
             error.downcast_ref::<GpuSlugRendererError>()
         else {
-            return;
+            return None;
+        };
+        let cached = CachedGpuError {
+            code: TerminalErrorCode::UnsupportedCapability,
+            message: format!(
+                "{GPU_RENDERER_ID} unavailable after Vulkan device loss during {operation}; restart the server after repairing the GPU/driver"
+            ),
+            retryable: false,
         };
         if let Ok(mut state) = self.state.lock() {
-            *state = GpuRendererState::Unavailable(CachedGpuError {
-                code: TerminalErrorCode::UnsupportedCapability,
-                message: format!(
-                    "{GPU_RENDERER_ID} unavailable after Vulkan device loss during {operation}; restart the server after repairing the GPU/driver"
-                ),
-                retryable: false,
-            });
+            *state = GpuRendererState::Unavailable(cached.clone());
         }
+        Some(TerminalError {
+            code: cached.code,
+            message: cached.message,
+            retryable: cached.retryable,
+            server_sequence,
+        })
     }
 }
 
@@ -541,6 +559,7 @@ struct TerminalSessionRuntime {
     publication: PublicationHub,
     explicit_render_resources: Mutex<Option<TerminalRenderResources>>,
     raster_render_resources: Mutex<Vec<TerminalRenderResources>>,
+    raster_render_cancellations: Mutex<BTreeMap<u64, VulkanOffscreenCancellation>>,
     raster_render_permits: Arc<Semaphore>,
     actor_sender: SyncSender<SessionActorMessage>,
     terminal_sequence: AtomicI64,
@@ -621,6 +640,12 @@ impl TerminalSessionRuntime {
         }
         self.raster_render_permits.close();
         self.publication.close();
+        if let Ok(mut cancellations) = self.raster_render_cancellations.lock() {
+            for cancellation in cancellations.values() {
+                cancellation.cancel();
+            }
+            cancellations.clear();
+        }
         let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
         if let Ok(state) = self.state.lock() {
             let _ = state.pty.kill();
@@ -665,6 +690,12 @@ impl Drop for TerminalRenderResourceLease {
 impl Drop for TerminalSessionRuntime {
     fn drop(&mut self) {
         self.publication.close();
+        if let Ok(cancellations) = self.raster_render_cancellations.get_mut() {
+            for cancellation in cancellations.values() {
+                cancellation.cancel();
+            }
+            cancellations.clear();
+        }
         let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
     }
 }
@@ -672,12 +703,19 @@ impl Drop for TerminalSessionRuntime {
 struct SubscriptionGuard {
     runtime: Weak<TerminalSessionRuntime>,
     subscriber_id: u64,
+    cancellation: Option<VulkanOffscreenCancellation>,
 }
 
 impl Drop for SubscriptionGuard {
     fn drop(&mut self) {
+        if let Some(cancellation) = &self.cancellation {
+            cancellation.cancel();
+        }
         if let Some(runtime) = self.runtime.upgrade() {
             runtime.publication.unregister(self.subscriber_id);
+            if let Ok(mut cancellations) = runtime.raster_render_cancellations.lock() {
+                cancellations.remove(&self.subscriber_id);
+            }
         }
     }
 }
@@ -958,6 +996,7 @@ impl TerminalRenderResources {
         force_full: bool,
         max_regions: u16,
         gpu_identity: GpuSlugRenderIdentity,
+        gpu_cancellation: Option<&VulkanOffscreenCancellation>,
     ) -> Result<Option<RenderedRasterUpdate>> {
         match presentation.renderer {
             RasterRenderer::CpuFontdue => self.render_cpu_raster_update(
@@ -982,6 +1021,7 @@ impl TerminalRenderResources {
                 force_full,
                 max_regions,
                 gpu_identity,
+                gpu_cancellation,
             ),
         }
     }
@@ -1139,6 +1179,7 @@ impl TerminalRenderResources {
             raster_micros,
             png_encode_micros,
             payload_pack_micros,
+            gpu_evidence: None,
         }))
     }
 
@@ -1158,6 +1199,7 @@ impl TerminalRenderResources {
         force_full: bool,
         max_regions: u16,
         gpu_identity: GpuSlugRenderIdentity,
+        gpu_cancellation: Option<&VulkanOffscreenCancellation>,
     ) -> Result<Option<RenderedRasterUpdate>> {
         let runtime = self
             .gpu_runtime
@@ -1204,11 +1246,17 @@ impl TerminalRenderResources {
             force_full_refresh: render_full,
             identity: gpu_identity,
             timeout: Duration::from_secs(5),
-            cancellation: None,
+            cancellation: gpu_cancellation,
         };
         let rendered = self.ensure_gpu_renderer()?.render(request)?;
         self.gpu_surface = Some((width, height));
-        let render_stats = rendered.stats;
+        let gpu_evidence = GpuRasterEvidence {
+            identity: rendered.identity.clone(),
+            visual_hash: rendered.visual_hash,
+            stats: rendered.stats,
+            cache: rendered.cache,
+        };
+        let render_stats = gpu_evidence.stats;
 
         let encode_started = Instant::now();
         let update = if render_full && transport == RasterTransport::FullPng {
@@ -1293,6 +1341,7 @@ impl TerminalRenderResources {
             raster_micros: render_stats.total_us,
             png_encode_micros,
             payload_pack_micros,
+            gpu_evidence: Some(gpu_evidence),
         }))
     }
 }
@@ -1455,6 +1504,15 @@ struct RenderedRasterUpdate {
     raster_micros: u64,
     png_encode_micros: u64,
     payload_pack_micros: u64,
+    gpu_evidence: Option<GpuRasterEvidence>,
+}
+
+#[derive(Clone, Debug)]
+struct GpuRasterEvidence {
+    identity: GpuSlugRenderIdentity,
+    visual_hash: Option<u64>,
+    stats: GpuSlugRenderStats,
+    cache: GpuSlugCacheStats,
 }
 
 struct CapturedTerminal {
@@ -1661,9 +1719,9 @@ impl VoxTerminalService {
         }
     }
 
-    fn presentation_modes(&self) -> Vec<TerminalPresentationMode> {
+    fn presentation_modes(gpu_available: bool) -> Vec<TerminalPresentationMode> {
         let mut renderers = vec![RasterRenderer::CpuFontdue];
-        if self.gpu_registry.is_available() {
+        if gpu_available {
             renderers.push(RasterRenderer::GpuSlug);
         }
         let transports = [
@@ -1698,10 +1756,9 @@ impl VoxTerminalService {
     }
 
     fn unavailable_presentations(
-        &self,
-        server_sequence: i64,
+        error: Option<TerminalError>,
     ) -> Vec<TerminalPresentationUnavailable> {
-        let Some(error) = self.gpu_registry.unavailable_error(server_sequence) else {
+        let Some(error) = error else {
             return Vec::new();
         };
         [
@@ -1721,6 +1778,34 @@ impl VoxTerminalService {
         .collect()
     }
 
+    fn presentation_capability_sets(
+        &self,
+        server_sequence: i64,
+    ) -> Result<
+        (
+            Vec<TerminalPresentationMode>,
+            Vec<TerminalPresentationUnavailable>,
+        ),
+        TerminalError,
+    > {
+        let snapshot = self.gpu_registry.capability_snapshot(server_sequence)?;
+        Ok(match snapshot {
+            GpuCapabilitySnapshot::Available => (Self::presentation_modes(true), Vec::new()),
+            GpuCapabilitySnapshot::Unavailable(error) => {
+                let error = TerminalError {
+                    code: error.code,
+                    message: error.message,
+                    retryable: error.retryable,
+                    server_sequence,
+                };
+                (
+                    Self::presentation_modes(false),
+                    Self::unavailable_presentations(Some(error)),
+                )
+            }
+        })
+    }
+
     fn next_sequence(sequence: &mut i64) -> i64 {
         *sequence = sequence.saturating_add(1).max(1);
         *sequence
@@ -1736,6 +1821,104 @@ impl VoxTerminalService {
             ),
             server_sequence: sequence,
         }
+    }
+
+    fn raster_render_error(&self, error: &eyre::Report, server_sequence: i64) -> TerminalError {
+        if let Some(device_lost) = self
+            .gpu_registry
+            .retire_on_device_loss(error, server_sequence)
+        {
+            return device_lost;
+        }
+        let code = if matches!(
+            error.downcast_ref::<GpuSlugRendererError>(),
+            Some(GpuSlugRendererError::Vulkan(
+                VulkanOffscreenError::Cancelled
+            ))
+        ) {
+            TerminalErrorCode::Cancelled
+        } else {
+            TerminalErrorCode::Internal
+        };
+        Self::error(code, error.to_string(), server_sequence)
+    }
+
+    fn validate_and_record_gpu_evidence(
+        rendered: &RenderedRasterUpdate,
+        presentation: RasterPresentation,
+        request: &TerminalRasterSubscribeRequest,
+        runtime: &TerminalSessionRuntime,
+        terminal_sequence: i64,
+        frame_sequence: i64,
+    ) -> Result<(), TerminalError> {
+        let Some(evidence) = &rendered.gpu_evidence else {
+            if presentation.renderer == RasterRenderer::GpuSlug {
+                return Err(Self::error(
+                    TerminalErrorCode::Internal,
+                    "GPU raster result omitted renderer evidence",
+                    terminal_sequence,
+                ));
+            }
+            return Ok(());
+        };
+        let expected_terminal_sequence =
+            u64::try_from(terminal_sequence).unwrap_or(u64::MAX);
+        let expected_frame_sequence = u64::try_from(frame_sequence).unwrap_or(u64::MAX);
+        if evidence.identity.session_sequence != runtime.session_sequence
+            || evidence.identity.terminal_sequence != expected_terminal_sequence
+            || evidence.identity.frame_sequence != expected_frame_sequence
+            || evidence.identity.presentation_generation != request.presentation_generation
+            || evidence.identity.correlation_id != request.correlation_id
+        {
+            return Err(Self::error(
+                TerminalErrorCode::Internal,
+                format!(
+                    "GPU raster result identity mismatch: expected session={} terminal={} frame={} generation={} correlation={}, got {:?}",
+                    runtime.session_sequence,
+                    expected_terminal_sequence,
+                    expected_frame_sequence,
+                    request.presentation_generation,
+                    request.correlation_id,
+                    evidence.identity
+                ),
+                terminal_sequence,
+            ));
+        }
+        tracing::info!(
+            target: "teamy_terminal::vox_gpu_raster",
+            renderer_id = GPU_RENDERER_ID,
+            transport_id = presentation.transport.transport_id(),
+            session_sequence = evidence.identity.session_sequence,
+            terminal_sequence = evidence.identity.terminal_sequence,
+            frame_sequence = evidence.identity.frame_sequence,
+            presentation_generation = evidence.identity.presentation_generation,
+            correlation_id = evidence.identity.correlation_id,
+            visual_hash = ?evidence.visual_hash,
+            geometry_build_us = evidence.stats.geometry_build_us,
+            outline_extraction_us = evidence.stats.outline_extraction_us,
+            directional_band_build_us = evidence.stats.directional_band_build_us,
+            upload_bytes = evidence.stats.upload_bytes,
+            upload_us = evidence.stats.upload_us,
+            command_record_us = evidence.stats.command_record_us,
+            queue_submit_us = evidence.stats.queue_submit_us,
+            gpu_completion_wait_us = evidence.stats.gpu_completion_wait_us,
+            readback_map_copy_us = evidence.stats.readback_map_copy_us,
+            payload_pack_us = evidence.stats.payload_pack_us,
+            full_rgba_pack_us = ?evidence.stats.full_rgba_pack_us,
+            dirty_region_pack_us = ?evidence.stats.dirty_region_pack_us,
+            requested_pixels = evidence.stats.requested_pixels,
+            target_allocation_id = evidence.stats.target_allocation_id,
+            geometry_hits = evidence.cache.geometry_hits,
+            geometry_misses = evidence.cache.geometry_misses,
+            geometry_evictions = evidence.cache.geometry_evictions,
+            retained_glyphs = evidence.cache.retained_glyphs,
+            buffer_allocations = evidence.cache.buffer_allocations,
+            target_allocations = evidence.cache.targets.allocations,
+            target_reuses = evidence.cache.targets.reuses,
+            target_evictions = evidence.cache.targets.evictions,
+            "validated correlated GPU raster evidence before Vox publication"
+        );
+        Ok(())
     }
 
     fn validate_dimensions(width: u16, height: u16) -> Result<(), TerminalError> {
@@ -2196,6 +2379,7 @@ impl Terminal for VoxTerminalService {
             raster_render_resources: Mutex::new(Vec::with_capacity(
                 MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION,
             )),
+            raster_render_cancellations: Mutex::new(BTreeMap::new()),
             raster_render_permits: Arc::new(Semaphore::new(
                 MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION,
             )),
@@ -2243,12 +2427,14 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalPresentationCapabilitiesResult, TerminalError> {
         let session = self.session(&request.session_id)?;
         let session = Self::lock_session(&session)?;
+        let (modes, unavailable_presentations) =
+            self.presentation_capability_sets(session.sequence)?;
         Ok(TerminalPresentationCapabilitiesResult {
             session_id: request.session_id,
             default_renderer_id: CPU_RENDERER_ID.to_string(),
             default_transport_id: TRANSPORT_FULL_PNG.to_string(),
-            modes: self.presentation_modes(),
-            unavailable_presentations: self.unavailable_presentations(session.sequence),
+            modes,
+            unavailable_presentations,
             server_sequence: session.sequence,
         })
     }
@@ -2687,6 +2873,7 @@ impl Terminal for VoxTerminalService {
         let _subscription = SubscriptionGuard {
             runtime: Arc::downgrade(&runtime),
             subscriber_id,
+            cancellation: None,
         };
         if runtime.closed.load(Ordering::Acquire) {
             return Err(Self::error(
@@ -2860,10 +3047,23 @@ impl Terminal for VoxTerminalService {
         let max_frame_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
         let max_regions = request.max_regions.min(MAX_DIRTY_REGIONS as u16);
         let (subscriber_id, mut signals) = runtime.publication.register(runtime.sequence());
+        let render_cancellation = VulkanOffscreenCancellation::default();
         let _subscription = SubscriptionGuard {
             runtime: Arc::downgrade(&runtime),
             subscriber_id,
+            cancellation: Some(render_cancellation.clone()),
         };
+        runtime
+            .raster_render_cancellations
+            .lock()
+            .map_err(|_| {
+                Self::error(
+                    TerminalErrorCode::Internal,
+                    "terminal raster cancellation registry lock poisoned",
+                    runtime.sequence(),
+                )
+            })?
+            .insert(subscriber_id, render_cancellation.clone());
         if runtime.closed.load(Ordering::Acquire) {
             return Err(Self::error(
                 TerminalErrorCode::Disconnected,
@@ -2927,6 +3127,7 @@ impl Terminal for VoxTerminalService {
             };
             let render_started = Instant::now();
             let mut resources = resource_lease.take();
+            let worker_cancellation = render_cancellation.clone();
             let render = tokio::task::spawn_blocking(move || {
                 let result = resources.render_raster_update(
                     &capture.snapshot,
@@ -2939,6 +3140,7 @@ impl Terminal for VoxTerminalService {
                     force_full,
                     max_regions,
                     gpu_identity,
+                    Some(&worker_cancellation),
                 );
                 (resources, capture, result)
             })
@@ -2952,16 +3154,9 @@ impl Terminal for VoxTerminalService {
             })?;
             resource_lease.replace(render.0);
             let capture = render.1;
-            if let Err(error) = &render.2 {
-                self.gpu_registry.retire_on_device_loss(error);
-            }
-            let Some(rendered) = render.2.map_err(|error| {
-                Self::error(
-                    TerminalErrorCode::Internal,
-                    error.to_string(),
-                    capture.terminal_sequence,
-                )
-            })?
+            let Some(rendered) = render
+                .2
+                .map_err(|error| self.raster_render_error(&error, capture.terminal_sequence))?
             else {
                 last_terminal_sequence = capture.terminal_sequence;
                 last_mutations = capture.mutations;
@@ -2970,6 +3165,14 @@ impl Terminal for VoxTerminalService {
                 continue;
             };
             counters.renders_completed = counters.renders_completed.saturating_add(1);
+            Self::validate_and_record_gpu_evidence(
+                &rendered,
+                presentation,
+                &request,
+                &runtime,
+                capture.terminal_sequence,
+                next_frame_sequence,
+            )?;
             if rendered.update.bytes.len() > max_frame_bytes as usize {
                 return Err(Self::error(
                     TerminalErrorCode::CapacityExceeded,
@@ -3325,7 +3528,9 @@ mod tests {
     fn raster_capabilities_and_requests_use_stable_exact_combinations() {
         let unavailable_message = "rust-gpu-slug unavailable in deterministic test fixture";
         let service = service_with_unavailable_gpu(unavailable_message);
-        let modes = service.presentation_modes();
+        let (modes, unavailable) = service
+            .presentation_capability_sets(17)
+            .expect("deterministic capability snapshot");
         assert_eq!(modes.len(), 3);
         assert_eq!(modes[0].transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(modes[1].transport_id, TRANSPORT_FULL_RAW_RGBA);
@@ -3368,7 +3573,6 @@ mod tests {
         assert_eq!(error.message, unavailable_message);
         assert_eq!(error.server_sequence, 17);
 
-        let unavailable = service.unavailable_presentations(17);
         assert_eq!(unavailable.len(), 3);
         assert!(unavailable.iter().all(|mode| {
             mode.renderer_id == GPU_RENDERER_ID
@@ -3382,7 +3586,9 @@ mod tests {
     #[test]
     fn process_gpu_capability_is_six_valid_modes_or_three_exact_negatives() {
         let service = VoxTerminalService::new();
-        let modes = service.presentation_modes();
+        let (modes, unavailable) = service
+            .presentation_capability_sets(23)
+            .expect("process capability snapshot");
         let cpu_modes = modes
             .iter()
             .filter(|mode| mode.renderer_id == CPU_RENDERER_ID)
@@ -3393,14 +3599,13 @@ mod tests {
             .count();
         assert_eq!(cpu_modes, 3);
 
-        if service.gpu_registry.is_available() {
+        if unavailable.is_empty() {
             assert_eq!(modes.len(), 6);
             assert_eq!(gpu_modes, 3);
-            assert!(service.unavailable_presentations(23).is_empty());
+            assert!(unavailable.is_empty());
         } else {
             assert_eq!(modes.len(), 3);
             assert_eq!(gpu_modes, 0);
-            let unavailable = service.unavailable_presentations(23);
             assert_eq!(unavailable.len(), 3);
             assert!(unavailable.iter().all(|mode| {
                 mode.renderer_id == GPU_RENDERER_ID
@@ -3412,10 +3617,41 @@ mod tests {
     }
 
     #[test]
+    fn first_device_loss_uses_the_same_typed_error_as_later_capabilities() {
+        let service = service_with_unavailable_gpu("fixture before simulated device loss");
+        let report = eyre::Report::new(GpuSlugRendererError::Vulkan(
+            VulkanOffscreenError::DeviceLost {
+                operation: "test dispatch",
+            },
+        ));
+
+        let first = service.raster_render_error(&report, 41);
+        assert_eq!(first.code, TerminalErrorCode::UnsupportedCapability);
+        assert!(!first.retryable);
+        assert_eq!(first.server_sequence, 41);
+        assert!(first.message.contains("device loss during test dispatch"));
+
+        let (modes, unavailable) = service
+            .presentation_capability_sets(42)
+            .expect("post-loss capability snapshot");
+        assert_eq!(modes.len(), 3);
+        assert_eq!(unavailable.len(), 3);
+        assert!(unavailable.iter().all(|mode| {
+            mode.error.code == first.code
+                && mode.error.message == first.message
+                && mode.error.retryable == first.retryable
+                && mode.error.server_sequence == 42
+        }));
+    }
+
+    #[test]
     fn gpu_slug_bridge_emits_all_transports_and_exact_dirty_composition_when_available() {
         let service = VoxTerminalService::new();
         let Ok(runtime) = service.gpu_registry.runtime(31) else {
-            assert_eq!(service.unavailable_presentations(31).len(), 3);
+            let (_, unavailable) = service
+                .presentation_capability_sets(31)
+                .expect("unavailable process capability snapshot");
+            assert_eq!(unavailable.len(), 3);
             return;
         };
         let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 3);
@@ -3447,6 +3683,7 @@ mod tests {
                     true,
                     MAX_DIRTY_REGIONS as u16,
                     test_gpu_identity(frame_sequence),
+                    None,
                 )
                 .expect("GPU presentation should render")
                 .expect("forced GPU presentation should emit a frame");
@@ -3457,6 +3694,13 @@ mod tests {
             assert!(rendered.cell_width > 0);
             assert!(rendered.cell_height > 0);
             assert!(rendered.font_pixel_size > 0);
+            let evidence = rendered
+                .gpu_evidence
+                .as_ref()
+                .expect("GPU render must preserve evidence through the bridge adapter");
+            assert_eq!(evidence.identity, test_gpu_identity(frame_sequence));
+            assert!(evidence.stats.requested_pixels > 0);
+            assert!(evidence.stats.target_allocation_id > 0);
             assert_eq!(rendered.update.descriptor.kind, RasterUpdateKind::Full);
             match transport {
                 RasterTransport::FullPng => {
@@ -3504,6 +3748,7 @@ mod tests {
                 true,
                 MAX_DIRTY_REGIONS as u16,
                 test_gpu_identity(40),
+                None,
             )
             .expect("initial GPU dirty-mode render")
             .expect("initial GPU dirty-mode render is a full resync");
@@ -3524,6 +3769,7 @@ mod tests {
                 false,
                 MAX_DIRTY_REGIONS as u16,
                 test_gpu_identity(41),
+                None,
             )
             .expect("incremental GPU render")
             .expect("visible GPU mutation emits dirty regions");
@@ -3548,6 +3794,7 @@ mod tests {
                 true,
                 MAX_DIRTY_REGIONS as u16,
                 test_gpu_identity(42),
+                None,
             )
             .expect("GPU full-frame comparison render")
             .expect("forced GPU comparison frame");
@@ -3739,7 +3986,11 @@ mod tests {
             .await
             .expect("V3 capabilities should be available for the session");
         assert_eq!(capabilities.default_transport_id, TRANSPORT_FULL_PNG);
-        assert_eq!(capabilities.modes, service.presentation_modes());
+        let (expected_modes, expected_unavailable) = service
+            .presentation_capability_sets(capabilities.server_sequence)
+            .expect("expected atomic capability snapshot");
+        assert_eq!(capabilities.modes, expected_modes);
+        assert_eq!(capabilities.unavailable_presentations, expected_unavailable);
 
         let mut request = test_raster_request(RasterTransport::FullPng);
         request.session_id = connected.session_id.clone();
@@ -4053,6 +4304,59 @@ mod tests {
             })
             .await
             .expect("test terminal session should disconnect");
+    }
+
+    #[tokio::test]
+    async fn raster_subscription_guards_and_session_shutdown_cancel_gpu_work() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request("gpu-cancellation", 1))
+            .await
+            .expect("test terminal session should connect");
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("test session runtime");
+
+        let (subscriber_id, _signals) = runtime.publication.register(runtime.sequence());
+        let retired = VulkanOffscreenCancellation::default();
+        runtime
+            .raster_render_cancellations
+            .lock()
+            .expect("cancellation registry")
+            .insert(subscriber_id, retired.clone());
+        {
+            let _guard = SubscriptionGuard {
+                runtime: Arc::downgrade(&runtime),
+                subscriber_id,
+                cancellation: Some(retired.clone()),
+            };
+            assert!(!retired.is_cancelled());
+        }
+        assert!(retired.is_cancelled());
+        assert_eq!(runtime.publication.subscriber_count(), 0);
+        assert!(
+            runtime
+                .raster_render_cancellations
+                .lock()
+                .expect("cancellation registry after retirement")
+                .is_empty()
+        );
+
+        let shutdown = VulkanOffscreenCancellation::default();
+        runtime
+            .raster_render_cancellations
+            .lock()
+            .expect("shutdown cancellation registry")
+            .insert(999, shutdown.clone());
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "GPU cancellation test complete".to_string(),
+                client_sequence: 2,
+            })
+            .await
+            .expect("test terminal session should disconnect");
+        assert!(shutdown.is_cancelled());
     }
 
     #[test]
