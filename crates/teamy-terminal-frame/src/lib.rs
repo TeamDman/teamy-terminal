@@ -134,6 +134,16 @@ pub struct RasterRect {
     pub height: u32,
 }
 
+/// One canonical dirty rectangle paired with already-tight RGBA8 rows.
+///
+/// GPU readback paths use this form to avoid materializing or copying an
+/// unchanged complete host frame before constructing the portable update.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackedRasterRegion<'a> {
+    pub rect: RasterRect,
+    pub rgba: &'a [u8],
+}
+
 /// Metadata for a versioned complete or base-dependent raster update.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct RasterUpdateDescriptor {
@@ -445,6 +455,92 @@ impl RasterFrameUpdate {
         Ok(update)
     }
 
+    /// Adopt canonical, tightly packed dirty-region RGBA8 bytes.
+    ///
+    /// Unlike [`Self::dirty_rgba`], this constructor does not require a
+    /// complete CPU-visible source frame. Every payload must contain exactly
+    /// `rect.width * rect.height * 4` bytes in tight top-to-bottom rows.
+    pub fn dirty_rgba_packed(
+        sequence: u64,
+        base_sequence: u64,
+        width: u32,
+        height: u32,
+        packed: &[PackedRasterRegion<'_>],
+    ) -> Result<Self> {
+        validate_dimensions(width, height, FrameLimits::default())?;
+        if packed.is_empty() || packed.len() > MAX_DIRTY_REGIONS {
+            return Err(eyre::eyre!(
+                "dirty update has {} regions, expected 1..={MAX_DIRTY_REGIONS}",
+                packed.len()
+            ));
+        }
+        let rects = packed.iter().map(|region| region.rect).collect::<Vec<_>>();
+        validate_rect_order_and_overlap(&rects, width, height)?;
+
+        let mut bytes = Vec::new();
+        let mut regions = Vec::with_capacity(packed.len());
+        for region in packed {
+            let stride = region
+                .rect
+                .width
+                .checked_mul(BYTES_PER_PIXEL)
+                .ok_or_else(|| eyre::eyre!("dirty region stride overflows"))?;
+            let expected = usize::try_from(stride)
+                .expect("validated stride fits usize")
+                .checked_mul(usize::try_from(region.rect.height).expect("validated height fits"))
+                .ok_or_else(|| eyre::eyre!("dirty region byte length overflows"))?;
+            if region.rgba.len() != expected {
+                return Err(eyre::eyre!(
+                    "packed dirty region has {} bytes, expected {expected}",
+                    region.rgba.len()
+                ));
+            }
+            let payload_offset = u32::try_from(bytes.len())
+                .map_err(|_| eyre::eyre!("dirty payload offset exceeds u32"))?;
+            bytes.extend_from_slice(region.rgba);
+            let payload_length = u32::try_from(region.rgba.len())
+                .map_err(|_| eyre::eyre!("dirty payload length exceeds u32"))?;
+            regions.push(RasterRegion {
+                x: region.rect.x,
+                y: region.rect.y,
+                width: region.rect.width,
+                height: region.rect.height,
+                stride,
+                payload_offset,
+                payload_length,
+            });
+        }
+
+        Self::dirty_rgba_from_parts(sequence, base_sequence, width, height, regions, bytes)
+    }
+
+    fn dirty_rgba_from_parts(
+        sequence: u64,
+        base_sequence: u64,
+        width: u32,
+        height: u32,
+        regions: Vec<RasterRegion>,
+        bytes: Vec<u8>,
+    ) -> Result<Self> {
+        let update = Self {
+            descriptor: RasterUpdateDescriptor {
+                contract_version: RASTER_FRAME_CONTRACT_VERSION,
+                sequence,
+                base_sequence,
+                width,
+                height,
+                stride: 0,
+                format: FrameFormat::Rgba8,
+                kind: RasterUpdateKind::DirtyRegions,
+                compression: FrameCompression::Raw,
+            },
+            regions,
+            bytes,
+        };
+        update.validate()?;
+        Ok(update)
+    }
+
     /// Adopt an already encoded complete PNG without re-encoding it.
     ///
     /// This keeps retained encoder buffers useful at transport boundaries
@@ -544,23 +640,7 @@ impl RasterFrameUpdate {
                 payload_length,
             });
         }
-        let update = Self {
-            descriptor: RasterUpdateDescriptor {
-                contract_version: RASTER_FRAME_CONTRACT_VERSION,
-                sequence,
-                base_sequence,
-                width,
-                height,
-                stride: 0,
-                format: FrameFormat::Rgba8,
-                kind: RasterUpdateKind::DirtyRegions,
-                compression: FrameCompression::Raw,
-            },
-            regions,
-            bytes,
-        };
-        update.validate()?;
-        Ok(update)
+        Self::dirty_rgba_from_parts(sequence, base_sequence, width, height, regions, bytes)
     }
 
     /// Validate version, bounds, ordering, payload ranges, and base semantics.
@@ -1022,6 +1102,69 @@ mod tests {
         composed.apply(&dirty).expect("compose dirty");
         assert_eq!(composed.sequence, 2);
         assert_eq!(composed.pixels, current_pixels);
+    }
+
+    #[test]
+    fn prepacked_dirty_regions_match_complete_frame_cropping_without_full_source_input() {
+        let current_pixels = pixels(4, 3);
+        let rects = [
+            RasterRect {
+                x: 1,
+                y: 0,
+                width: 2,
+                height: 1,
+            },
+            RasterRect {
+                x: 0,
+                y: 2,
+                width: 1,
+                height: 1,
+            },
+        ];
+        let cropped = RasterFrameUpdate::dirty_rgba(2, 1, 4, 3, &current_pixels, &rects)
+            .expect("complete-source dirty update");
+        let first = &current_pixels[4..12];
+        let second = &current_pixels[32..36];
+        let packed = RasterFrameUpdate::dirty_rgba_packed(
+            2,
+            1,
+            4,
+            3,
+            &[
+                PackedRasterRegion {
+                    rect: rects[0],
+                    rgba: first,
+                },
+                PackedRasterRegion {
+                    rect: rects[1],
+                    rgba: second,
+                },
+            ],
+        )
+        .expect("prepacked dirty update");
+
+        assert_eq!(packed, cropped);
+    }
+
+    #[test]
+    fn prepacked_dirty_regions_reject_wrong_payload_length() {
+        let result = RasterFrameUpdate::dirty_rgba_packed(
+            2,
+            1,
+            4,
+            3,
+            &[PackedRasterRegion {
+                rect: RasterRect {
+                    x: 1,
+                    y: 0,
+                    width: 2,
+                    height: 1,
+                },
+                rgba: &[0; 7],
+            }],
+        );
+
+        assert!(result.is_err());
     }
 
     #[test]
