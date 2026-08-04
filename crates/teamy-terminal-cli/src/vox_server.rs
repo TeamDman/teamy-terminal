@@ -141,8 +141,13 @@ fn control_byte(key_code: u32) -> Option<u8> {
     }
 }
 
-fn key_input_bytes(key_code: u32, modifiers: u32, pressed: bool) -> Vec<u8> {
-    if modifiers & GLFW_MOD_SUPER == 0 {
+fn key_input_bytes(
+    key_code: u32,
+    modifiers: u32,
+    pressed: bool,
+    win32_input_mode: bool,
+) -> Vec<u8> {
+    if win32_input_mode && modifiers & GLFW_MOD_SUPER == 0 {
         if let Some(key) = control_physical_key(key_code, modifiers) {
             let mut pressed_keys = Vec::new();
             if modifiers & GLFW_MOD_CONTROL != 0 {
@@ -2544,7 +2549,12 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalInputResult, TerminalError> {
         let session = self.session(&request.session_id)?;
         let session = Self::lock_session(&session)?;
-        let bytes = key_input_bytes(request.key_code, request.modifiers, request.pressed);
+        let bytes = key_input_bytes(
+            request.key_code,
+            request.modifiers,
+            request.pressed,
+            session.terminal.win32_input_mode_enabled(),
+        );
         if !bytes.is_empty() {
             session.pty.write_input(&bytes).map_err(|error| {
                 Self::error(
@@ -3367,7 +3377,8 @@ impl Terminal for VoxTerminalService {
         // acknowledgement. Ctrl+C is deliberately encoded through the same
         // generic key path as a client key event so every terminal control
         // sequence retains one source of truth.
-        let interrupt_down = key_input_bytes(67, GLFW_MOD_CONTROL, true);
+        let win32_input_mode = session.terminal.win32_input_mode_enabled();
+        let interrupt_down = key_input_bytes(67, GLFW_MOD_CONTROL, true, win32_input_mode);
         session.pty.write_input(&interrupt_down).map_err(|error| {
             Self::error(
                 TerminalErrorCode::Internal,
@@ -3376,7 +3387,7 @@ impl Terminal for VoxTerminalService {
             )
         })?;
         std::thread::sleep(Duration::from_millis(10));
-        let interrupt_up = key_input_bytes(67, GLFW_MOD_CONTROL, false);
+        let interrupt_up = key_input_bytes(67, GLFW_MOD_CONTROL, false, win32_input_mode);
         session.pty.write_input(&interrupt_up).map_err(|error| {
             Self::error(
                 TerminalErrorCode::Internal,
@@ -5181,48 +5192,73 @@ mod tests {
     #[test]
     fn key_input_uses_terminal_control_sequences_without_hardcoded_chords() {
         assert_eq!(
-            key_input_bytes(65, GLFW_MOD_CONTROL, true),
+            key_input_bytes(65, GLFW_MOD_CONTROL, true, true),
             b"\x1b[65;30;1;1;8;1_"
         );
         assert_eq!(
-            key_input_bytes(67, GLFW_MOD_CONTROL, true),
+            key_input_bytes(67, GLFW_MOD_CONTROL, true, true),
             b"\x1b[67;46;3;1;8;1_"
         );
         assert_eq!(
-            key_input_bytes(67, GLFW_MOD_CONTROL, false),
+            key_input_bytes(67, GLFW_MOD_CONTROL, false, true),
             b"\x1b[67;46;0;0;8;1_"
         );
         assert_eq!(
-            key_input_bytes(76, GLFW_MOD_CONTROL, true),
+            key_input_bytes(76, GLFW_MOD_CONTROL, true, true),
             b"\x1b[76;38;12;1;8;1_"
         );
         assert_eq!(
-            key_input_bytes(GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL, true),
+            key_input_bytes(GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL, true, true),
             b"\x1b[8;14;8;1;8;1_"
         );
         assert_eq!(
-            key_input_bytes(GLFW_KEY_RIGHT, GLFW_MOD_CONTROL, true),
+            key_input_bytes(GLFW_KEY_RIGHT, GLFW_MOD_CONTROL, true, true),
             b"\x1b[39;77;0;1;264;1_"
         );
         assert_eq!(
-            key_input_bytes(GLFW_KEY_LEFT, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, true),
+            key_input_bytes(
+                GLFW_KEY_LEFT,
+                GLFW_MOD_CONTROL | GLFW_MOD_SHIFT,
+                true,
+                true,
+            ),
             b"\x1b[37;75;0;1;280;1_"
         );
         assert_eq!(
-            key_input_bytes(GLFW_KEY_RIGHT, 0, false),
+            key_input_bytes(GLFW_KEY_RIGHT, 0, false, true),
             b"\x1b[39;77;0;0;256;1_"
         );
     }
 
     #[test]
-    fn unmodified_character_key_codes_are_supported_for_protocol_tests() {
-        assert_eq!(key_input_bytes(65, 0, true), b"\x1b[65;30;97;1;0;1_");
+    fn key_input_uses_legacy_bytes_until_the_terminal_requests_win32_mode() {
         assert_eq!(
-            key_input_bytes(65, GLFW_MOD_SHIFT, true),
+            key_input_bytes(67, GLFW_MOD_CONTROL, true, false),
+            vec![0x03]
+        );
+        assert!(key_input_bytes(67, GLFW_MOD_CONTROL, false, false).is_empty());
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_RIGHT, GLFW_MOD_CONTROL, true, false),
+            b"\x1b[1;5C"
+        );
+        assert_eq!(
+            key_input_bytes(GLFW_KEY_BACKSPACE, GLFW_MOD_CONTROL, true, false),
+            vec![0x17]
+        );
+    }
+
+    #[test]
+    fn unmodified_character_key_codes_are_supported_for_protocol_tests() {
+        assert_eq!(
+            key_input_bytes(65, 0, true, true),
+            b"\x1b[65;30;97;1;0;1_"
+        );
+        assert_eq!(
+            key_input_bytes(65, GLFW_MOD_SHIFT, true, true),
             b"\x1b[65;30;65;1;16;1_"
         );
         assert_eq!(
-            key_input_bytes(GLFW_KEY_ENTER, 0, true),
+            key_input_bytes(GLFW_KEY_ENTER, 0, true, true),
             b"\x1b[13;28;13;1;0;1_"
         );
     }
