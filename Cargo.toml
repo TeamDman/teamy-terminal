@@ -60,13 +60,13 @@ teamy-cancellation = { git = "https://github.com/TeamDman/teamy-cancellation.git
 
 # Keep every Facet/Figue/Vox package on the same reviewed and published
 # TeamDman/facet presentation-contract revision.
-facet = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
-facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "facet-csv" }
-facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "facet-json" }
-facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "facet-pretty" }
-figue = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "figue", features = ["arbitrary"] }
-spec-proto = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "spec-proto" }
-vox-terminal = { git = "https://github.com/TeamDman/facet.git", rev = "95da1ade547956643d48bf96fb6821e350063f57", package = "vox", default-features = false, features = ["runtime", "transport-tcp"] }
+facet = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
+facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "facet-csv" }
+facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "facet-json" }
+facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "facet-pretty" }
+figue = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "figue", features = ["arbitrary"] }
+spec-proto = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "spec-proto" }
+vox-terminal = { git = "https://github.com/TeamDman/facet.git", rev = "e8221f79c74d30fb6aa89ac5e3d50c71fff446fd", package = "vox", default-features = false, features = ["runtime", "transport-tcp"] }
 
 embed-resource = "3.0.6"
 portable-pty = "0.9"

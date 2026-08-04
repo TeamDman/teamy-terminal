@@ -2893,7 +2893,11 @@ impl Terminal for VoxTerminalService {
             let signal = if first {
                 *signals.borrow_and_update()
             } else {
-                if signals.changed().await.is_err() {
+                let changed = tokio::select! {
+                    _ = frames.closed() => break,
+                    changed = signals.changed() => changed,
+                };
+                if changed.is_err() {
                     break;
                 }
                 *signals.borrow_and_update()
@@ -2920,7 +2924,7 @@ impl Terminal for VoxTerminalService {
             let correlation_id = request.correlation_id.clone();
             let request_sequence = request.client_sequence;
             let max_frame_bytes = request.max_frame_bytes;
-            let render = tokio::task::spawn_blocking(move || {
+            let mut render_worker = tokio::task::spawn_blocking(move || {
                 let result = Self::render_captured(
                     &mut resources,
                     &session_id,
@@ -2930,9 +2934,12 @@ impl Terminal for VoxTerminalService {
                     max_frame_bytes,
                 );
                 (resources, capture, result)
-            })
-            .await
-            .map_err(|error| {
+            });
+            let (render, receiver_closed) = tokio::select! {
+                result = &mut render_worker => (result, false),
+                _ = frames.closed() => (render_worker.await, true),
+            };
+            let render = render.map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
                     format!("terminal render worker failed: {error}"),
@@ -2941,6 +2948,9 @@ impl Terminal for VoxTerminalService {
             })?;
             resources = render.0;
             let capture = render.1;
+            if receiver_closed {
+                break;
+            }
             let frame = render.2?;
             counters.renders_completed = counters.renders_completed.saturating_add(1);
             let pending_depth = u8::from(signals.has_changed().unwrap_or(false));
@@ -3072,7 +3082,17 @@ impl Terminal for VoxTerminalService {
             ));
         }
 
-        let mut resource_lease = runtime.lease_raster_render_resources().await?;
+        let lease = tokio::select! {
+            lease = runtime.lease_raster_render_resources() => Some(lease?),
+            _ = frames.closed() => None,
+        };
+        let Some(mut resource_lease) = lease else {
+            return Ok(TerminalOperationResult {
+                session_id: request.session_id,
+                state: TerminalState::Ready,
+                server_sequence: runtime.sequence(),
+            });
+        };
         let mut counters = PublicationCounters::default();
         let mut first = true;
         let mut last_terminal_sequence = request.after_terminal_sequence;
@@ -3085,7 +3105,11 @@ impl Terminal for VoxTerminalService {
             let signal = if first {
                 *signals.borrow_and_update()
             } else {
-                if signals.changed().await.is_err() {
+                let changed = tokio::select! {
+                    _ = frames.closed() => break,
+                    changed = signals.changed() => changed,
+                };
+                if changed.is_err() {
                     break;
                 }
                 *signals.borrow_and_update()
@@ -3128,7 +3152,7 @@ impl Terminal for VoxTerminalService {
             let render_started = Instant::now();
             let mut resources = resource_lease.take();
             let worker_cancellation = render_cancellation.clone();
-            let render = tokio::task::spawn_blocking(move || {
+            let mut render_worker = tokio::task::spawn_blocking(move || {
                 let result = resources.render_raster_update(
                     &capture.snapshot,
                     panel_width,
@@ -3143,9 +3167,15 @@ impl Terminal for VoxTerminalService {
                     Some(&worker_cancellation),
                 );
                 (resources, capture, result)
-            })
-            .await
-            .map_err(|error| {
+            });
+            let (render, receiver_closed) = tokio::select! {
+                result = &mut render_worker => (result, false),
+                _ = frames.closed() => {
+                    render_cancellation.cancel();
+                    (render_worker.await, true)
+                }
+            };
+            let render = render.map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
                     format!("terminal raster worker failed: {error}"),
@@ -3154,6 +3184,9 @@ impl Terminal for VoxTerminalService {
             })?;
             resource_lease.replace(render.0);
             let capture = render.1;
+            if receiver_closed {
+                break;
+            }
             let Some(rendered) = render
                 .2
                 .map_err(|error| self.raster_render_error(&error, capture.terminal_sequence))?
@@ -4041,6 +4074,183 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn v3_switch_cpu_gpu_cpu_releases_idle_receiver_without_terminal_mutation() {
+        let (client_link, server_link) = vox::memory_link_pair(32);
+        let service = VoxTerminalService::new();
+        let server_service = service.clone();
+        let server = tokio::spawn(async move {
+            vox::acceptor_on(server_link)
+                .on_lane(TerminalDispatcher::new(server_service))
+                .establish_connection()
+                .await
+                .expect("Vox server connection should establish")
+        });
+        let connection = vox::initiator_on(client_link)
+            .establish_connection()
+            .await
+            .expect("Vox client connection should establish");
+        let server_guard = server.await.expect("Vox server task should establish");
+        let control_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("terminal control lane should open");
+
+        let mut connect_request = test_connect_request("v3-switch-cpu-gpu-cpu", 1);
+        connect_request.requested_width = 20;
+        connect_request.requested_height = 6;
+        connect_request.surface.columns = 20;
+        connect_request.surface.rows = 6;
+        connect_request.surface.panel_width = 240;
+        connect_request.surface.panel_height = 120;
+        let connected = control_client
+            .connect(connect_request)
+            .await
+            .expect("terminal session should connect");
+        let capabilities = control_client
+            .presentation_capabilities(TerminalPresentationCapabilitiesRequest {
+                session_id: connected.session_id.clone(),
+                client_sequence: 2,
+            })
+            .await
+            .expect("presentation capabilities should be available");
+        assert!(
+            capabilities
+                .modes
+                .iter()
+                .any(|mode| mode.renderer_id == GPU_RENDERER_ID),
+            "the real CPU -> GPU -> CPU lifecycle proof requires a supported no-window GPU renderer"
+        );
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should remain registered");
+        let session_sequence = runtime.session_sequence;
+
+        let first_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("first raster lane should open");
+        let mut first_request = test_raster_request(RasterTransport::FullPng);
+        first_request.session_id = connected.session_id.clone();
+        first_request.presentation_generation = "generation-cpu-first".to_string();
+        first_request.client_sequence = 3;
+        first_request.correlation_id = "switch-cpu-first".to_string();
+        let (first_tx, mut first_rx) = vox::channel::<TerminalRasterFrameEvent>();
+        let first_subscription = tokio::spawn(async move {
+            first_client
+                .subscribe_raster_frames(first_request, first_tx)
+                .await
+        });
+        let first_frame = tokio::time::timeout(Duration::from_secs(10), first_rx.recv())
+            .await
+            .expect("first CPU frame should arrive")
+            .expect("first CPU frame receive should succeed")
+            .expect("first CPU frame should be present");
+        let first_frame = own_raster_frame(first_frame);
+        assert_eq!(first_frame.renderer_id, CPU_RENDERER_ID);
+
+        let gpu_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("GPU raster lane should open");
+        let mut gpu_request = test_raster_request(RasterTransport::FullRawRgba);
+        gpu_request.session_id = connected.session_id.clone();
+        gpu_request.requested_renderer_id = GPU_RENDERER_ID.to_string();
+        gpu_request.presentation_generation = "generation-gpu-middle".to_string();
+        gpu_request.client_sequence = 4;
+        gpu_request.correlation_id = "switch-gpu-middle".to_string();
+        let (gpu_tx, mut gpu_rx) = vox::channel::<TerminalRasterFrameEvent>();
+        let gpu_subscription = tokio::spawn(async move {
+            gpu_client
+                .subscribe_raster_frames(gpu_request, gpu_tx)
+                .await
+        });
+        let gpu_frame = tokio::time::timeout(Duration::from_secs(30), gpu_rx.recv())
+            .await
+            .expect("GPU frame should arrive")
+            .expect("GPU frame receive should succeed")
+            .expect("GPU frame should be present");
+        let gpu_frame = own_raster_frame(gpu_frame);
+        assert_eq!(gpu_frame.renderer_id, GPU_RENDERER_ID);
+        assert_eq!(gpu_frame.session_epoch, first_frame.session_epoch);
+        assert_eq!(gpu_frame.connection_epoch, first_frame.connection_epoch);
+        assert!(gpu_frame.terminal_sequence >= first_frame.terminal_sequence);
+        assert_eq!(runtime.publication.subscriber_count(), 2);
+
+        drop(first_rx);
+        tokio::time::timeout(Duration::from_secs(5), first_subscription)
+            .await
+            .expect("dropping the idle CPU receiver should retire its subscription")
+            .expect("first CPU subscription task should not panic")
+            .expect("first CPU subscription should complete cleanly");
+        assert_eq!(
+            runtime.publication.subscriber_count(),
+            1,
+            "receiver closure must release the first renderer permit without a PTY mutation"
+        );
+
+        let third_client = connection
+            .open_lane::<TerminalClient>()
+            .await
+            .expect("third raster lane should open");
+        let mut third_request = test_raster_request(RasterTransport::FullPng);
+        third_request.session_id = connected.session_id.clone();
+        third_request.presentation_generation = "generation-cpu-third".to_string();
+        third_request.client_sequence = 5;
+        third_request.correlation_id = "switch-cpu-third".to_string();
+        let (third_tx, mut third_rx) = vox::channel::<TerminalRasterFrameEvent>();
+        let third_subscription = tokio::spawn(async move {
+            third_client
+                .subscribe_raster_frames(third_request, third_tx)
+                .await
+        });
+        let third_frame = tokio::time::timeout(Duration::from_secs(10), third_rx.recv())
+            .await
+            .expect("third CPU frame must not block behind the retired presentation")
+            .expect("third CPU frame receive should succeed")
+            .expect("third CPU frame should be present");
+        let third_frame = own_raster_frame(third_frame);
+        assert_eq!(third_frame.renderer_id, CPU_RENDERER_ID);
+        assert_eq!(third_frame.session_epoch, first_frame.session_epoch);
+        assert_eq!(third_frame.connection_epoch, first_frame.connection_epoch);
+        assert!(third_frame.terminal_sequence >= gpu_frame.terminal_sequence);
+        assert_eq!(runtime.session_sequence, session_sequence);
+        assert!(
+            Arc::ptr_eq(
+                &runtime,
+                &service
+                    .session(&connected.session_id)
+                    .expect("presentation switches must retain the same PTY session")
+            ),
+            "renderer/transport switches must not restart the Rust terminal session"
+        );
+
+        drop(third_rx);
+        drop(gpu_rx);
+        tokio::time::timeout(Duration::from_secs(5), third_subscription)
+            .await
+            .expect("third CPU subscription should retire")
+            .expect("third CPU subscription task should not panic")
+            .expect("third CPU subscription should complete cleanly");
+        tokio::time::timeout(Duration::from_secs(5), gpu_subscription)
+            .await
+            .expect("GPU subscription should retire")
+            .expect("GPU subscription task should not panic")
+            .expect("GPU subscription should complete cleanly");
+        assert_eq!(runtime.publication.subscriber_count(), 0);
+
+        control_client
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "CPU GPU CPU switch lifecycle test complete".to_string(),
+                client_sequence: 6,
+            })
+            .await
+            .expect("test session should disconnect");
+        connection.shutdown().ok();
+        server_guard.shutdown().ok();
+    }
+
+    #[tokio::test]
     async fn v3_raster_lane_does_not_starve_control_lane_content_reads() {
         let (client_link, server_link) = vox::memory_link_pair(16);
         let service = VoxTerminalService::new();
@@ -4601,10 +4811,6 @@ mod tests {
         }
         assert_eq!(runtime.publication.subscriber_count(), 2);
         drop(cancelled_rx);
-        runtime
-            .actor_sender
-            .send(SessionActorMessage::Pty(PtyEvent::Output(b"\r\n".to_vec())))
-            .expect("a mutation should probe the dropped request-scoped channel");
         for _ in 0..200 {
             if runtime.publication.subscriber_count() == 1 {
                 break;
@@ -4614,7 +4820,7 @@ mod tests {
         assert_eq!(
             runtime.publication.subscriber_count(),
             1,
-            "dropping the channel receiver must unregister its request-scoped publisher"
+            "dropping the channel receiver must unregister its idle request-scoped publisher without requiring a terminal mutation"
         );
         tokio::time::timeout(Duration::from_secs(5), cancelled_subscription)
             .await
