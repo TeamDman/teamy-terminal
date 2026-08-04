@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-08-03
+**Last updated:** 2026-08-04
 
 ## How to update this plan
 
@@ -21,19 +21,16 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
-**Next goal-sized vertical slice:** complete 3.6.2c and 3.6.4a–3.6.4e here,
-plus SFM V-4.2c in the bridge plan. The resulting user-visible slice must let
-two Rust-terminal panels independently select `rust-cpu-fontdue` or
-`rust-gpu-slug` and any advertised compatible pixel transport, preserve the
-same PTY while switching, and render the GPU choice through the real Vox/SFM
-path. `teamy-terminal serve` must also render `rust-gpu-slug` into a true
-no-window Vulkan image: no winit window, Vulkan surface, swapchain, taskbar
-entry, or desktop automation is allowed in that proof. CPU/fontdue remains the
-initial default and correctness reference. V-4.2b semantic cells and the Java
-font comparators are independent later work and are not prerequisites for this
-slice. Do not choose the eventual default renderer or transport until the
-later visual and temporal matrix measures readback, encoding, transfer, Java
-upload, scheduling, and presentation end to end.
+**Next goal-sized vertical slice:** the 3.6.2c and 3.6.4a–3.6.4e Teamy work
+plus SFM V-4.2c is complete. The next candidate is the paired Teamy 3.6.5 and
+SFM V-4.3/V-4.5 comparison slice: import the Java semantic and raster
+artifacts, compare the Rust CPU, Rust GPU, Java vanilla-font, and Java Nerd
+Font paths at fixed grids and native pixel extents, and produce a durable
+machine-readable plus human-inspectable report. Keep renderer, rasterization
+owner, and transport as independent axes. CPU/fontdue plus full-PNG remains
+the initial default until V-4.6/3.6.6 measures readback, encoding, transfer,
+Java upload, scheduling, and presentation end to end; completion of the GPU
+slice is not evidence that GPU is the fastest end-to-end choice.
 
 Do not assume that CPU `fontdue` rasterization is the dominant bridged cost
 merely because it is a plausible hypothesis: the Rust glyph pass,
@@ -55,37 +52,36 @@ in the later SFM slice. The control plane now also exposes
 `invoke copy-selection`, `invoke zoom`, `invoke show`, and `invoke hide` now
 cover the corresponding app-owned behavior; `--hidden` creates a Vulkan-backed
 window without initially presenting it or adding a taskbar tab.
-The first Phase 4 bridge slice is now defined as Rust-authoritative terminal
-state plus bounded full-PNG snapshots: Rust owns the PTY, VT parsing, colors,
-scrollback, and rasterization; Java sends input/resize and displays the PNG.
-Dirty-cell/tile and GPU-sharing optimizations remain later comparison work,
-but retaining reusable CPU/Java resources and replacing polling with bounded
-push delivery are immediate repairs justified by the completed end-to-end
-witness.
-SFM manual testing now adds a presentation constraint: at high Minecraft GUI
-scale, the Java panel must not stretch a smaller Rust PNG. The bridge contract
-must carry logical panel dimensions and cell metrics so Rust increases font
-size while preserving the intended cell grid. The current CPU `fontdue` path
-remains the correctness baseline; slug/GPU rasterization and persistent-target
-optimization stay later slices.
+The Phase 4 bridge began as Rust-authoritative terminal state plus bounded
+full-PNG snapshots: Rust owns the PTY, VT parsing, colors, scrollback, and
+rasterization; Java sends input/resize and presents the result. It now supports
+full-PNG, full raw RGBA, and dirty raw RGBA from either the retained CPU
+fontdue or retained GPU Slug renderer through bounded push delivery. Direct
+GPU sharing/external-memory transports remain later comparison work.
+SFM manual testing established a presentation constraint that is now enforced:
+at high Minecraft GUI scale, Java must not stretch a smaller Rust image. The
+bridge carries logical panel dimensions and cell metrics so Rust renders at
+the native panel extent while preserving the intended cell grid. CPU fontdue
+remains the initial correctness/default baseline; GPU Slug and persistent
+target/cache reuse are selectable, proven alternatives rather than a new
+default.
 The interactive follow-up now uses the existing Vox `send_key` and `send_mouse`
 operations rather than buffering a Java command line: printable code points are
 sent as exact text, control/navigation keys are sent as key transitions, and
 mouse reports are encoded by Rust only when the terminal requests mouse mode.
-The measured baseline has SFM poll `snapshot(after_sequence)` every 50 ms. That
-proved Rust output can advance during a long-running command without another
-Java input event, but it is not the target architecture: 3.6.2b replaces the
-poller with a request-scoped Vox channel that pushes sequence-bearing frames
-from Rust as soon as terminal state changes. Triple Esc closes the hosted panel
-and triple Tab returns the event to Minecraft's normal focus traversal; both
-sequences use a 1.5-second window and single/double presses remain terminal
-input.
+The historical measured baseline polled `snapshot(after_sequence)` every
+50 ms. Item 3.6.2b replaced it with a request-scoped Vox channel that pushes
+sequence-bearing frames from Rust as soon as terminal state changes, with one
+in-flight plus one newest-pending work bound. Triple Esc closes the hosted
+panel and triple Tab returns the event to Minecraft's normal focus traversal;
+both sequences use a 1.5-second window and single/double presses remain
+terminal input.
 **Automation rendering decision:** `--hidden` remains the windowed parity and
 interactive-lifecycle mode. It creates a native winit window, Vulkan surface,
 and swapchain but does not present or register a taskbar entry until `invoke
-show`; it must not be called headless. The next vertical slice adds a second,
-required `rust-gpu-slug` execution mode for `serve`: a Vulkan device, command
-queue, offscreen image, and bounded readback path that creates no window,
+show`; it must not be called headless. The completed 3.6.4 slice adds a second
+`rust-gpu-slug` execution mode for `serve`: a Vulkan device, command queue,
+offscreen image, and bounded readback path that creates no Teamy window,
 surface, or swapchain. The existing `OffscreenFrame` name describes a
 CPU-visible portable frame wrapper and must not be mistaken for this GPU
 target; use an explicit abstraction such as `VulkanOffscreenContext` and
@@ -1639,7 +1635,7 @@ subscription unchanged.
 the real bridge with stable renderer/transport names, comparable manifests,
 and no accidental bitmap scaling.
 
-### [ ] 3.6.4 Deliver the no-window `rust-gpu-slug` vertical slice
+### [x] 3.6.4 Deliver the no-window `rust-gpu-slug` vertical slice
 
 This parent item is complete only when 3.6.4a–3.6.4e are all complete. The
 slice is deliberately end to end: a standalone fixture and an isolated shader
@@ -1764,10 +1760,11 @@ presenter. All 12 renderer tests pass on `NVIDIA GeForce RTX 4090` (Vulkan API
 independent sessions, cancellation, simulated device loss, and a typed
 `EnumWindows` assertion that context/target work creates no top-level HWND.
 The no-window context enables no instance or device extensions and uses no
-winit handle, surface, or swapchain; `serve` ownership and slug dispatch are
-the still-open 3.6.4c/3.6.4d integration work.
+winit handle, surface, or swapchain. The `serve` ownership and Slug dispatch
+that were open at this checkpoint are completed and evidenced under
+3.6.4c–3.6.4e below.
 
-#### [ ] 3.6.4c Implement the retained `rust-gpu-slug` renderer
+#### [x] 3.6.4c Implement the retained `rust-gpu-slug` renderer
 
 Implement `rust-gpu-slug` behind the renderer-neutral request/result boundary.
 The renderer consumes the same authoritative cells, damage, logical grid,
@@ -1818,7 +1815,7 @@ terminal compositing on Vulkan, supports native full and dirty portable raster
 results, and exposes enough evidence to distinguish geometry, GPU execution,
 readback, packing, and transfer costs.
 
-#### [ ] 3.6.4d Integrate the renderer registry, Vox service, and switching lifecycle
+#### [x] 3.6.4d Integrate the renderer registry, Vox service, and switching lifecycle
 
 Register stable renderer ids `rust-cpu-fontdue` and `rust-gpu-slug` separately
 from `full-png`, `full-raw-rgba`, and `dirty-raw-rgba`. Advertise the valid
@@ -1862,7 +1859,7 @@ not block unrelated sessions on a global lock.
 switches, and retires CPU/GPU presentation tuples correctly while preserving
 the Rust-authoritative terminal session and bounded push semantics.
 
-#### [ ] 3.6.4e Prove the complete Rust GPU slice before SFM integration sign-off
+#### [x] 3.6.4e Prove the complete Rust GPU slice before SFM integration sign-off
 
 Produce one durable headless evidence bundle containing source/toolchain/
 device revisions, exact font hash, fixture ids, screenshots/PNGs, terminal
@@ -1874,8 +1871,11 @@ push telemetry, and stage timings. Exercise:
    scroll, alternate screen, resize, and full refresh;
 2. `rust-gpu-slug` over `full-png`, `full-raw-rgba`, and
    `dirty-raw-rgba`, including exact same-backend full-versus-dirty composition;
-3. a no-window `serve` process, no HWND/taskbar presence, output pushed after
-   subscription without another request, flood coalescing, and bounded credit;
+3. a no-window `serve` process with no application-visible or taskbar-capable
+   HWND, output pushed after subscription without another request, flood
+   coalescing, and bounded credit. Driver-owned hidden helper HWNDs (for
+   example NVIDIA `temp_d3d_window_*` or an IME helper) may exist, but Teamy
+   Terminal must create no winit window, Vulkan surface, or swapchain;
 4. CPU→GPU→CPU switching with one preserved PowerShell session and a second
    independent session using the other renderer; and
 5. actionable Vulkan-unavailable/device-loss behavior with no CPU regression
@@ -1897,6 +1897,97 @@ no-window `rust-gpu-slug` renderer through all supported portable pixel
 transports, with deterministic correctness evidence, bounded resources,
 complete lifecycle semantics, and timings suitable for the later CPU/GPU/Java
 decision. This item does not claim GPU is faster or make it the default.
+
+**Completion evidence — 2026-08-04:** The implementation series
+`812c7b6`, `b97cf8b`, `088b2ad`, `078b520`, `bc9acc9`, `b4ab31e`,
+`6d05505`, and `78b0b3a`, followed by
+`1cea10137730646108c3a8ab82f30bfc890f3de2`, delivers the
+retained GPU backend, push streaming, presentation lifecycle, grid fitting,
+input/cursor/combining correctness, correlated renderer telemetry, durable
+fixture tooling, and live no-window proof. Facet commit
+`f4fba5e88b723040b6a62282af4a1aef33199704` publishes the raster renderer
+evidence contract on `TeamDman/facet/main`. CPU/full-PNG remains the omitted-
+argument and service default.
+
+`target/evidence/gpu-slug-20260804/` contains all six
+`rust-cpu-fontdue|rust-gpu-slug` ×
+`full-png|full-raw-rgba|dirty-raw-rgba` results for one 400×228 difficult-state
+fixture. It covers ANSI/styles, cursor/selection, wide/combining/fallback
+glyphs, alternate-screen restoration, resize, and full refresh. Every backend
+has exact direct-full versus composed-dirty output. GPU manifests identify
+Caskaydia Cove Nerd Font Mono SHA-256
+`32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea`,
+WGSL FNV-1a `e0b20e4e5c7dd553`, and NVIDIA GeForce RTX 4090; the bounded CPU
+reference comparison reports 6,195/91,200 differing pixels (679 basis points),
+maximum channel delta 224, mean absolute channel delta 3.015, and no alpha
+differences. Exact same-backend repeat and composition checks remain the hard
+correctness gate; cross-rasterizer antialiasing is reported, not mistaken for
+a semantic failure.
+
+The reproducible six-mode command was:
+
+~~~powershell
+$renderers = 'rust-cpu-fontdue', 'rust-gpu-slug'
+$transports = 'full-png', 'full-raw-rgba', 'dirty-raw-rgba'
+foreach ($renderer in $renderers) {
+    foreach ($transport in $transports) {
+        $extension = if ($transport -eq 'full-png') { 'png' } else { 'rgba' }
+        $stem = "target/evidence/gpu-slug-20260804/$renderer-$transport"
+        cargo run -p teamy-terminal-cli --quiet -- render-fixture --renderer $renderer `
+          --transport $transport --output "$stem.$extension" `
+          --manifest "$stem.manifest.json"
+    }
+}
+~~~
+
+`target/evidence/tracy-gpu-slug-20260804-final-source/` retains the release
+`extended_observability,tracy` capture `2026-08-04_02-23-23.tracy`, profile
+manifest, NDJSON/ANSI logs, fixture manifest, and exported top-spans CSV. The
+bounded run completed 500 warmup and 5,000 measured GPU dirty frames with
+deterministic payloads. Mean renderer time was 130 µs (maximum 2,185 µs): mean
+geometry 2 µs, upload 1 µs, command recording 10 µs, queue submission 17 µs,
+GPU completion wait 75 µs, and sub-microsecond rounded readback map/copy. The
+separately measured cold CPU reference was 382,221 µs and pixel comparison was
+292 µs. Tracy attributes 41.326% self time to `gpu_slug_raster_readback`,
+10.241% to Vulkan context creation, and 1.157% to `gpu_slug_geometry`, which
+preserves the distinction between cold setup, GPU work, readback, and
+comparison rather than claiming end-to-end superiority.
+
+The release capture command was:
+
+~~~powershell
+& 'G:\Programming\Repos\teamy-profiler\target\release\teamy-profiler.exe' `
+  run cargo --project G:\Programming\Repos\teamy-terminal `
+  --bin teamy-terminal --profile release `
+  --feature extended_observability --feature tracy `
+  --artifact-dir G:\Programming\Repos\teamy-terminal\target\evidence\tracy-gpu-slug-20260804-final-source `
+  -- render-fixture --renderer rust-gpu-slug --transport dirty-raw-rgba `
+  --output target\evidence\tracy-gpu-slug-20260804-final-source\gpu-dirty.rgba `
+  --manifest target\evidence\tracy-gpu-slug-20260804-final-source\gpu-dirty.manifest.json `
+  --warmup-frames 500 --sample-frames 5000
+~~~
+
+The Windows `serve_no_window` integration test launches the real server, lets
+its cached no-window Vulkan capability initialize, and verifies that the
+process owns no visible or taskbar-capable window. The fixture and SFM puppet
+proofs separately select and render GPU Slug through that service path. A live
+Vulkan process may own hidden driver/IME helper HWNDs, so the truthful
+invariant is no Teamy-created winit window, Vulkan surface, swapchain, or
+user-facing taskbar presence rather than literal zero process HWNDs. Typed
+unavailable/device-loss tests prove actionable failure, continued CPU
+availability, and no silent fallback. The direct command is
+`cargo test -p teamy-terminal-cli --test serve_no_window --all-features`.
+
+SFM commits `b3f9a5ddc384981f34d8d5a2e78c6f38f16e07e2`,
+`a67ac505043276d209486c071ba2fe097cd636a5`, and `a5bdb38d8` close bridge
+item V-4.2c. Normal-scale puppet evidence is under
+`sfm-title_screen-20260804-014845-875`; GUI-scale-7 evidence is under
+`sfm-title_screen-20260804-015218-676`. Both prove all six selectable tuples,
+independent panel choices, CPU→GPU→CPU with a preserved session and fresh
+presentation generations, alternate-screen/resize behavior, native GPU image
+sizing without Java upscale, and correlated renderer/device/font/shader
+telemetry. The repository quality gate and focused core/font/frame/renderer/
+CLI/Vox suites pass; this closes 3.6.4 without selecting a new default.
 
 ### [ ] 3.6.5 Produce visual comparisons across every renderer/font pair
 
@@ -2195,11 +2286,11 @@ overwritten by baseline code.
 | --- | --- | --- | --- |
 | Windows x64 core/CLI | Supported first | workspace quality gate, PTY smoke, replay | Quality gate and PTY smoke pass; replay fixtures pass |
 | Windows x64 interactive Vulkan MVP | Completed standalone baseline | PTY/Vulkan integration, command/resize/Ctrl+C/exit proof | Startup, renderer diagnostic, PTY smoke, live keyboard/paste/resize/alternate-screen/Ctrl+C/close, and app-owned selection/copy/zoom/visibility probes pass; native Ctrl+wheel is a manual UX smoke |
-| Windows Vulkan device | Supported for windowed CPU-pixel presentation when loader/device exists; true GPU slug/off-screen comparison pending | renderer diagnostic, then Phase 3.6 GPU glyph and no-window/off-screen proof | Window startup smoke passes; true GPU glyph/off-screen path is Phase 3.6.4 |
+| Windows Vulkan device | Supported for windowed CPU-pixel presentation and retained no-window GPU Slug rasterization when loader/device exists | renderer diagnostic, no-window integration test, deterministic six-mode fixture, Tracy capture | Window startup smoke and Phase 3.6.4 GPU glyph/off-screen path pass on NVIDIA GeForce RTX 4090; no Teamy window/surface/swapchain is created |
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
-| SFM optional Rust/Vox mode | Optional development tooling; CPU full-PNG/raw/dirty correctness, native sizing, retained resources, push delivery, and correlated lag baseline proven | Phase 3.6.2c/3.6.4 plus SFM V-4.2c renderer matrix | CPU transport puppets pass; next proof is true no-window GPU slug across the same transports with panel-local renderer selection |
+| SFM optional Rust/Vox mode | Optional development tooling; CPU/GPU full-PNG/raw/dirty correctness, native sizing, retained resources, push delivery, panel-local selection, and correlated telemetry proven | Phase 3.6.2c/3.6.4 plus SFM V-4.2c renderer matrix | All six Rust pixel tuples and normal/GUI-scale-7 puppets pass; next proof is the Teamy 3.6.5/SFM V-4.3/V-4.5 semantic and visual comparison matrix |
 
 ## Overall completion criteria
 
