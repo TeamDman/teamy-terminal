@@ -17,10 +17,10 @@ use spec_proto::terminal::{
     TerminalPresentationCapabilitiesResult, TerminalPresentationMode, TerminalPromptMetadata,
     TerminalPublicationTelemetry, TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent,
     TerminalRasterFrameKind, TerminalRasterRegion, TerminalRasterSnapshotTiming,
-    TerminalRasterizationOwner,
-    TerminalRasterSubscribeRequest, TerminalResizeRequest, TerminalResizeResult, TerminalSelection,
-    TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming, TerminalState,
-    TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
+    TerminalRasterSubscribeRequest, TerminalRasterizationOwner, TerminalResizeRequest,
+    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
+    TerminalSnapshotTiming, TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics,
+    TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -39,7 +39,7 @@ use teamy_terminal_frame::{
     RasterRect, RasterUpdateKind,
 };
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
-use tokio::sync::watch;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use vox_terminal as vox;
 
 const MAX_COLUMNS: u16 = 240;
@@ -52,6 +52,7 @@ const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
 const SESSION_ACTOR_CAPACITY: usize = 64;
+const MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION: usize = 2;
 const RASTER_TRANSPORT_VERSION: u16 = 1;
 const CPU_RENDERER_ID: &str = "rust-cpu-fontdue";
 const GPU_RENDERER_ID: &str = "rust-gpu-slug";
@@ -418,6 +419,8 @@ struct TerminalSessionRuntime {
     state: Mutex<TerminalSessionState>,
     publication: PublicationHub,
     explicit_render_resources: Mutex<Option<TerminalRenderResources>>,
+    raster_render_resources: Mutex<Vec<TerminalRenderResources>>,
+    raster_render_permits: Arc<Semaphore>,
     actor_sender: SyncSender<SessionActorMessage>,
     terminal_sequence: AtomicI64,
     closed: AtomicBool,
@@ -461,14 +464,75 @@ impl TerminalSessionRuntime {
             .unwrap_or_default()
     }
 
+    async fn lease_raster_render_resources(
+        self: &Arc<Self>,
+    ) -> Result<TerminalRenderResourceLease, TerminalError> {
+        let permit = Arc::clone(&self.raster_render_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| {
+                VoxTerminalService::error(
+                    TerminalErrorCode::Disconnected,
+                    "terminal session closed while waiting for a raster renderer",
+                    self.sequence(),
+                )
+            })?;
+        let resources = self
+            .raster_render_resources
+            .lock()
+            .ok()
+            .and_then(|mut resources| resources.pop())
+            .unwrap_or_default();
+        Ok(TerminalRenderResourceLease {
+            runtime: Arc::clone(self),
+            resources: Some(resources),
+            _permit: permit,
+        })
+    }
+
     fn shutdown(&self) {
         if self.closed.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.raster_render_permits.close();
         self.publication.close();
         let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
         if let Ok(state) = self.state.lock() {
             let _ = state.pty.kill();
+        }
+    }
+}
+
+struct TerminalRenderResourceLease {
+    runtime: Arc<TerminalSessionRuntime>,
+    resources: Option<TerminalRenderResources>,
+    _permit: OwnedSemaphorePermit,
+}
+
+impl TerminalRenderResourceLease {
+    fn take(&mut self) -> TerminalRenderResources {
+        self.resources
+            .take()
+            .expect("raster render resource lease must contain resources")
+    }
+
+    fn replace(&mut self, resources: TerminalRenderResources) {
+        assert!(
+            self.resources.replace(resources).is_none(),
+            "raster render resource lease must be empty before replacement"
+        );
+    }
+}
+
+impl Drop for TerminalRenderResourceLease {
+    fn drop(&mut self) {
+        let Some(resources) = self.resources.take() else {
+            return;
+        };
+        if let Ok(mut pool) = self.runtime.raster_render_resources.lock()
+            && pool.len() < MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION
+        {
+            pool.push(resources);
         }
     }
 }
@@ -1729,6 +1793,12 @@ impl Terminal for VoxTerminalService {
             state: Mutex::new(state),
             publication: PublicationHub::new(),
             explicit_render_resources: Mutex::new(Some(TerminalRenderResources::default())),
+            raster_render_resources: Mutex::new(Vec::with_capacity(
+                MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION,
+            )),
+            raster_render_permits: Arc::new(Semaphore::new(
+                MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION,
+            )),
             actor_sender,
             terminal_sequence: AtomicI64::new(sequence),
             closed: AtomicBool::new(false),
@@ -2400,7 +2470,7 @@ impl Terminal for VoxTerminalService {
             ));
         }
 
-        let mut resources = TerminalRenderResources::default();
+        let mut resource_lease = runtime.lease_raster_render_resources().await?;
         let mut counters = PublicationCounters::default();
         let mut first = true;
         let mut last_terminal_sequence = request.after_terminal_sequence;
@@ -2447,6 +2517,7 @@ impl Terminal for VoxTerminalService {
             let panel_width = capture.surface.panel_width;
             let panel_height = capture.surface.panel_height;
             let render_started = Instant::now();
+            let mut resources = resource_lease.take();
             let render = tokio::task::spawn_blocking(move || {
                 let result = resources.render_raster_update(
                     &capture.snapshot,
@@ -2469,7 +2540,7 @@ impl Terminal for VoxTerminalService {
                     runtime.sequence(),
                 )
             })?;
-            resources = render.0;
+            resource_lease.replace(render.0);
             let capture = render.1;
             let Some(rendered) = render.2.map_err(|error| {
                 Self::error(
@@ -3289,6 +3360,72 @@ mod tests {
             })
             .await
             .expect("the owning connection should disconnect its session");
+    }
+
+    #[tokio::test]
+    async fn raster_renderer_leases_are_bounded_and_reuse_session_resources() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request("bounded-raster-renderers", 1))
+            .await
+            .expect("test terminal session should connect");
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should remain registered");
+
+        let mut first = runtime
+            .lease_raster_render_resources()
+            .await
+            .expect("first active presentation should lease a renderer");
+        let second = runtime
+            .lease_raster_render_resources()
+            .await
+            .expect("one pending presentation may overlap the active presentation");
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(25),
+                runtime.lease_raster_render_resources(),
+            )
+            .await
+            .is_err(),
+            "a third presentation must wait instead of creating unbounded renderer state"
+        );
+
+        first
+            .resources
+            .as_mut()
+            .expect("leased resources should be present")
+            .stats
+            .frame_buffer_reuses = 7;
+        drop(first);
+        let third = tokio::time::timeout(
+            Duration::from_secs(1),
+            runtime.lease_raster_render_resources(),
+        )
+        .await
+        .expect("retiring one generation should release a renderer permit")
+        .expect("the session should remain open");
+        assert_eq!(
+            third
+                .resources
+                .as_ref()
+                .expect("re-leased resources should be present")
+                .stats
+                .frame_buffer_reuses,
+            7,
+            "a presentation switch should recover the warm per-session resource"
+        );
+
+        drop(third);
+        drop(second);
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "bounded raster renderer test complete".to_string(),
+                client_sequence: 2,
+            })
+            .await
+            .expect("test terminal session should disconnect");
     }
 
     #[test]
