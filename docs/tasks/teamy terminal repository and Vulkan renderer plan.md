@@ -1828,6 +1828,17 @@ tuples are expected; any deliberately unsupported tuple must be omitted with a
 specific reason and must not be substituted. GPU unavailability is cached and
 reported without removing the CPU tuples.
 
+The Facet capability migration after the immutable V4 presentation fixture
+adds `unavailable_presentations` beside `modes` and records a new immutable V5
+fixture. `modes` remains valid/selectable tuples only. Each negative entry
+carries the exact `renderer_id`, closed `rasterization_owner`,
+`damage_mode_id`, `transport_id`, `transport_version`, and typed
+`TerminalError` produced by the cached startup/background probe. Do not add an
+availability flag to a valid mode, advertise a fake tuple, encode failure in a
+renderer id/default, or fail the whole capabilities RPC and thereby hide the
+usable CPU modes. Capability enumeration and selector reads consume this
+cached result; they never initialize Vulkan or perform another probe.
+
 `teamy-terminal serve` uses the no-window GPU context from 3.6.4b. A renderer
 switch keeps the PTY, terminal/session sequences, input stream, scrollback,
 and last accepted frame alive. It creates one fresh
