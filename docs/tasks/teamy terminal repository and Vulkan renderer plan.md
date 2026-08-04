@@ -1308,7 +1308,7 @@ compile, and the live CPU/full-PNG bridge proof pass. The broader
 multi-backend semantic-cell/damage contract and Rust GPU/slug fixture identity
 remain intentionally open; this initial slice does not claim those renderers.
 
-### [ ] 3.6.2c Make renderer and transport an atomic presentation contract
+### [x] 3.6.2c Make renderer and transport an atomic presentation contract
 
 **Work:** Finish the pixel-raster portion of 3.6.2 before adding the second
 renderer. A presentation is one validated tuple of `renderer_id`,
@@ -1365,6 +1365,22 @@ locally available client-owned Java renderers.
 **Completion criteria:** The generated contract can negotiate and switch CPU
 and GPU raster presentations without conflating renderer with transport, and
 one generation token unambiguously guards every renderer/transport change.
+
+**Completion evidence — 2026-08-03:** Facet/Vox commit
+`9225acdf574807814d35e79209f41f0b03bd448c`, published on
+`TeamDman/facet` `main`, adds independent default renderer/transport ids, the
+closed server/client rasterization owner, six immutable CPU/GPU pixel tuples,
+and `presentation_generation` while retaining pixel
+`frame_contract_version=1`. Its Rust protocol, codegen, generated-Java,
+lane-lifecycle, package, formatting, and reproducibility gates pass. Teamy
+Terminal commit `6af16ca` pins every Facet/Figue/Vox crate to that exact Git
+revision, migrates the live service and tests, and passes all 36 CLI library
+tests. SFM commits `ce6b34a96` and `0d0fcc570` add the panel-local atomic
+selection model, source-build and pin the generated Java JAR at exact hash
+`blake3:bfa0c9dd97b92b72b121ed9d35e829c38a18be5e`, and consume the explicit
+defaults, owner, and generation names. The SFM compile and focused
+`SFMTerminal`/`SFMVoxTerminalServiceTests` gates pass. Cloud Terrastodon and
+historical terminal fixtures were not modified.
 
 ### [x] 3.6.2a Retain reusable font, glyph, frame, and encoding resources
 
@@ -1634,7 +1650,7 @@ Teamy Terminal window. The backend must generate glyph coverage and composite
 terminal visuals on the GPU; uploading RGBA pixels already rasterized by
 `fontdue` does not qualify as `rust-gpu-slug`.
 
-#### [ ] 3.6.4a Freeze provenance and correct the slug coverage contract
+#### [x] 3.6.4a Freeze provenance and correct the slug coverage contract
 
 **Source boundary:** At implementation start, record the exact Teamy Studio
 revision, dirty-state caveat, source files, relevant function names, font
@@ -1685,7 +1701,17 @@ slug data contract and independent CPU oracle whose difficult-glyph artifacts
 no longer reproduce the known structural band defect. No Teamy Studio file was
 changed.
 
-#### [ ] 3.6.4b Add a retained true no-window Vulkan runtime
+**Completion evidence — 2026-08-03:** Teamy Terminal commit `ef31e69`
+records the exact read-only Teamy Studio/font provenance and adds
+renderer-neutral quadratic geometry, four-word directional headers with
+separate ascending/descending lists, stable GPU word exports, an independent
+all-curves CPU oracle, and a banded evaluator. All 13 font unit tests and all
+7 slug-contract integration tests pass, including malformed/empty/flat
+geometry, difficult glyphs and text/Unicode fixtures, shader-layout metadata,
+and the machine-readable `g` false-line regression. Teamy Studio remained
+untouched.
+
+#### [x] 3.6.4b Add a retained true no-window Vulkan runtime
 
 Create an explicit no-window runtime (for example
 `VulkanOffscreenContext`) containing the Vulkan entry/instance, selected
@@ -1728,6 +1754,18 @@ unavailable result/skip for GPU-only tests while CPU/core gates still run.
 **Completion criteria:** A long-lived `serve` process can repeatedly render and
 read back native-sized GPU images without ever creating a native window,
 surface, or swapchain and without recreating device/size resources per frame.
+
+**Completion evidence — 2026-08-03:** Teamy Terminal commit `bf7f279` adds a
+retained process context, independent sessions/targets, bounded A→B→A target/
+staging/readback reuse, typed failure/cancellation/device-loss handling, and a
+crate-internal compute submission seam without changing the existing windowed
+presenter. All 12 renderer tests pass on `NVIDIA GeForce RTX 4090` (Vulkan API
+1.4.341), including deterministic GPU clear/readback, cache reuse/eviction,
+independent sessions, cancellation, simulated device loss, and a typed
+`EnumWindows` assertion that context/target work creates no top-level HWND.
+The no-window context enables no instance or device extensions and uses no
+winit handle, surface, or swapchain; `serve` ownership and slug dispatch are
+the still-open 3.6.4c/3.6.4d integration work.
 
 #### [ ] 3.6.4c Implement the retained `rust-gpu-slug` renderer
 
