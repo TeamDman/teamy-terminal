@@ -21,7 +21,8 @@ use num_traits::ToPrimitive;
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::OnceLock;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use swash::FontRef;
 use swash::scale::Render;
 use swash::scale::ScaleContext;
@@ -118,6 +119,11 @@ impl CellRect {
 /// left-to-right, non-overlapping, and horizontally canonicalized after the
 /// one-cell expansion required for wide glyph and cursor safety. More than
 /// [`MAX_DAMAGE_REGIONS`] canonical regions falls back to one full refresh.
+///
+/// # Panics
+///
+/// Panics only if coordinates derived from the snapshot's `u16` dimensions no
+/// longer fit in `u16`, which would violate the terminal snapshot invariant.
 #[must_use]
 pub fn damage_regions(
     previous: Option<&TerminalSnapshot>,
@@ -274,6 +280,11 @@ impl TerminalFontCatalog {
     ///
     /// The successful catalog or its construction error is retained so every
     /// caller observes one bounded discovery attempt.
+    ///
+    /// # Errors
+    ///
+    /// Returns the retained discovery or parsing error when the embedded font
+    /// or all available terminal font faces cannot be loaded.
     pub fn shared_system() -> Result<Arc<Self>> {
         match SHARED_SYSTEM_FONT_CATALOG.get_or_init(|| {
             SHARED_SYSTEM_FONT_CATALOG_LOADS.fetch_add(1, Ordering::Relaxed);
@@ -393,6 +404,10 @@ impl TerminalFont {
     ///
     /// This is primarily useful for deterministic eviction tests and
     /// constrained hosts; a zero capacity is normalized to one visible glyph.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `catalog` contains no font face.
     pub fn from_catalog_with_glyph_cache_capacity(
         catalog: Arc<TerminalFontCatalog>,
         pixel_size: f32,
@@ -513,6 +528,12 @@ impl TerminalFont {
     /// The caller must expand damage around wide glyphs and cursor movement
     /// when necessary. Pixels outside `regions` are preserved, which makes the
     /// method suitable for a cached-frame dirty-rectangle prototype.
+    ///
+    /// # Panics
+    ///
+    /// Panics if terminal, frame, or glyph coordinates exceed the renderer's
+    /// internal `u16`, `i32`, or `usize` representation invariants, or if the
+    /// catalog lacks the required fallback glyph.
     pub fn render_cells(
         &mut self,
         snapshot: &TerminalSnapshot,
@@ -607,6 +628,10 @@ impl TerminalFont {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "cell position and frame bounds stay explicit to preserve auditable clipping semantics"
+    )]
     fn draw_cell(
         &mut self,
         pixels: &mut [u8],

@@ -88,6 +88,10 @@ fn visible_text(terminal: &TerminalSession) -> String {
 }
 
 #[test]
+#[expect(
+    clippy::too_many_lines,
+    reason = "the end-to-end PTY regression intentionally keeps one chronological interaction trace"
+)]
 fn cmd_runs_ratatui_key_debug_and_restores_the_primary_screen() -> Result<()> {
     let Some(executable) = ratatui_key_debug_executable() else {
         eprintln!("skipping PTY regression: build ratatui-key-debug or set RATATUI_KEY_DEBUG_EXE");

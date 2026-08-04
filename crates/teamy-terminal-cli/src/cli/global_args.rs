@@ -1,10 +1,10 @@
 //! Global arguments that apply to all commands.
 
 use crate::cli::output::OutputFormat;
+use crate::stop_after_args::StopAfterArgs;
 use arbitrary::Arbitrary;
 use facet::Facet;
 use figue::{self as args};
-use crate::stop_after_args::StopAfterArgs;
 
 /// Global arguments that apply to all commands.
 #[derive(Facet, Arbitrary, Debug, Default, PartialEq)]

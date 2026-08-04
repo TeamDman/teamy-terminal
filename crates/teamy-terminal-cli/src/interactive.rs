@@ -23,14 +23,14 @@ use teamy_terminal_core::TerminalLimits;
 use teamy_terminal_core::TerminalSession;
 #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
 use teamy_terminal_core::TerminalSnapshot;
-#[cfg(feature = "dirty_rendering")]
-use teamy_terminal_font::damage_regions;
 #[cfg(all(test, feature = "dirty_rendering"))]
 use teamy_terminal_font::CellRect;
 use teamy_terminal_font::DEFAULT_PIXEL_SIZE;
 #[cfg(feature = "dirty_rendering")]
 use teamy_terminal_font::RasterizedFrame;
 use teamy_terminal_font::TerminalFont;
+#[cfg(feature = "dirty_rendering")]
+use teamy_terminal_font::damage_regions;
 use teamy_terminal_pty::PtyConfig;
 use teamy_terminal_pty::PtyEvent;
 use teamy_terminal_pty::PtySession;
@@ -112,6 +112,10 @@ fn load_window_icon() -> Result<Icon> {
         .map_err(|error| eyre::eyre!("failed to construct the terminal window icon: {error:?}"))
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "independent event-loop flags can validly coexist; an enum would admit fewer real states"
+)]
 struct InteractiveApplication {
     cancellation_token: CancellationToken,
     session: Option<PtySession>,
@@ -250,15 +254,13 @@ impl InteractiveApplication {
         }
         self.dirty = true;
         #[cfg(feature = "dirty_rendering")]
-        {
-            self.rendered_frame = None;
-        }
+        let _ = self.rendered_frame.take();
         Ok(())
     }
 
     fn adjust_font_size(&mut self, direction: f32) -> Result<()> {
         let next_size = adjusted_font_pixel_size(self.font_pixel_size, direction);
-        if next_size == self.font_pixel_size {
+        if (next_size - self.font_pixel_size).abs() < f32::EPSILON {
             return Ok(());
         }
 
@@ -266,13 +268,9 @@ impl InteractiveApplication {
             .wrap_err("failed to rebuild the terminal font at the requested size")?;
         self.font_pixel_size = next_size;
         #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
-        {
-            self.last_rendered_snapshot = None;
-        }
+        let _ = self.last_rendered_snapshot.take();
         #[cfg(feature = "dirty_rendering")]
-        {
-            self.rendered_frame = None;
-        }
+        let _ = self.rendered_frame.take();
         self.resize_terminal()
     }
 
@@ -383,12 +381,12 @@ impl InteractiveApplication {
         let should_exit = matches!(operation, ControlAction::Close);
         let result = match operation {
             ControlAction::Ping => Ok(ControlResponse::Ok),
-            ControlAction::SendText { text } => self
-                .write_control_text(&text)
-                .map(|()| ControlResponse::Ok),
-            ControlAction::SendKeys { keys } => self
-                .write_control_keys(&keys)
-                .map(|()| ControlResponse::Ok),
+            ControlAction::SendText { text } => {
+                self.write_control_text(&text).map(|()| ControlResponse::Ok)
+            }
+            ControlAction::SendKeys { keys } => {
+                self.write_control_keys(&keys).map(|()| ControlResponse::Ok)
+            }
             ControlAction::Resize { width, height } => {
                 if width == 0 || height == 0 {
                     Err(eyre::eyre!("control resize dimensions must be non-zero"))
@@ -419,9 +417,9 @@ impl InteractiveApplication {
             ControlAction::CopySelection => self
                 .copy_selection_text()
                 .map(|text| ControlResponse::Content { text }),
-            ControlAction::Zoom { steps } => self
-                .adjust_font_steps(steps)
-                .map(|()| ControlResponse::Ok),
+            ControlAction::Zoom { steps } => {
+                self.adjust_font_steps(steps).map(|()| ControlResponse::Ok)
+            }
             ControlAction::SetVisible { visible } => self
                 .set_window_visible(visible)
                 .map(|()| ControlResponse::Ok),
@@ -471,7 +469,7 @@ impl InteractiveApplication {
                         let bytes = if win32_input_mode {
                             win32_physical_key_event_bytes(key, true, &pressed)?
                         } else {
-                            legacy_physical_key_bytes(key, true, &pressed)?
+                            legacy_physical_key_bytes(key, true, &pressed)
                         };
                         if !bytes.is_empty() {
                             session.write_input(&bytes)?;
@@ -481,7 +479,7 @@ impl InteractiveApplication {
                         let bytes = if win32_input_mode {
                             win32_physical_key_event_bytes(key, false, &pressed)?
                         } else {
-                            legacy_physical_key_bytes(key, false, &pressed)?
+                            legacy_physical_key_bytes(key, false, &pressed)
                         };
                         if !bytes.is_empty() {
                             session.write_input(&bytes)?;
@@ -563,6 +561,10 @@ impl InteractiveApplication {
         Ok(())
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "one event-loop render transaction keeps failure handling and frame-cache commits atomic"
+    )]
     fn render(&mut self, event_loop: &ActiveEventLoop) {
         #[cfg(feature = "extended_observability")]
         let _span = tracing::debug_span!("render_terminal_frame").entered();
@@ -698,13 +700,9 @@ impl InteractiveApplication {
                     self.dirty = true;
                 }
                 #[cfg(feature = "dirty_rendering")]
-                {
-                    self.rendered_frame = Some(frame);
-                }
+                let _ = self.rendered_frame.replace(frame);
                 #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
-                {
-                    self.last_rendered_snapshot = Some(snapshot);
-                }
+                let _ = self.last_rendered_snapshot.replace(snapshot);
                 #[cfg(feature = "extended_observability")]
                 tracing::info!(message = "finished frame", tracy.frame_mark = true);
             }
@@ -773,10 +771,7 @@ impl InteractiveApplication {
         )
     }
 
-    fn update_selection_from_position(
-        &mut self,
-        position: winit::dpi::PhysicalPosition<f64>,
-    ) {
+    fn update_selection_from_position(&mut self, position: winit::dpi::PhysicalPosition<f64>) {
         if let Some(cell) = self.terminal_cell_at(position) {
             self.terminal.update_selection(cell);
             self.dirty = true;
@@ -784,9 +779,9 @@ impl InteractiveApplication {
     }
 
     fn copy_selection(&mut self) -> Result<bool> {
-        self.terminal
-            .selected_text()
-            .map_or(Ok(false), |text| self.copy_selection_text_for(text).map(|()| true))
+        self.terminal.selected_text().map_or(Ok(false), |text| {
+            self.copy_selection_text_for(text).map(|()| true)
+        })
     }
 
     fn copy_selection_text(&mut self) -> Result<String> {
@@ -932,8 +927,8 @@ fn adjusted_font_pixel_size(current: f32, direction: f32) -> f32 {
 
 fn wheel_zoom_direction(delta: &MouseScrollDelta) -> Option<f32> {
     let vertical = match delta {
-        MouseScrollDelta::LineDelta(_, vertical) => *vertical,
-        MouseScrollDelta::PixelDelta(position) => position.y as f32,
+        MouseScrollDelta::LineDelta(_, vertical) => f64::from(*vertical),
+        MouseScrollDelta::PixelDelta(position) => position.y,
     };
     if vertical > 0.0 {
         Some(1.0)
@@ -960,12 +955,18 @@ fn terminal_cell_at_position(
     {
         return None;
     }
-    let column = (position.x / f64::from(cell_width)).floor() as u16;
-    let row = (position.y / f64::from(cell_height)).floor() as u16;
-    if column >= columns || row >= rows {
+    let cell_position = winit::dpi::PhysicalPosition::new(
+        (position.x / f64::from(cell_width)).floor(),
+        (position.y / f64::from(cell_height)).floor(),
+    );
+    if cell_position.x >= f64::from(columns) || cell_position.y >= f64::from(rows) {
         return None;
     }
-    Some(CursorPosition { column, row })
+    let cell_position = cell_position.cast::<u16>();
+    Some(CursorPosition {
+        column: cell_position.x,
+        row: cell_position.y,
+    })
 }
 
 #[cfg(feature = "extended_observability")]
@@ -1078,7 +1079,7 @@ fn release_pressed_keys(
         let bytes = if win32_input_mode {
             win32_physical_key_event_bytes(&key, false, pressed)?
         } else {
-            legacy_physical_key_bytes(&key, false, pressed)?
+            legacy_physical_key_bytes(&key, false, pressed)
         };
         if !bytes.is_empty() {
             session.write_input(&bytes)?;
@@ -1128,9 +1129,7 @@ pub(crate) fn win32_physical_key_event_bytes(
     // `pressed` without emitting standalone modifier records.
     if matches!(
         key,
-        ControlPhysicalKey::Ctrl
-            | ControlPhysicalKey::Shift
-            | ControlPhysicalKey::Alt
+        ControlPhysicalKey::Ctrl | ControlPhysicalKey::Shift | ControlPhysicalKey::Alt
     ) {
         return Ok(Vec::new());
     }
@@ -1186,18 +1185,17 @@ fn legacy_physical_key_bytes(
     key: &ControlPhysicalKey,
     key_down: bool,
     pressed: &[ControlPhysicalKey],
-) -> Result<Vec<u8>> {
+) -> Vec<u8> {
     if !key_down {
-        return Ok(Vec::new());
+        return Vec::new();
     }
     let ctrl = pressed.contains(&ControlPhysicalKey::Ctrl);
     let shift = pressed.contains(&ControlPhysicalKey::Shift);
-    let bytes = match key {
+    match key {
         ControlPhysicalKey::Character { text } if ctrl => {
             let text = text.to_ascii_lowercase();
             control_character_byte(&text)
-                .map(|character| vec![character])
-                .unwrap_or_else(|| text.into_bytes())
+                .map_or_else(|| text.into_bytes(), |character| vec![character])
         }
         ControlPhysicalKey::Character { text } if shift => text.to_ascii_uppercase().into_bytes(),
         ControlPhysicalKey::Character { text } => text.as_bytes().to_vec(),
@@ -1217,8 +1215,7 @@ fn legacy_physical_key_bytes(
         ControlPhysicalKey::Delete => b"\x1b[3~".to_vec(),
         ControlPhysicalKey::PageUp => b"\x1b[5~".to_vec(),
         ControlPhysicalKey::PageDown => b"\x1b[6~".to_vec(),
-    };
-    Ok(bytes)
+    }
 }
 
 fn win32_control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
@@ -1258,15 +1255,11 @@ fn win32_control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
                 vec![control]
             }
         }
-        ControlKey::CtrlC => {
-            win32_ctrl_letter('c', 0x03)
-        }
+        ControlKey::CtrlC => win32_ctrl_letter('c', 0x03),
         ControlKey::CtrlD => win32_ctrl_letter('d', 0x04),
         ControlKey::CtrlZ => win32_ctrl_letter('z', 0x1A),
         ControlKey::CtrlL => win32_ctrl_letter('l', 0x0C),
-        ControlKey::KeyDown { .. }
-        | ControlKey::KeyUp { .. }
-        | ControlKey::Delay { .. } => {
+        ControlKey::KeyDown { .. } | ControlKey::KeyUp { .. } | ControlKey::Delay { .. } => {
             eyre::bail!("scripted key actions must be handled by the sequence writer")
         }
     };
@@ -1509,10 +1502,10 @@ fn control_character_byte(character: &str) -> Option<u8> {
 
 fn modified_navigation_sequence(key: &Key, modifiers: ModifiersState) -> Option<Vec<u8>> {
     let modifier = 1
-        + if modifiers.shift_key() { 1 } else { 0 }
-        + if modifiers.alt_key() { 2 } else { 0 }
-        + if modifiers.control_key() { 4 } else { 0 }
-        + if modifiers.super_key() { 8 } else { 0 };
+        + i32::from(modifiers.shift_key())
+        + i32::from(modifiers.alt_key()) * 2
+        + i32::from(modifiers.control_key()) * 4
+        + i32::from(modifiers.super_key()) * 8;
     let has_modifier = modifiers.shift_key()
         || modifiers.alt_key()
         || modifiers.control_key()
@@ -1593,9 +1586,7 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
         ControlKey::CtrlD => vec![0x04],
         ControlKey::CtrlZ => vec![0x1a],
         ControlKey::CtrlL => vec![0x0c],
-        ControlKey::KeyDown { .. }
-        | ControlKey::KeyUp { .. }
-        | ControlKey::Delay { .. } => {
+        ControlKey::KeyDown { .. } | ControlKey::KeyUp { .. } | ControlKey::Delay { .. } => {
             eyre::bail!("scripted key actions must be handled by the sequence writer")
         }
     };
@@ -1683,15 +1674,15 @@ mod tests {
 
     #[test]
     fn ctrl_wheel_font_zoom_is_bounded_and_directional() {
-        assert_eq!(adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, 1.0), 17.0);
-        assert_eq!(adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, -1.0), 15.0);
-        assert_eq!(
-            adjusted_font_pixel_size(MIN_FONT_PIXEL_SIZE, -1.0),
-            MIN_FONT_PIXEL_SIZE
+        assert!((adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, 1.0) - 17.0).abs() < f32::EPSILON);
+        assert!((adjusted_font_pixel_size(DEFAULT_PIXEL_SIZE, -1.0) - 15.0).abs() < f32::EPSILON);
+        assert!(
+            (adjusted_font_pixel_size(MIN_FONT_PIXEL_SIZE, -1.0) - MIN_FONT_PIXEL_SIZE).abs()
+                < f32::EPSILON
         );
-        assert_eq!(
-            adjusted_font_pixel_size(MAX_FONT_PIXEL_SIZE, 1.0),
-            MAX_FONT_PIXEL_SIZE
+        assert!(
+            (adjusted_font_pixel_size(MAX_FONT_PIXEL_SIZE, 1.0) - MAX_FONT_PIXEL_SIZE).abs()
+                < f32::EPSILON
         );
     }
 
@@ -1716,39 +1707,21 @@ mod tests {
     #[test]
     fn mouse_positions_map_to_bounded_terminal_cells() {
         assert_eq!(
-            terminal_cell_at_position(
-                winit::dpi::PhysicalPosition::new(31.9, 47.9),
-                16,
-                24,
-                4,
-                3,
-            ),
+            terminal_cell_at_position(winit::dpi::PhysicalPosition::new(31.9, 47.9), 16, 24, 4, 3,),
             Some(teamy_terminal_core::CursorPosition { column: 1, row: 1 })
         );
         assert_eq!(
-            terminal_cell_at_position(
-                winit::dpi::PhysicalPosition::new(64.0, 0.0),
-                16,
-                24,
-                4,
-                3,
-            ),
+            terminal_cell_at_position(winit::dpi::PhysicalPosition::new(64.0, 0.0), 16, 24, 4, 3,),
             None
         );
         assert_eq!(
-            terminal_cell_at_position(
-                winit::dpi::PhysicalPosition::new(-1.0, 0.0),
-                16,
-                24,
-                4,
-                3,
-            ),
+            terminal_cell_at_position(winit::dpi::PhysicalPosition::new(-1.0, 0.0), 16, 24, 4, 3,),
             None
         );
     }
 
     #[test]
-    fn navigation_and_text_keys_use_pty_sequences() {
+    fn navigation_keys_use_pty_sequences() {
         assert_eq!(
             terminal_input_key(
                 &Key::Named(NamedKey::ArrowLeft),
@@ -1796,6 +1769,10 @@ mod tests {
             control_key_bytes(&ControlKey::CtrlDelete).expect("Ctrl+Delete should encode"),
             b"\x1b[3;5~".to_vec()
         );
+    }
+
+    #[test]
+    fn win32_logical_keys_use_console_input_sequences() {
         assert_eq!(
             win32_control_key_bytes(&ControlKey::CtrlC).expect("Win32 Ctrl+C should encode"),
             b"\x1b[67;46;3;1;8;1_\x1b[67;46;0;0;8;1_".to_vec()
@@ -1829,6 +1806,10 @@ mod tests {
             .expect("Win32 paste should remain raw text"),
             b"Ab".to_vec()
         );
+    }
+
+    #[test]
+    fn win32_physical_keys_track_pressed_modifiers() {
         let numeric_key = ControlPhysicalKey::Character {
             text: String::from("1"),
         };
@@ -1847,17 +1828,17 @@ mod tests {
             text: String::from("c"),
         };
         assert_eq!(
-            win32_physical_key_event_bytes(&ctrl, true, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&ctrl, true, std::slice::from_ref(&ctrl))
                 .expect("Ctrl key down should only update state"),
             Vec::<u8>::new()
         );
         assert_eq!(
-            win32_physical_key_event_bytes(&c, true, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&c, true, std::slice::from_ref(&ctrl))
                 .expect("Ctrl+C key down should encode"),
             b"\x1b[67;46;3;1;8;1_".to_vec()
         );
         assert_eq!(
-            win32_physical_key_event_bytes(&ctrl, false, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&ctrl, false, std::slice::from_ref(&ctrl))
                 .expect("Ctrl key up should only update state"),
             Vec::<u8>::new()
         );
@@ -1870,7 +1851,7 @@ mod tests {
             text: String::from("l"),
         };
         assert_eq!(
-            win32_physical_key_event_bytes(&l, true, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&l, true, std::slice::from_ref(&ctrl))
                 .expect("Ctrl+L key down should use the generic encoder"),
             b"\x1b[76;38;12;1;8;1_".to_vec()
         );
@@ -1880,15 +1861,19 @@ mod tests {
             b"\x1b[76;38;0;0;8;1_".to_vec()
         );
         assert!(
-            win32_physical_key_event_bytes(&ctrl, true, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&ctrl, true, std::slice::from_ref(&ctrl))
                 .expect("Ctrl modifier down should only update state")
                 .is_empty()
         );
         assert!(
-            win32_physical_key_event_bytes(&ctrl, false, &[ctrl.clone()])
+            win32_physical_key_event_bytes(&ctrl, false, std::slice::from_ref(&ctrl))
                 .expect("Ctrl modifier up should only update state")
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn plain_navigation_and_text_keys_use_pty_sequences() {
         assert_eq!(
             terminal_input_key(
                 &Key::Named(NamedKey::ArrowLeft),
@@ -2076,8 +2061,8 @@ mod tests {
         );
         terminal.process_bytes(b"abcdefgh");
         let previous = terminal.snapshot();
-        let width = u32::from(font.cell_width()) * 8;
-        let height = u32::from(font.cell_height());
+        let width = font.cell_width() * 8;
+        let height = font.cell_height();
         let mut cached = font.render(&previous, width, height);
 
         terminal.process_bytes(b"\x1b[1;8H");

@@ -120,27 +120,23 @@ pub enum VulkanOffscreenError {
 }
 
 impl fmt::Display for VulkanOffscreenError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::LoaderUnavailable { detail } => write!(
-                formatter,
+                f,
                 "Vulkan loader unavailable; install a Vulkan runtime/driver: {detail}"
             ),
             Self::InstanceCreation { source } => {
-                write!(
-                    formatter,
-                    "failed to create no-window Vulkan instance: {source:?}"
-                )
+                write!(f, "failed to create no-window Vulkan instance: {source:?}")
             }
-            Self::DeviceEnumeration { source } => write!(
-                formatter,
-                "failed to enumerate Vulkan physical devices: {source:?}"
-            ),
+            Self::DeviceEnumeration { source } => {
+                write!(f, "failed to enumerate Vulkan physical devices: {source:?}")
+            }
             Self::NoCompatibleDevice { detail } => {
-                write!(formatter, "no compatible no-window Vulkan device: {detail}")
+                write!(f, "no compatible no-window Vulkan device: {detail}")
             }
             Self::DeviceCreation { source } => write!(
-                formatter,
+                f,
                 "failed to create no-window Vulkan logical device: {source:?}"
             ),
             Self::InvalidExtent {
@@ -148,29 +144,25 @@ impl fmt::Display for VulkanOffscreenError {
                 height,
                 detail,
             } => write!(
-                formatter,
+                f,
                 "invalid Vulkan offscreen extent {width}x{height}: {detail}"
             ),
             Self::InvalidCacheCapacity => {
-                formatter.write_str("Vulkan offscreen target cache capacity must be non-zero")
+                f.write_str("Vulkan offscreen target cache capacity must be non-zero")
             }
             Self::Allocation { resource, source } => {
-                write!(
-                    formatter,
-                    "failed to allocate Vulkan {resource}: {source:?}"
-                )
+                write!(f, "failed to allocate Vulkan {resource}: {source:?}")
             }
             Self::Operation { operation, source } => {
-                write!(formatter, "Vulkan {operation} failed: {source:?}")
+                write!(f, "Vulkan {operation} failed: {source:?}")
             }
             Self::Timeout { timeout } => write!(
-                formatter,
-                "Vulkan offscreen work exceeded the {:?} completion deadline",
-                timeout
+                f,
+                "Vulkan offscreen work exceeded the {timeout:?} completion deadline"
             ),
-            Self::Cancelled => formatter.write_str("Vulkan offscreen work was cancelled"),
+            Self::Cancelled => f.write_str("Vulkan offscreen work was cancelled"),
             Self::DeviceLost { operation } => write!(
-                formatter,
+                f,
                 "Vulkan device was lost during {operation}; retire GPU presentations"
             ),
         }
@@ -314,9 +306,8 @@ pub struct VulkanOffscreenContext {
 }
 
 impl fmt::Debug for VulkanOffscreenContext {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VulkanOffscreenContext")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VulkanOffscreenContext")
             .field("device", &self.inner.device.facts)
             .field("cache", &self.cache_stats())
             .field("device_lost", &self.is_device_lost())
@@ -338,9 +329,8 @@ impl Clone for VulkanOffscreenSession {
 }
 
 impl fmt::Debug for VulkanOffscreenSession {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VulkanOffscreenSession")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VulkanOffscreenSession")
             .field("id", &self.lease.id)
             .finish_non_exhaustive()
     }
@@ -378,9 +368,8 @@ pub(crate) struct VulkanOffscreenRecording<'a> {
 }
 
 impl fmt::Debug for VulkanOffscreenTarget {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("VulkanOffscreenTarget")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VulkanOffscreenTarget")
             .field("allocation_id", &self.resources.allocation_id)
             .field("width", &self.resources.key.width)
             .field("height", &self.resources.key.height)
@@ -411,6 +400,10 @@ impl VulkanOffscreenDeviceAccess<'_> {
     }
 
     /// Storage/transfer image format guaranteed by the context probe.
+    #[expect(
+        clippy::unused_self,
+        reason = "the instance method keeps device capability queries on the borrowed access seam"
+    )]
     pub(crate) fn target_format(&self) -> vk::Format {
         OFFSCREEN_FORMAT
     }
@@ -443,6 +436,10 @@ impl VulkanOffscreenRecording<'_> {
     }
 
     /// Storage/transfer image format.
+    #[expect(
+        clippy::unused_self,
+        reason = "the instance method keeps target metadata queries on the borrowed recording seam"
+    )]
     pub(crate) fn format(&self) -> vk::Format {
         OFFSCREEN_FORMAT
     }
@@ -473,9 +470,8 @@ struct DeviceShared {
 }
 
 impl fmt::Debug for DeviceShared {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DeviceShared")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DeviceShared")
             .field("physical_device", &self.physical_device)
             .field("facts", &self.facts)
             .field("device_lost", &self.device_lost.load(Ordering::Acquire))
@@ -564,11 +560,22 @@ struct TargetAllocationGuard {
 
 impl VulkanOffscreenContext {
     /// Create a retained no-window Vulkan context with the default bounded cache.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the Vulkan loader, instance, physical-device
+    /// selection, or logical-device initialization is unavailable.
     pub fn new() -> Result<Self, VulkanOffscreenError> {
         Self::with_target_cache_capacity(DEFAULT_TARGET_CACHE_CAPACITY)
     }
 
     /// Create a retained no-window context with an explicit target-cache bound.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `capacity` is zero or when the Vulkan loader,
+    /// instance, physical-device selection, or logical-device initialization
+    /// is unavailable.
     pub fn with_target_cache_capacity(capacity: usize) -> Result<Self, VulkanOffscreenError> {
         let _runtime_span = tracing::info_span!(
             "vulkan_offscreen_context_create",
@@ -868,6 +875,11 @@ impl VulkanOffscreenSession {
     }
 
     /// Acquire or reuse an exact-size RGBA8 target for this session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the parent context has shut down, the extent is
+    /// invalid for the selected device, or Vulkan target allocation fails.
     pub fn target(
         &self,
         width: u32,
@@ -922,6 +934,11 @@ impl VulkanOffscreenTarget {
     }
 
     /// Clear the GPU image and synchronously read back deterministic RGBA8 bytes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if command recording, submission, completion, or host
+    /// readback fails, including timeout or device loss.
     pub fn clear_and_readback(
         &self,
         color: [f32; 4],
@@ -931,6 +948,12 @@ impl VulkanOffscreenTarget {
     }
 
     /// Clear/read back with cooperative cancellation while retaining safe GPU ownership.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if work is cancelled or if command recording,
+    /// submission, completion, or host readback fails, including timeout or
+    /// device loss.
     pub fn clear_and_readback_cancellable(
         &self,
         color: [f32; 4],
@@ -951,14 +974,14 @@ impl VulkanOffscreenTarget {
                 let clear = vk::ClearColorValue { float32: color };
                 // SAFETY: The pass owner transitioned the exclusively-held
                 // image to TRANSFER_DST_OPTIMAL before invoking this callback.
-                unsafe {
+                let () = unsafe {
                     recording.device().cmd_clear_color_image(
                         recording.command_buffer(),
                         recording.image(),
                         vk::ImageLayout::TRANSFER_DST_OPTIMAL,
                         &clear,
                         &[color_subresource_range()],
-                    )
+                    );
                 };
                 Ok(())
             },
@@ -1137,6 +1160,10 @@ impl Drop for SessionLease {
 }
 
 impl TargetResources {
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeping the transactional Vulkan allocation sequence together makes guard cleanup and handle transfer auditable"
+    )]
     fn create(
         shared: Arc<DeviceShared>,
         key: TargetKey,
@@ -1324,6 +1351,10 @@ impl TargetResources {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ordered Vulkan barrier, recording, copy, host-visibility, and submission lifecycle is audited as one transaction"
+    )]
     fn record_pass_and_submit<F>(
         &self,
         operation: &mut TargetOperation,
@@ -1378,7 +1409,7 @@ impl TargetResources {
             .subresource_range(color_subresource_range());
         // SAFETY: The target command buffer and image are exclusively held;
         // the barrier describes the tracked previous layout.
-        unsafe {
+        let () = unsafe {
             self.shared.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 source_stage,
@@ -1387,7 +1418,7 @@ impl TargetResources {
                 &[],
                 &[],
                 &[to_pass],
-            )
+            );
         };
         let recording = VulkanOffscreenRecording {
             device: &self.shared.device,
@@ -1410,7 +1441,7 @@ impl TargetResources {
             .image(self.image)
             .subresource_range(color_subresource_range());
         // SAFETY: The barrier orders the clear before the image-to-buffer copy.
-        unsafe {
+        let () = unsafe {
             self.shared.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 synchronization.source_stage,
@@ -1419,7 +1450,7 @@ impl TargetResources {
                 &[],
                 &[],
                 &[to_copy],
-            )
+            );
         };
         let subresource = vk::ImageSubresourceLayers::default()
             .aspect_mask(vk::ImageAspectFlags::COLOR)
@@ -1455,14 +1486,14 @@ impl TargetResources {
             .collect::<Vec<_>>();
         // SAFETY: The image is transfer-source, the buffer is large enough,
         // and both resources are exclusively owned by this target operation.
-        unsafe {
+        let () = unsafe {
             self.shared.device.cmd_copy_image_to_buffer(
                 self.command_buffer,
                 self.image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 self.readback_buffer,
                 &copies,
-            )
+            );
         };
         let host_read = vk::BufferMemoryBarrier::default()
             .src_access_mask(vk::AccessFlags::TRANSFER_WRITE)
@@ -1473,7 +1504,7 @@ impl TargetResources {
             .offset(0)
             .size(vk::WHOLE_SIZE);
         // SAFETY: This makes the completed transfer visible to host reads.
-        unsafe {
+        let () = unsafe {
             self.shared.device.cmd_pipeline_barrier(
                 self.command_buffer,
                 vk::PipelineStageFlags::TRANSFER,
@@ -1482,7 +1513,7 @@ impl TargetResources {
                 &[],
                 &[host_read],
                 &[],
-            )
+            );
         };
         // SAFETY: The command buffer is recording and all referenced resources
         // remain live until its fence completes.
@@ -1636,15 +1667,17 @@ impl TargetResources {
         let mut output = Vec::with_capacity(regions.len());
         for region in regions {
             let byte_len = usize::try_from(u64::from(region.width) * u64::from(region.height) * 4)
-                .map_err(|_| VulkanOffscreenError::InvalidExtent {
+                .map_err(|_conversion_error| VulkanOffscreenError::InvalidExtent {
                     width: region.width,
                     height: region.height,
                     detail: "regional readback byte length exceeds host address space".to_owned(),
                 })?;
-            // SAFETY: Validation proved the packed offset/range lies in the mapped allocation.
-            let rgba =
-                unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().add(offset), byte_len) }
-                    .to_vec();
+            // SAFETY: Validation proved the packed offset lies in the mapped allocation.
+            let region_start = unsafe { mapped.cast::<u8>().add(offset) };
+            // SAFETY: Validation proved the packed range starting at
+            // `region_start` lies entirely in the mapped allocation.
+            let region_bytes = unsafe { std::slice::from_raw_parts(region_start, byte_len) };
+            let rgba = region_bytes.to_vec();
             output.push(VulkanOffscreenRegionReadback {
                 region: *region,
                 rgba,
@@ -1672,23 +1705,33 @@ impl Drop for TargetResources {
                     .wait_for_fences(&[self.fence], true, u64::MAX)
             };
         }
-        // SAFETY: Drop runs exactly once, after in-flight work completes (or
-        // device loss), and all handles belong to this live device.
-        unsafe {
-            self.shared.device.destroy_fence(self.fence, None);
+        // SAFETY: Drop runs exactly once after in-flight work completes (or
+        // device loss), and this fence belongs to the live device.
+        unsafe { self.shared.device.destroy_fence(self.fence, None) };
+        // SAFETY: The target owns this idle command pool on the live device.
+        let () = unsafe {
             self.shared
                 .device
                 .destroy_command_pool(self.command_pool, None);
+        };
+        // SAFETY: The completed target owns this readback buffer.
+        let () = unsafe {
             self.shared
                 .device
                 .destroy_buffer(self.readback_buffer, None);
-            self.shared.device.free_memory(self.readback_memory, None);
-            self.shared.device.destroy_buffer(self.staging_buffer, None);
-            self.shared.device.free_memory(self.staging_memory, None);
-            self.shared.device.destroy_image_view(self.image_view, None);
-            self.shared.device.destroy_image(self.image, None);
-            self.shared.device.free_memory(self.image_memory, None);
-        }
+        };
+        // SAFETY: The readback buffer is destroyed before its owned memory.
+        let () = unsafe { self.shared.device.free_memory(self.readback_memory, None) };
+        // SAFETY: The completed target owns this staging buffer.
+        let () = unsafe { self.shared.device.destroy_buffer(self.staging_buffer, None) };
+        // SAFETY: The staging buffer is destroyed before its owned memory.
+        let () = unsafe { self.shared.device.free_memory(self.staging_memory, None) };
+        // SAFETY: The completed target owns this image view.
+        let () = unsafe { self.shared.device.destroy_image_view(self.image_view, None) };
+        // SAFETY: The image view is destroyed before its owned image.
+        unsafe { self.shared.device.destroy_image(self.image, None) };
+        // SAFETY: The image is destroyed before its owned memory.
+        unsafe { self.shared.device.free_memory(self.image_memory, None) };
         self.shared.destructions.fetch_add(1, Ordering::AcqRel);
     }
 }
@@ -1716,40 +1759,58 @@ impl Drop for TargetAllocationGuard {
         if !self.armed {
             return;
         }
-        // SAFETY: Every non-null handle was created by this device and no work
-        // has been submitted with these partially-built resources.
-        unsafe {
-            if self.fence != vk::Fence::null() {
-                self.shared.device.destroy_fence(self.fence, None);
-            }
-            if self.command_pool != vk::CommandPool::null() {
+        if self.fence != vk::Fence::null() {
+            // SAFETY: The non-null fence was created by this device and no work
+            // was submitted with the partially-built target.
+            unsafe { self.shared.device.destroy_fence(self.fence, None) };
+        }
+        if self.command_pool != vk::CommandPool::null() {
+            // SAFETY: The non-null idle pool was created by this device.
+            unsafe {
                 self.shared
                     .device
                     .destroy_command_pool(self.command_pool, None);
             }
-            if self.readback_buffer != vk::Buffer::null() {
+        }
+        if self.readback_buffer != vk::Buffer::null() {
+            // SAFETY: The non-null unsubmitted buffer was created by this device.
+            unsafe {
                 self.shared
                     .device
                     .destroy_buffer(self.readback_buffer, None);
             }
-            if self.readback_memory != vk::DeviceMemory::null() {
+        }
+        if self.readback_memory != vk::DeviceMemory::null() {
+            // SAFETY: The readback buffer is destroyed before its owned memory.
+            unsafe {
                 self.shared.device.free_memory(self.readback_memory, None);
             }
-            if self.staging_buffer != vk::Buffer::null() {
+        }
+        if self.staging_buffer != vk::Buffer::null() {
+            // SAFETY: The non-null unsubmitted buffer was created by this device.
+            unsafe {
                 self.shared.device.destroy_buffer(self.staging_buffer, None);
             }
-            if self.staging_memory != vk::DeviceMemory::null() {
+        }
+        if self.staging_memory != vk::DeviceMemory::null() {
+            // SAFETY: The staging buffer is destroyed before its owned memory.
+            unsafe {
                 self.shared.device.free_memory(self.staging_memory, None);
             }
-            if self.image != vk::Image::null() {
-                if self.image_view != vk::ImageView::null() {
+        }
+        if self.image != vk::Image::null() {
+            if self.image_view != vk::ImageView::null() {
+                // SAFETY: The non-null view was created from this image by this device.
+                unsafe {
                     self.shared.device.destroy_image_view(self.image_view, None);
                 }
-                self.shared.device.destroy_image(self.image, None);
             }
-            if self.image_memory != vk::DeviceMemory::null() {
-                self.shared.device.free_memory(self.image_memory, None);
-            }
+            // SAFETY: The image view is absent or destroyed, and no work was submitted.
+            unsafe { self.shared.device.destroy_image(self.image, None) };
+        }
+        if self.image_memory != vk::DeviceMemory::null() {
+            // SAFETY: The image is absent or destroyed before its owned memory.
+            unsafe { self.shared.device.free_memory(self.image_memory, None) };
         }
     }
 }
@@ -1785,12 +1846,10 @@ impl Drop for DeviceShared {
             // and leased targets have released their resources.
             let _ = unsafe { self.device.device_wait_idle() };
         }
-        // SAFETY: The logical device and instance are live and destroyed once,
-        // in parent-before-entry order.
-        unsafe {
-            self.device.destroy_device(None);
-            self.instance.destroy_instance(None);
-        }
+        // SAFETY: The logical device is live, idle (or lost), and destroyed once.
+        unsafe { self.device.destroy_device(None) };
+        // SAFETY: The child logical device is destroyed before its live instance.
+        unsafe { self.instance.destroy_instance(None) };
     }
 }
 
@@ -1852,11 +1911,12 @@ fn select_physical_device(
             rejection_reasons.push(format!("{device_name}: no graphics queue family"));
             continue;
         };
-        let queue_family_index = u32::try_from(queue_family_index).map_err(|_| {
-            VulkanOffscreenError::NoCompatibleDevice {
-                detail: "queue-family index exceeds u32".to_owned(),
-            }
-        })?;
+        let queue_family_index =
+            u32::try_from(queue_family_index).map_err(|_conversion_error| {
+                VulkanOffscreenError::NoCompatibleDevice {
+                    detail: "queue-family index exceeds u32".to_owned(),
+                }
+            })?;
         return Ok(DeviceSelection {
             physical_device,
             queue_family_index,
@@ -2279,7 +2339,7 @@ mod tests {
             let state = unsafe { &mut *(state.0 as *mut Enumeration) };
             let mut owner = 0_u32;
             // SAFETY: The HWND comes from EnumWindows and owner points to live stack storage.
-            unsafe { GetWindowThreadProcessId(window, Some(&mut owner)) };
+            unsafe { GetWindowThreadProcessId(window, Some(&raw mut owner)) };
             if owner == state.process_id {
                 state.windows.insert(window.0 as isize);
             }

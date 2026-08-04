@@ -18,6 +18,12 @@ pub struct ServeArgs {
 }
 
 impl ServeArgs {
+    /// Runs the terminal server until it exits or cancellation is requested.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the listen address is invalid, the async runtime
+    /// cannot be created, or the terminal server fails.
     pub fn invoke(self, cancellation_token: CancellationToken) -> eyre::Result<CliOutput> {
         let address = self
             .address

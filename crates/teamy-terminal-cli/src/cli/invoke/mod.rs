@@ -13,4 +13,5 @@ pub mod send_keys;
 pub mod send_text;
 pub mod zoom;
 
-pub use teamy_terminal_invoke_cli::{InvokeAction, InvokeArgs};
+pub use teamy_terminal_invoke_cli::InvokeAction;
+pub use teamy_terminal_invoke_cli::InvokeArgs;

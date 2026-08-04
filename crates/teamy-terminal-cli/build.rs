@@ -6,6 +6,7 @@ fn main() {
     add_build_script_inputs();
     add_exe_resources();
     add_git_metadata();
+    add_toolchain_metadata();
     add_build_timestamp();
 }
 
@@ -60,6 +61,27 @@ fn add_git_metadata_inputs() {
     {
         println!("cargo:rerun-if-changed={head_ref_path}");
     }
+}
+
+fn add_toolchain_metadata() {
+    let rustc = std::env::var_os("RUSTC").unwrap_or_else(|| "rustc".into());
+    let rustc_version = Command::new(rustc)
+        .arg("--version")
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map_or_else(
+            || "unknown".to_string(),
+            |version| version.trim().to_string(),
+        );
+    let target = std::env::var("TARGET").unwrap_or_else(|_| "unknown".to_string());
+    let host = std::env::var("HOST").unwrap_or_else(|_| "unknown".to_string());
+    let profile = std::env::var("PROFILE").unwrap_or_else(|_| "unknown".to_string());
+    println!("cargo:rustc-env=RUSTC_VERSION={rustc_version}");
+    println!("cargo:rustc-env=BUILD_TARGET={target}");
+    println!("cargo:rustc-env=BUILD_HOST={host}");
+    println!("cargo:rustc-env=BUILD_PROFILE={profile}");
 }
 
 fn git_output(args: &[&str]) -> Option<String> {

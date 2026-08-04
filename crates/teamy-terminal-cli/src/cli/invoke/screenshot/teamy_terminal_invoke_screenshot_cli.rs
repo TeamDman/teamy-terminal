@@ -12,6 +12,11 @@ pub struct ScreenshotArgs {
 }
 
 impl ScreenshotArgs {
+    /// Resolves the requested screenshot path against the current directory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the process current directory cannot be read.
     pub fn resolve_path(&self) -> eyre::Result<PathBuf> {
         let path = PathBuf::from(&self.path);
         if path.is_absolute() {

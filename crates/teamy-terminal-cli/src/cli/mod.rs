@@ -9,7 +9,8 @@ use crate::cli::global_args::GlobalArgs;
 use crate::cli::output::CliOutput;
 use arbitrary::Arbitrary;
 use facet::Facet;
-use figue::{self as args, FigueBuiltins};
+use figue::FigueBuiltins;
+use figue::{self as args};
 use teamy_cancellation::CancellationToken;
 
 /// Teamy Terminal command line utility.
@@ -61,13 +62,12 @@ impl Cli {
     pub fn invoke(self, cancellation_token: &CancellationToken) -> eyre::Result<CliOutput> {
         cancellation_token.bail_if_cancelled()?;
         let initially_hidden = self.global_args.hidden;
-        match self.command {
-            Some(command) => command.invoke(cancellation_token.clone()),
-            None => {
-                crate::interactive::run(cancellation_token, initially_hidden)?;
-                Ok(CliOutput::none())
-            }
+        if let Some(command) = self.command {
+            return command.invoke(cancellation_token.clone());
         }
+
+        crate::interactive::run(cancellation_token, initially_hidden)?;
+        Ok(CliOutput::none())
     }
 }
 

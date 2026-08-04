@@ -12,6 +12,11 @@ pub struct SendKeysArgs {
 }
 
 impl SendKeysArgs {
+    /// Parses the explicit key sequence into a control-plane action.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `spec` contains an invalid key action or value.
     pub fn into_control_action(self) -> eyre::Result<teamy_terminal_control::ControlAction> {
         Ok(teamy_terminal_control::ControlAction::SendKeys {
             keys: teamy_terminal_control::parse_key_sequence(&self.spec)?,

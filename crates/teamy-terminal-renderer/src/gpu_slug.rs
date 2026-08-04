@@ -583,7 +583,7 @@ impl GpuSlugRuntime {
                 .ok_or_else(|| GpuSlugRendererError::InvalidRequest {
                     detail: "fitted font pixel size is not representable as f32".to_owned(),
                 })?;
-            if next >= pixel_size || (pixel_size - next) < f32::EPSILON {
+            if next >= pixel_size || (pixel_size - next).abs() < f32::EPSILON {
                 break;
             }
             pixel_size = next;
@@ -764,14 +764,14 @@ impl GpuSlugRenderer {
         let full_readback = request.force_full_refresh || request.damage.is_empty();
         #[cfg(feature = "tracy")]
         let raster_span = info_span!("gpu_slug_raster_readback").entered();
-        let state = &self.state;
+        let pipeline_state = &self.state;
         let completed_readback = if full_readback {
             let readback = target.record_compute_and_readback(
                 request.timeout,
                 request.cancellation,
                 |recording| {
                     record_slug_dispatch(
-                        state,
+                        pipeline_state,
                         recording,
                         request.width,
                         request.height,
@@ -789,7 +789,7 @@ impl GpuSlugRenderer {
                 request.cancellation,
                 |recording| {
                     record_slug_dispatch(
-                        state,
+                        pipeline_state,
                         recording,
                         request.width,
                         request.height,
@@ -817,7 +817,7 @@ impl GpuSlugRenderer {
         };
         #[cfg(feature = "tracy")]
         drop(pack_span);
-        let stats = GpuSlugRenderStats {
+        let render_stats = GpuSlugRenderStats {
             geometry_build_us,
             outline_extraction_us: outline_stage_us,
             directional_band_build_us: band_stage_us,
@@ -839,20 +839,20 @@ impl GpuSlugRenderer {
         #[cfg(feature = "extended_observability")]
         tracing::debug!(
             target: "teamy_terminal::gpu_slug",
-            geometry_build_us = stats.geometry_build_us,
-            outline_extraction_us = stats.outline_extraction_us,
-            directional_band_build_us = stats.directional_band_build_us,
-            upload_bytes = stats.upload_bytes,
-            command_record_us = stats.command_record_us,
-            queue_submit_us = stats.queue_submit_us,
-            gpu_completion_wait_us = stats.gpu_completion_wait_us,
-            readback_map_copy_us = stats.readback_map_copy_us,
-            payload_pack_us = stats.payload_pack_us,
-            full_rgba_pack_us = ?stats.full_rgba_pack_us,
-            dirty_region_pack_us = ?stats.dirty_region_pack_us,
-            raw_packet_pack_us = ?stats.raw_packet_pack_us,
-            png_packet_pack_us = ?stats.png_packet_pack_us,
-            requested_pixels = stats.requested_pixels,
+            geometry_build_us = render_stats.geometry_build_us,
+            outline_extraction_us = render_stats.outline_extraction_us,
+            directional_band_build_us = render_stats.directional_band_build_us,
+            upload_bytes = render_stats.upload_bytes,
+            command_record_us = render_stats.command_record_us,
+            queue_submit_us = render_stats.queue_submit_us,
+            gpu_completion_wait_us = render_stats.gpu_completion_wait_us,
+            readback_map_copy_us = render_stats.readback_map_copy_us,
+            payload_pack_us = render_stats.payload_pack_us,
+            full_rgba_pack_us = ?render_stats.full_rgba_pack_us,
+            dirty_region_pack_us = ?render_stats.dirty_region_pack_us,
+            raw_packet_pack_us = ?render_stats.raw_packet_pack_us,
+            png_packet_pack_us = ?render_stats.png_packet_pack_us,
+            requested_pixels = render_stats.requested_pixels,
             geometry_hits = self.state.geometry_hits,
             geometry_misses = self.state.geometry_misses,
             "completed retained GPU Slug raster/readback"
@@ -870,7 +870,7 @@ impl GpuSlugRenderer {
             metrics,
             identity: request.identity,
             visual_hash: payload.visual_hash,
-            stats,
+            stats: render_stats,
             cache: self.cache_stats(),
         })
     }
@@ -901,7 +901,7 @@ fn record_slug_dispatch(
             recording.command_buffer(),
             vk::PipelineBindPoint::COMPUTE,
             state.shared.pipeline,
-        )
+        );
     };
     // SAFETY: The retained layout/set belong to this pipeline and all ranges are valid.
     unsafe {
@@ -912,7 +912,7 @@ fn record_slug_dispatch(
             0,
             &[state.descriptor_set],
             &[],
-        )
+        );
     };
     // SAFETY: The bound pipeline/set and target remain live for this bounded dispatch.
     unsafe {
@@ -921,7 +921,7 @@ fn record_slug_dispatch(
             group_count_x,
             group_count_y,
             group_count_z,
-        )
+        );
     };
     Ok(())
 }
@@ -1445,12 +1445,12 @@ impl Drop for GpuSlugShared {
         unsafe {
             self.device
                 .destroy_pipeline_layout(self.pipeline_layout, None);
-        }
+        };
         // SAFETY: No descriptor sets remain and this layout is no longer referenced.
         unsafe {
             self.device
                 .destroy_descriptor_set_layout(self.descriptor_set_layout, None);
-        }
+        };
         // SAFETY: Pipeline creation completed and no pipeline now references this module.
         unsafe { self.device.destroy_shader_module(self.shader_module, None) };
         let _ = &self.context;
@@ -2094,21 +2094,33 @@ mod tests {
             let metrics = font.metrics();
             let scale = 48.0 / f32::from(metrics.units_per_em);
             let surface = surface_metrics(&font, 48.0).expect("surface metrics");
-            let offset = ((surface.cell_width as f32 - geometry.advance * scale).max(0.0)) * 0.5;
+            let cell_width = surface
+                .cell_width
+                .to_f32()
+                .expect("test cell width should be representable as f32");
+            let offset = ((cell_width - geometry.advance * scale).max(0.0)) * 0.5;
             let rgba = full_rgba(&result);
             let mut oracle_occupied = 0_u32;
             let mut gpu_occupied = 0_u32;
             for y in 0..surface.cell_height.min(64) {
                 for x in 0..surface.cell_width.min(64) {
+                    let sample_x = x
+                        .to_f32()
+                        .expect("test x coordinate should be representable as f32");
+                    let sample_y = y
+                        .to_f32()
+                        .expect("test y coordinate should be representable as f32");
                     let sample = Point::new(
-                        (x as f32 + 0.5 - offset) / scale,
-                        metrics.ascender - (y as f32 + 0.5) / scale,
+                        (sample_x + 0.5 - offset) / scale,
+                        metrics.ascender - (sample_y + 0.5) / scale,
                     );
                     let oracle =
                         coverage_all_curves(&geometry.curves, geometry.bounds, sample, scale)
                             .expect("oracle coverage");
                     oracle_occupied += u32::from(oracle >= 0.2);
-                    let index = (y as usize * 64 + x as usize) * 4;
+                    let row = usize::try_from(y).expect("test row should fit usize");
+                    let column = usize::try_from(x).expect("test column should fit usize");
+                    let index = (row * 64 + column) * 4;
                     gpu_occupied += u32::from(rgba[index] >= 42);
                 }
             }
@@ -2334,11 +2346,7 @@ mod tests {
         assert!(direct.cache.targets.reuses >= 2);
     }
 
-    #[test]
-    fn wide_combining_and_missing_glyph_contract_is_explicit() {
-        let Some(mut renderer) = gpu_renderer() else {
-            return;
-        };
+    fn assert_wide_glyph_contract(renderer: &mut GpuSlugRenderer) {
         let mut wide = snapshot("界 ", 2, 1);
         wide.cells[0].underline = true;
         wide.selection = Some(SelectionRange {
@@ -2378,7 +2386,9 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel[0] > 30)
         );
+    }
 
+    fn assert_combining_glyph_contract(renderer: &mut GpuSlugRenderer) {
         let mut combining_terminal = TerminalSession::new(TerminalLimits::default(), 2, 1);
         combining_terminal.process_bytes("\u{001b}[?25le\u{0301}".as_bytes());
         let combining = combining_terminal.snapshot();
@@ -2430,7 +2440,9 @@ mod tests {
             !second_cell_has_ink,
             "combining scalar must overlay the base instead of consuming the next cell"
         );
+    }
 
+    fn assert_missing_glyph_contract(renderer: &mut GpuSlugRenderer) {
         let missing_character = char::from_u32(0x10_FFFF).expect("valid scalar");
         let missing = snapshot(&missing_character.to_string(), 1, 1);
         let question = snapshot("?", 1, 1);
@@ -2454,6 +2466,16 @@ mod tests {
             .expect("question-mark glyph");
         assert_eq!(missing_result.visual_hash, question_result.visual_hash);
         assert_eq!(full_rgba(&missing_result), full_rgba(&question_result));
+    }
+
+    #[test]
+    fn wide_combining_and_missing_glyph_contract_is_explicit() {
+        let Some(mut renderer) = gpu_renderer() else {
+            return;
+        };
+        assert_wide_glyph_contract(&mut renderer);
+        assert_combining_glyph_contract(&mut renderer);
+        assert_missing_glyph_contract(&mut renderer);
     }
 
     #[test]

@@ -5,48 +5,109 @@
 //! CPU Fontdue and no-window GPU Slug can each publish full PNG, full raw RGBA,
 //! or packed dirty raw RGBA through the generated Vox contract.
 
-use eyre::{Context, Result};
+use eyre::Context;
+use eyre::Result;
 use facet::Facet;
-use spec_proto::terminal::{
-    Terminal, TerminalAlphaMode, TerminalCancelRequest, TerminalCapabilities,
-    TerminalCapabilitiesRequest, TerminalCapabilitiesResult, TerminalColorSpace,
-    TerminalConnectRequest, TerminalConnectResult, TerminalContentRequest, TerminalContentResult,
-    TerminalCursor, TerminalDisconnectRequest, TerminalDispatcher, TerminalError,
-    TerminalErrorCode, TerminalFrameEncoding, TerminalFrameEvent, TerminalFrameKind,
-    TerminalFrameOrigin, TerminalInputResult, TerminalKeyInput, TerminalMouseInput,
-    TerminalOperationResult, TerminalPresentationCapabilitiesRequest,
-    TerminalPresentationCapabilitiesResult, TerminalPresentationMode,
-    TerminalPresentationUnavailable, TerminalPromptMetadata, TerminalPublicationTelemetry,
-    TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent, TerminalRasterFrameKind,
-    TerminalRasterRegion, TerminalRasterRendererTelemetry, TerminalRasterSnapshotTiming,
-    TerminalRasterSubscribeRequest, TerminalRasterizationOwner, TerminalResizeRequest,
-    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
-    TerminalSnapshotTiming, TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics,
-    TerminalTextInput,
-};
+use spec_proto::terminal::Terminal;
+use spec_proto::terminal::TerminalAlphaMode;
+use spec_proto::terminal::TerminalCancelRequest;
+use spec_proto::terminal::TerminalCapabilities;
+use spec_proto::terminal::TerminalCapabilitiesRequest;
+use spec_proto::terminal::TerminalCapabilitiesResult;
+use spec_proto::terminal::TerminalColorSpace;
+use spec_proto::terminal::TerminalConnectRequest;
+use spec_proto::terminal::TerminalConnectResult;
+use spec_proto::terminal::TerminalContentRequest;
+use spec_proto::terminal::TerminalContentResult;
+use spec_proto::terminal::TerminalCursor;
+use spec_proto::terminal::TerminalDisconnectRequest;
+use spec_proto::terminal::TerminalDispatcher;
+use spec_proto::terminal::TerminalError;
+use spec_proto::terminal::TerminalErrorCode;
+use spec_proto::terminal::TerminalFrameEncoding;
+use spec_proto::terminal::TerminalFrameEvent;
+use spec_proto::terminal::TerminalFrameKind;
+use spec_proto::terminal::TerminalFrameOrigin;
+use spec_proto::terminal::TerminalInputResult;
+use spec_proto::terminal::TerminalKeyInput;
+use spec_proto::terminal::TerminalMouseInput;
+use spec_proto::terminal::TerminalOperationResult;
+use spec_proto::terminal::TerminalPresentationCapabilitiesRequest;
+use spec_proto::terminal::TerminalPresentationCapabilitiesResult;
+use spec_proto::terminal::TerminalPresentationMode;
+use spec_proto::terminal::TerminalPresentationUnavailable;
+use spec_proto::terminal::TerminalPromptMetadata;
+use spec_proto::terminal::TerminalPublicationTelemetry;
+use spec_proto::terminal::TerminalRange;
+use spec_proto::terminal::TerminalRasterFrame;
+use spec_proto::terminal::TerminalRasterFrameEvent;
+use spec_proto::terminal::TerminalRasterFrameKind;
+use spec_proto::terminal::TerminalRasterRegion;
+use spec_proto::terminal::TerminalRasterRendererTelemetry;
+use spec_proto::terminal::TerminalRasterSnapshotTiming;
+use spec_proto::terminal::TerminalRasterSubscribeRequest;
+use spec_proto::terminal::TerminalRasterizationOwner;
+use spec_proto::terminal::TerminalResizeRequest;
+use spec_proto::terminal::TerminalResizeResult;
+use spec_proto::terminal::TerminalSelection;
+use spec_proto::terminal::TerminalSnapshot;
+use spec_proto::terminal::TerminalSnapshotRequest;
+use spec_proto::terminal::TerminalSnapshotTiming;
+use spec_proto::terminal::TerminalState;
+use spec_proto::terminal::TerminalSubscribeRequest;
+use spec_proto::terminal::TerminalSurfaceMetrics;
+use spec_proto::terminal::TerminalTextInput;
 use std::collections::BTreeMap;
 use std::io::Cursor;
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::mpsc::{self, SyncSender};
-use std::sync::{Arc, Mutex, OnceLock, Weak};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::OnceLock;
+use std::sync::Weak;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicI64;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::mpsc::SyncSender;
+use std::sync::mpsc::{self};
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
 use teamy_terminal_control::ControlPhysicalKey;
-use teamy_terminal_core::{TerminalLimits, TerminalSession};
-use teamy_terminal_font::{
-    DEFAULT_PIXEL_SIZE, EMBEDDED_FONT_ID, EMBEDDED_FONT_SHA256, RasterizedFrame, TerminalFont,
-    TerminalFontCatalog, damage_regions,
-};
-use teamy_terminal_frame::{
-    FrameCompression, MAX_DIRTY_REGIONS, PackedRasterRegion, RASTER_FRAME_CONTRACT_VERSION,
-    RasterFrameUpdate, RasterRect, RasterUpdateKind,
-};
-use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
-use teamy_terminal_renderer::{
-    GPU_SLUG_SHADER_SOURCE_IDENTITY, GpuSlugCacheStats, GpuSlugRenderIdentity,
-    GpuSlugRenderRequest, GpuSlugRenderStats, GpuSlugRenderer, GpuSlugRendererError,
-    GpuSlugRuntime, VulkanOffscreenCancellation, VulkanOffscreenContext, VulkanOffscreenError,
-};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
+use teamy_terminal_core::TerminalLimits;
+use teamy_terminal_core::TerminalSession;
+use teamy_terminal_font::DEFAULT_PIXEL_SIZE;
+use teamy_terminal_font::EMBEDDED_FONT_ID;
+use teamy_terminal_font::EMBEDDED_FONT_SHA256;
+use teamy_terminal_font::RasterizedFrame;
+use teamy_terminal_font::TerminalFont;
+use teamy_terminal_font::TerminalFontCatalog;
+use teamy_terminal_font::damage_regions;
+use teamy_terminal_frame::FrameCompression;
+use teamy_terminal_frame::MAX_DIRTY_REGIONS;
+use teamy_terminal_frame::PackedRasterRegion;
+use teamy_terminal_frame::RASTER_FRAME_CONTRACT_VERSION;
+use teamy_terminal_frame::RasterFrameUpdate;
+use teamy_terminal_frame::RasterRect;
+use teamy_terminal_frame::RasterUpdateKind;
+use teamy_terminal_pty::PtyConfig;
+use teamy_terminal_pty::PtyEvent;
+use teamy_terminal_pty::PtySession;
+use teamy_terminal_pty::PtySessionControl;
+use teamy_terminal_renderer::GPU_SLUG_SHADER_SOURCE_IDENTITY;
+use teamy_terminal_renderer::GpuSlugCacheStats;
+use teamy_terminal_renderer::GpuSlugRenderIdentity;
+use teamy_terminal_renderer::GpuSlugRenderRequest;
+use teamy_terminal_renderer::GpuSlugRenderStats;
+use teamy_terminal_renderer::GpuSlugRenderer;
+use teamy_terminal_renderer::GpuSlugRendererError;
+use teamy_terminal_renderer::GpuSlugRuntime;
+use teamy_terminal_renderer::VulkanOffscreenCancellation;
+use teamy_terminal_renderer::VulkanOffscreenContext;
+use teamy_terminal_renderer::VulkanOffscreenError;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::sync::watch;
 use vox_terminal as vox;
 
 const MAX_COLUMNS: u16 = 240;
@@ -73,6 +134,35 @@ const TRANSPORT_FULL_PNG: &str = "full-png";
 const TRANSPORT_FULL_RAW_RGBA: &str = "full-raw-rgba";
 const TRANSPORT_DIRTY_RAW_RGBA: &str = "dirty-raw-rgba";
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
+
+fn elapsed_micros(started: Instant) -> u64 {
+    u64::try_from(started.elapsed().as_micros()).unwrap_or(u64::MAX)
+}
+
+fn pixel_dimension_as_f32(value: u32) -> Result<f32> {
+    Ok(f32::from(u16::try_from(value).wrap_err(
+        "terminal pixel dimension exceeds the protocol bound",
+    )?))
+}
+
+#[expect(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite rounded value is range-checked immediately before this conversion"
+)]
+fn rounded_font_pixel_size(pixel_size: f32) -> Result<u16> {
+    let rounded = pixel_size.round();
+    if !rounded.is_finite() || !(0.0..=f32::from(u16::MAX)).contains(&rounded) {
+        return Err(eyre::eyre!(
+            "font pixel size {pixel_size} cannot be represented by the terminal protocol"
+        ));
+    }
+    Ok(rounded as u16)
+}
+
+fn max_dirty_regions() -> u16 {
+    u16::try_from(MAX_DIRTY_REGIONS).expect("dirty-region contract limit fits in u16")
+}
 
 static PROCESS_EPOCH: OnceLock<String> = OnceLock::new();
 static PROCESS_GPU_REGISTRY: OnceLock<Arc<GpuRendererRegistry>> = OnceLock::new();
@@ -128,7 +218,7 @@ fn modified_navigation_bytes(key_code: u32, modifiers: u32) -> Option<Vec<u8>> {
 }
 
 fn control_byte(key_code: u32) -> Option<u8> {
-    if (b'A' as u32..=b'Z' as u32).contains(&key_code) {
+    if (u32::from(b'A')..=u32::from(b'Z')).contains(&key_code) {
         return u8::try_from(key_code - u32::from(b'A') + 1).ok();
     }
     match key_code {
@@ -148,25 +238,22 @@ fn key_input_bytes(
     pressed: bool,
     win32_input_mode: bool,
 ) -> Vec<u8> {
-    if win32_input_mode && modifiers & GLFW_MOD_SUPER == 0 {
-        if let Some(key) = control_physical_key(key_code, modifiers) {
-            let mut pressed_keys = Vec::new();
-            if modifiers & GLFW_MOD_CONTROL != 0 {
-                pressed_keys.push(ControlPhysicalKey::Ctrl);
-            }
-            if modifiers & GLFW_MOD_SHIFT != 0 {
-                pressed_keys.push(ControlPhysicalKey::Shift);
-            }
-            if modifiers & GLFW_MOD_ALT != 0 {
-                pressed_keys.push(ControlPhysicalKey::Alt);
-            }
-            return crate::interactive::win32_physical_key_event_bytes(
-                &key,
-                pressed,
-                &pressed_keys,
-            )
-            .expect("GLFW key should encode as a Win32 physical event");
+    if win32_input_mode
+        && modifiers & GLFW_MOD_SUPER == 0
+        && let Some(key) = control_physical_key(key_code, modifiers)
+    {
+        let mut pressed_keys = Vec::new();
+        if modifiers & GLFW_MOD_CONTROL != 0 {
+            pressed_keys.push(ControlPhysicalKey::Ctrl);
         }
+        if modifiers & GLFW_MOD_SHIFT != 0 {
+            pressed_keys.push(ControlPhysicalKey::Shift);
+        }
+        if modifiers & GLFW_MOD_ALT != 0 {
+            pressed_keys.push(ControlPhysicalKey::Alt);
+        }
+        return crate::interactive::win32_physical_key_event_bytes(&key, pressed, &pressed_keys)
+            .expect("GLFW key should encode as a Win32 physical event");
     }
     if !pressed {
         return Vec::new();
@@ -245,6 +332,10 @@ fn control_physical_key(key_code: u32, modifiers: u32) -> Option<ControlPhysical
     })
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the arguments mirror the stable terminal mouse-input protocol fields"
+)]
 fn mouse_input_bytes(
     terminal: &TerminalSession,
     x: u16,
@@ -260,7 +351,7 @@ fn mouse_input_bytes(
         return Vec::new();
     }
     let motion_button = if motion {
-        buttons.trailing_zeros().min(2) as u16
+        u16::try_from(buttons.trailing_zeros().min(2)).unwrap_or(2)
     } else {
         u16::from(button.min(2))
     };
@@ -385,10 +476,10 @@ impl GpuRendererRegistry {
     }
 
     fn runtime(&self, server_sequence: i64) -> Result<GpuSlugRuntime, TerminalError> {
-        let state = self.state.lock().map_err(|_| {
+        let state = self.state.lock().map_err(|error| {
             VoxTerminalService::error(
                 TerminalErrorCode::Internal,
-                "GPU terminal renderer registry lock poisoned",
+                format!("GPU terminal renderer registry lock poisoned: {error}"),
                 server_sequence,
             )
         })?;
@@ -407,10 +498,10 @@ impl GpuRendererRegistry {
         &self,
         server_sequence: i64,
     ) -> Result<GpuCapabilitySnapshot, TerminalError> {
-        let state = self.state.lock().map_err(|_| {
+        let state = self.state.lock().map_err(|error| {
             VoxTerminalService::error(
                 TerminalErrorCode::Internal,
-                "GPU terminal renderer registry lock poisoned",
+                format!("GPU terminal renderer registry lock poisoned: {error}"),
                 server_sequence,
             )
         })?;
@@ -620,10 +711,10 @@ impl TerminalSessionRuntime {
         let permit = Arc::clone(&self.raster_render_permits)
             .acquire_owned()
             .await
-            .map_err(|_| {
+            .map_err(|error| {
                 VoxTerminalService::error(
                     TerminalErrorCode::Disconnected,
-                    "terminal session closed while waiting for a raster renderer",
+                    format!("terminal session closed while waiting for a raster renderer: {error}"),
                     self.sequence(),
                 )
             })?;
@@ -886,8 +977,10 @@ impl TerminalRenderResources {
         } else {
             u32::from(requested_pixel_height)
         };
-        let width_scale = target_width as f32 / default_width.max(1) as f32;
-        let height_scale = target_height as f32 / default_height.max(1) as f32;
+        let width_scale =
+            pixel_dimension_as_f32(target_width)? / pixel_dimension_as_f32(default_width.max(1))?;
+        let height_scale =
+            pixel_dimension_as_f32(target_height)? / pixel_dimension_as_f32(default_height.max(1))?;
         let mut pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
             .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
 
@@ -902,10 +995,11 @@ impl TerminalRenderResources {
             if width <= target_width && height <= target_height {
                 return Ok((font_index, pixel_size));
             }
-            let shrink = (target_width as f32 / width.max(1) as f32)
-                .min(target_height as f32 / height.max(1) as f32);
+            let shrink = (pixel_dimension_as_f32(target_width)?
+                / pixel_dimension_as_f32(width.max(1))?)
+            .min(pixel_dimension_as_f32(target_height)? / pixel_dimension_as_f32(height.max(1))?);
             let next = (pixel_size * shrink * 0.999).max(MIN_FONT_PIXEL_SIZE);
-            if next >= pixel_size || (pixel_size - next) < f32::EPSILON {
+            if next >= pixel_size || (pixel_size - next).abs() < f32::EPSILON {
                 break;
             }
             pixel_size = next;
@@ -971,7 +1065,7 @@ impl TerminalRenderResources {
             requested_pixel_height,
         )?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
-            font_started.elapsed().as_micros() as u64
+            elapsed_micros(font_started)
         } else {
             0
         };
@@ -991,7 +1085,7 @@ impl TerminalRenderResources {
         } else {
             self.stats.frame_buffer_reuses = self.stats.frame_buffer_reuses.saturating_add(1);
         }
-        let raster_micros = raster_started.elapsed().as_micros() as u64;
+        let raster_micros = elapsed_micros(raster_started);
         let stride = width.saturating_mul(4);
 
         let png_encode_started = Instant::now();
@@ -1003,7 +1097,7 @@ impl TerminalRenderResources {
             encoder.set_depth(png::BitDepth::Eight);
             let mut writer = encoder.write_header()?;
             writer.write_image_data(&self.frame.pixels)?;
-        }
+        };
         if self.png_scratch.capacity() > png_capacity_before {
             self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
         } else {
@@ -1011,7 +1105,7 @@ impl TerminalRenderResources {
         }
         let payload = self.png_scratch.clone();
         self.stats.transport_payload_copies = self.stats.transport_payload_copies.saturating_add(1);
-        let png_encode_micros = png_encode_started.elapsed().as_micros() as u64;
+        let png_encode_micros = elapsed_micros(png_encode_started);
 
         Ok(EncodedPng {
             width: u16::try_from(width)?,
@@ -1023,7 +1117,7 @@ impl TerminalRenderResources {
             png_encode_micros,
             cell_width: u16::try_from(cell_width)?,
             cell_height: u16::try_from(cell_height)?,
-            font_pixel_size: font_pixel_size.round() as u16,
+            font_pixel_size: rounded_font_pixel_size(font_pixel_size)?,
             resource_stats: self.snapshot_stats(),
         })
     }
@@ -1074,6 +1168,11 @@ impl TerminalRenderResources {
         }
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        clippy::too_many_lines,
+        reason = "the CPU render transaction mirrors the negotiated frame contract as one auditable flow"
+    )]
     fn render_cpu_raster_update(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
@@ -1095,7 +1194,7 @@ impl TerminalRenderResources {
             requested_pixel_height,
         )?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
-            font_started.elapsed().as_micros() as u64
+            elapsed_micros(font_started)
         } else {
             0
         };
@@ -1112,7 +1211,7 @@ impl TerminalRenderResources {
             } else {
                 (Vec::new(), true)
             };
-        let damage_micros = damage_started.elapsed().as_micros() as u64;
+        let damage_micros = elapsed_micros(damage_started);
         let negotiated_region_fallback = transport == RasterTransport::DirtyRawRgba
             && cell_regions.len() > usize::from(max_regions);
         let render_full = transport != RasterTransport::DirtyRawRgba
@@ -1143,7 +1242,7 @@ impl TerminalRenderResources {
         } else {
             self.stats.frame_buffer_reuses = self.stats.frame_buffer_reuses.saturating_add(1);
         }
-        let raster_micros = raster_started.elapsed().as_micros() as u64;
+        let raster_micros = elapsed_micros(raster_started);
 
         let encode_started = Instant::now();
         let update = if render_full && transport == RasterTransport::FullPng {
@@ -1156,7 +1255,7 @@ impl TerminalRenderResources {
                 encoder.set_depth(png::BitDepth::Eight);
                 let mut writer = encoder.write_header()?;
                 writer.write_image_data(&self.frame.pixels)?;
-            }
+            };
             if self.png_scratch.capacity() > png_capacity_before {
                 self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
             } else {
@@ -1196,7 +1295,7 @@ impl TerminalRenderResources {
                 &rects,
             )?
         };
-        let encode_micros = encode_started.elapsed().as_micros() as u64;
+        let encode_micros = elapsed_micros(encode_started);
         let (png_encode_micros, payload_pack_micros) = if transport == RasterTransport::FullPng {
             (encode_micros, 0)
         } else {
@@ -1208,7 +1307,7 @@ impl TerminalRenderResources {
             full_recovery,
             cell_width: u16::try_from(cell_width)?,
             cell_height: u16::try_from(cell_height)?,
-            font_pixel_size: font_pixel_size.round() as u16,
+            font_pixel_size: rounded_font_pixel_size(font_pixel_size)?,
             font_load_micros,
             damage_micros,
             raster_micros,
@@ -1221,7 +1320,8 @@ impl TerminalRenderResources {
 
     #[expect(
         clippy::too_many_arguments,
-        reason = "the GPU render transaction mirrors the complete negotiated frame contract"
+        clippy::too_many_lines,
+        reason = "the GPU render transaction mirrors the complete negotiated frame contract as one auditable flow"
     )]
     fn render_gpu_raster_update(
         &mut self,
@@ -1239,8 +1339,7 @@ impl TerminalRenderResources {
     ) -> Result<Option<RenderedRasterUpdate>> {
         let runtime = self
             .gpu_runtime
-            .as_ref()
-            .cloned()
+            .clone()
             .ok_or_else(|| eyre::eyre!("cached {GPU_RENDERER_ID} runtime is unavailable"))?;
         let metrics = runtime.fit_surface_metrics(
             snapshot.columns,
@@ -1258,7 +1357,7 @@ impl TerminalRenderResources {
             } else {
                 (Vec::new(), true)
             };
-        let damage_micros = damage_started.elapsed().as_micros() as u64;
+        let damage_micros = elapsed_micros(damage_started);
         let negotiated_region_fallback = transport == RasterTransport::DirtyRawRgba
             && cell_regions.len() > usize::from(max_regions);
         let render_full = transport != RasterTransport::DirtyRawRgba
@@ -1284,8 +1383,8 @@ impl TerminalRenderResources {
             timeout: Duration::from_secs(5),
             cancellation: gpu_cancellation,
         };
-        let renderer = self.ensure_gpu_renderer()?;
-        let device = renderer.device_facts();
+        let gpu_renderer = self.ensure_gpu_renderer()?;
+        let device = gpu_renderer.device_facts();
         let device_identity = format!(
             "{};vendor={:#06x};device={:#06x};driver={};api={};queue={}",
             device.device_name,
@@ -1295,30 +1394,30 @@ impl TerminalRenderResources {
             device.api_version,
             device.queue_family_index
         );
-        let rendered = renderer.render(request)?;
+        let gpu_frame = gpu_renderer.render(request)?;
         self.gpu_surface = Some((width, height));
-        let readback_bytes = rendered.full_rgba.as_ref().map_or_else(
+        let readback_bytes = gpu_frame.full_rgba.as_ref().map_or_else(
             || {
-                rendered.dirty_regions.iter().fold(0_u64, |total, region| {
+                gpu_frame.dirty_regions.iter().fold(0_u64, |total, region| {
                     total.saturating_add(u64::try_from(region.rgba.len()).unwrap_or(u64::MAX))
                 })
             },
             |rgba| u64::try_from(rgba.len()).unwrap_or(u64::MAX),
         );
         let mut gpu_evidence = GpuRasterEvidence {
-            identity: rendered.identity.clone(),
-            visual_hash: rendered.visual_hash,
+            identity: gpu_frame.identity.clone(),
+            visual_hash: gpu_frame.visual_hash,
             device_identity,
             shader_identity: format!("fnv1a64:{GPU_SLUG_SHADER_SOURCE_IDENTITY:016x}"),
             readback_bytes,
-            stats: rendered.stats,
-            cache: rendered.cache,
+            stats: gpu_frame.stats,
+            cache: gpu_frame.cache,
         };
         let render_stats = gpu_evidence.stats;
 
         let encode_started = Instant::now();
         let update = if render_full && transport == RasterTransport::FullPng {
-            let pixels = rendered.full_rgba.as_deref().ok_or_else(|| {
+            let pixels = gpu_frame.full_rgba.as_deref().ok_or_else(|| {
                 eyre::eyre!("{GPU_RENDERER_ID} full PNG render omitted complete RGBA readback")
             })?;
             let png_capacity_before = self.png_scratch.capacity();
@@ -1330,7 +1429,7 @@ impl TerminalRenderResources {
                 encoder.set_depth(png::BitDepth::Eight);
                 let mut writer = encoder.write_header()?;
                 writer.write_image_data(pixels)?;
-            }
+            };
             if self.png_scratch.capacity() > png_capacity_before {
                 self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
             } else {
@@ -1340,7 +1439,7 @@ impl TerminalRenderResources {
                 self.stats.transport_payload_copies.saturating_add(1);
             RasterFrameUpdate::full_png(frame_sequence, width, height, self.png_scratch.clone())?
         } else if render_full {
-            let pixels = rendered.full_rgba.as_deref().ok_or_else(|| {
+            let pixels = gpu_frame.full_rgba.as_deref().ok_or_else(|| {
                 eyre::eyre!("{GPU_RENDERER_ID} full raw render omitted complete RGBA readback")
             })?;
             self.stats.transport_payload_copies =
@@ -1353,7 +1452,7 @@ impl TerminalRenderResources {
                 FrameCompression::Raw,
             )?
         } else {
-            let packed = rendered
+            let packed = gpu_frame
                 .dirty_regions
                 .iter()
                 .map(|region| PackedRasterRegion {
@@ -1376,7 +1475,7 @@ impl TerminalRenderResources {
                 &packed,
             )?
         };
-        let packet_micros = encode_started.elapsed().as_micros() as u64;
+        let packet_micros = elapsed_micros(encode_started);
         let (png_encode_micros, payload_pack_micros) = if transport == RasterTransport::FullPng {
             gpu_evidence.stats.png_packet_pack_us = Some(packet_micros);
             (packet_micros, render_stats.payload_pack_us)
@@ -1393,7 +1492,7 @@ impl TerminalRenderResources {
             full_recovery,
             cell_width: u16::try_from(metrics.cell_width)?,
             cell_height: u16::try_from(metrics.cell_height)?,
-            font_pixel_size: metrics.font_pixel_size.round() as u16,
+            font_pixel_size: rounded_font_pixel_size(metrics.font_pixel_size)?,
             font_load_micros: render_stats
                 .outline_extraction_us
                 .saturating_add(render_stats.directional_band_build_us),
@@ -1736,10 +1835,10 @@ impl VoxTerminalService {
         let session = self
             .sessions
             .lock()
-            .map_err(|_| {
+            .map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
-                    "terminal session registry lock poisoned",
+                    format!("terminal session registry lock poisoned: {error}"),
                     0,
                 )
             })?
@@ -1765,10 +1864,10 @@ impl VoxTerminalService {
     fn lock_session(
         session: &TerminalSessionRuntime,
     ) -> Result<std::sync::MutexGuard<'_, TerminalSessionState>, TerminalError> {
-        session.state.lock().map_err(|_| {
+        session.state.lock().map_err(|error| {
             Self::error(
                 TerminalErrorCode::Internal,
-                "terminal session lock poisoned",
+                format!("terminal session lock poisoned: {error}"),
                 0,
             )
         })
@@ -1822,7 +1921,7 @@ impl VoxTerminalService {
                         max_pixel_width: MAX_PIXEL_WIDTH,
                         max_pixel_height: MAX_PIXEL_HEIGHT,
                         max_frame_bytes: MAX_FRAME_BYTES,
-                        max_regions: MAX_DIRTY_REGIONS as u16,
+                        max_regions: max_dirty_regions(),
                     })
             })
             .collect()
@@ -2018,13 +2117,10 @@ impl VoxTerminalService {
     }
 
     fn process_pty_event(runtime: &TerminalSessionRuntime, event: PtyEvent) {
-        let mut state = match runtime.state.lock() {
-            Ok(state) => state,
-            Err(_) => {
-                runtime.closed.store(true, Ordering::Release);
-                runtime.publication.close();
-                return;
-            }
+        let Ok(mut state) = runtime.state.lock() else {
+            runtime.closed.store(true, Ordering::Release);
+            runtime.publication.close();
+            return;
         };
         match event {
             PtyEvent::Output(bytes) => {
@@ -2360,12 +2456,16 @@ impl VoxTerminalService {
         telemetry
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the frame adapter keeps every negotiated raster-contract field visible in one place"
+    )]
     fn raster_frame(
         capture: &CapturedTerminal,
         rendered: RenderedRasterUpdate,
         total_us: i64,
     ) -> Result<TerminalRasterFrame, TerminalError> {
-        let renderer = Self::raster_renderer_telemetry(&rendered);
+        let renderer_telemetry = Self::raster_renderer_telemetry(&rendered);
         let descriptor = rendered.update.descriptor;
         let encoding = match descriptor.compression {
             FrameCompression::Raw => TerminalFrameEncoding::Rgba8,
@@ -2483,7 +2583,7 @@ impl VoxTerminalService {
                 payload_pack_us: i64::try_from(rendered.payload_pack_micros).unwrap_or(i64::MAX),
                 total_us,
             },
-            renderer,
+            renderer: renderer_telemetry,
         })
     }
 }
@@ -2557,10 +2657,10 @@ impl Terminal for VoxTerminalService {
         Self::spawn_session_actor(&runtime, events, actor_receiver);
         self.sessions
             .lock()
-            .map_err(|_| {
+            .map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
-                    "terminal session lock poisoned",
+                    format!("terminal session lock poisoned: {error}"),
                     sequence,
                 )
             })?
@@ -2741,6 +2841,10 @@ impl Terminal for VoxTerminalService {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the legacy snapshot RPC is retained as one linear compatibility and telemetry transaction"
+    )]
     async fn snapshot(
         &self,
         request: TerminalSnapshotRequest,
@@ -2751,7 +2855,7 @@ impl Terminal for VoxTerminalService {
         let pty_drain_micros = 0;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
-            let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
+            let snapshot_total_micros = elapsed_micros(snapshot_started);
             let resources = runtime.explicit_render_resource_stats();
             tracing::debug!(
                 terminal_event = "snapshot_empty",
@@ -2849,18 +2953,18 @@ impl Terminal for VoxTerminalService {
                     command_status: 0,
                 },
                 timing: TerminalSnapshotTiming {
-                    pty_drain_us: pty_drain_micros as i64,
+                    pty_drain_us: telemetry_i64(pty_drain_micros),
                     terminal_snapshot_us: 0,
                     font_load_us: 0,
                     raster_us: 0,
                     png_encode_us: 0,
-                    total_us: snapshot_total_micros as i64,
+                    total_us: telemetry_i64(snapshot_total_micros),
                 },
             });
         }
         let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
-        let terminal_snapshot_micros = terminal_snapshot_started.elapsed().as_micros() as u64;
+        let terminal_snapshot_micros = elapsed_micros(terminal_snapshot_started);
         let surface = session.surface.clone();
         let panel_width = surface.panel_width;
         let panel_height = surface.panel_height;
@@ -2892,7 +2996,7 @@ impl Terminal for VoxTerminalService {
                 sequence,
             ));
         }
-        let snapshot_total_micros = snapshot_started.elapsed().as_micros() as u64;
+        let snapshot_total_micros = elapsed_micros(snapshot_started);
         tracing::debug!(
             terminal_event = "snapshot_timing",
             session_id = %request.session_id,
@@ -3011,16 +3115,20 @@ impl Terminal for VoxTerminalService {
             },
             prompt: Self::prompt_metadata(&terminal_snapshot.prompt),
             timing: TerminalSnapshotTiming {
-                pty_drain_us: pty_drain_micros as i64,
-                terminal_snapshot_us: terminal_snapshot_micros as i64,
-                font_load_us: font_load_micros as i64,
-                raster_us: raster_micros as i64,
-                png_encode_us: png_encode_micros as i64,
-                total_us: snapshot_total_micros as i64,
+                pty_drain_us: telemetry_i64(pty_drain_micros),
+                terminal_snapshot_us: telemetry_i64(terminal_snapshot_micros),
+                font_load_us: telemetry_i64(font_load_micros),
+                raster_us: telemetry_i64(raster_micros),
+                png_encode_us: telemetry_i64(png_encode_micros),
+                total_us: telemetry_i64(snapshot_total_micros),
             },
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the push subscription is an orchestration loop whose ordering encodes backpressure semantics"
+    )]
     async fn subscribe_frames(
         &self,
         request: TerminalSubscribeRequest,
@@ -3066,7 +3174,7 @@ impl Terminal for VoxTerminalService {
                 *signals.borrow_and_update()
             } else {
                 let changed = tokio::select! {
-                    _ = frames.closed() => break,
+                    () = frames.closed() => break,
                     changed = signals.changed() => changed,
                 };
                 if changed.is_err() {
@@ -3109,7 +3217,7 @@ impl Terminal for VoxTerminalService {
             });
             let (render, receiver_closed) = tokio::select! {
                 result = &mut render_worker => (result, false),
-                _ = frames.closed() => (render_worker.await, true),
+                () = frames.closed() => (render_worker.await, true),
             };
             let render = render.map_err(|error| {
                 Self::error(
@@ -3189,6 +3297,10 @@ impl Terminal for VoxTerminalService {
         })
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the raster push loop keeps cancellation, renderer leasing, sequencing, and backpressure ordered"
+    )]
     async fn subscribe_raster_frames(
         &self,
         request: TerminalRasterSubscribeRequest,
@@ -3227,7 +3339,7 @@ impl Terminal for VoxTerminalService {
             ));
         }
         let max_frame_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
-        let max_regions = request.max_regions.min(MAX_DIRTY_REGIONS as u16);
+        let max_regions = request.max_regions.min(max_dirty_regions());
         let (subscriber_id, mut signals) = runtime.publication.register(runtime.sequence());
         let render_cancellation = VulkanOffscreenCancellation::default();
         let _subscription = SubscriptionGuard {
@@ -3238,10 +3350,10 @@ impl Terminal for VoxTerminalService {
         runtime
             .raster_render_cancellations
             .lock()
-            .map_err(|_| {
+            .map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
-                    "terminal raster cancellation registry lock poisoned",
+                    format!("terminal raster cancellation registry lock poisoned: {error}"),
                     runtime.sequence(),
                 )
             })?
@@ -3256,7 +3368,7 @@ impl Terminal for VoxTerminalService {
 
         let lease = tokio::select! {
             lease = runtime.lease_raster_render_resources() => Some(lease?),
-            _ = frames.closed() => None,
+            () = frames.closed() => None,
         };
         let Some(mut resource_lease) = lease else {
             return Ok(TerminalOperationResult {
@@ -3278,7 +3390,7 @@ impl Terminal for VoxTerminalService {
                 *signals.borrow_and_update()
             } else {
                 let changed = tokio::select! {
-                    _ = frames.closed() => break,
+                    () = frames.closed() => break,
                     changed = signals.changed() => changed,
                 };
                 if changed.is_err() {
@@ -3342,7 +3454,7 @@ impl Terminal for VoxTerminalService {
             });
             let (render, receiver_closed) = tokio::select! {
                 result = &mut render_worker => (result, false),
-                _ = frames.closed() => {
+                () = frames.closed() => {
                     render_cancellation.cancel();
                     (render_worker.await, true)
                 }
@@ -3540,10 +3652,10 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalDisconnectRequest,
     ) -> Result<TerminalOperationResult, TerminalError> {
-        let mut sessions = self.sessions.lock().map_err(|_| {
+        let mut sessions = self.sessions.lock().map_err(|error| {
             Self::error(
                 TerminalErrorCode::Internal,
-                "terminal session registry lock poisoned",
+                format!("terminal session registry lock poisoned: {error}"),
                 0,
             )
         })?;
@@ -3595,7 +3707,13 @@ pub async fn serve(listen: &str) -> Result<()> {
             .await
             .context("failed to accept Vox terminal connection")?;
         eprintln!("VOX_TERMINAL_CONNECTION_ACCEPTED peer={peer}");
-        stream.set_nodelay(true).ok();
+        if let Err(error) = stream.set_nodelay(true) {
+            tracing::warn!(
+                ?peer,
+                ?error,
+                "failed to enable TCP_NODELAY for Vox terminal peer"
+            );
+        }
         let service = service.for_connection();
         tokio::spawn(async move {
             let dispatcher_service = service.clone();
@@ -3608,7 +3726,13 @@ pub async fn serve(listen: &str) -> Result<()> {
                     eprintln!("VOX_TERMINAL_CONNECTION_ESTABLISHED peer={peer}");
                     connection.closed().await;
                     eprintln!("VOX_TERMINAL_CONNECTION_CLOSED peer={peer}");
-                    connection.shutdown().ok();
+                    if let Err(error) = connection.shutdown() {
+                        tracing::warn!(
+                            ?peer,
+                            ?error,
+                            "failed to shut down Vox terminal connection"
+                        );
+                    }
                     service.close_connection_sessions();
                 }
                 Err(error) => {
@@ -3686,7 +3810,7 @@ mod tests {
             after_terminal_sequence: 0,
             after_frame_sequence: 0,
             max_frame_bytes: MAX_FRAME_BYTES,
-            max_regions: MAX_DIRTY_REGIONS as u16,
+            max_regions: max_dirty_regions(),
             client_sequence: 1,
             correlation_id: "raster-01".to_string(),
         }
@@ -3851,6 +3975,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the matrix test keeps all GPU transport assertions in one lifecycle proof"
+    )]
     fn gpu_slug_bridge_emits_all_transports_and_exact_dirty_composition_when_available() {
         let service = VoxTerminalService::new();
         let Ok(runtime) = service.gpu_registry.runtime(31) else {
@@ -3887,7 +4015,7 @@ mod tests {
                     frame_sequence,
                     0,
                     true,
-                    MAX_DIRTY_REGIONS as u16,
+                    max_dirty_regions(),
                     test_gpu_identity(frame_sequence),
                     None,
                 )
@@ -3963,7 +4091,7 @@ mod tests {
                 40,
                 0,
                 true,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
                 test_gpu_identity(40),
                 None,
             )
@@ -3984,7 +4112,7 @@ mod tests {
                 41,
                 40,
                 false,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
                 test_gpu_identity(41),
                 None,
             )
@@ -4009,7 +4137,7 @@ mod tests {
                 42,
                 41,
                 true,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
                 test_gpu_identity(42),
                 None,
             )
@@ -4034,7 +4162,7 @@ mod tests {
                 1,
                 0,
                 true,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
             )
             .expect("initial raster render")
             .expect("initial render is a complete resync");
@@ -4061,7 +4189,7 @@ mod tests {
                 2,
                 1,
                 false,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
             )
             .expect("incremental raster render")
             .expect("visible mutation emits a dirty update");
@@ -4147,7 +4275,7 @@ mod tests {
                 1,
                 0,
                 true,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
             )
             .expect("initial full-mode render")
             .expect("initial full-mode frame");
@@ -4165,7 +4293,7 @@ mod tests {
                 2,
                 1,
                 false,
-                MAX_DIRTY_REGIONS as u16,
+                max_dirty_regions(),
             )
             .expect("steady full-mode render")
             .expect("steady full-mode frame");
@@ -4264,11 +4392,19 @@ mod tests {
             .expect("V3 subscription should stop with its session")
             .expect("V3 subscription task should not panic")
             .expect("V3 subscription should close cleanly");
-        connection.shutdown().ok();
-        server_guard.shutdown().ok();
+        connection
+            .shutdown()
+            .expect("Vox client connection should shut down");
+        server_guard
+            .shutdown()
+            .expect("Vox server connection should shut down");
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the renderer-switch test intentionally proves one uninterrupted CPU-GPU-CPU session"
+    )]
     async fn v3_switch_cpu_gpu_cpu_releases_idle_receiver_without_terminal_mutation() {
         let (client_link, server_link) = vox::memory_link_pair(32);
         let service = VoxTerminalService::new();
@@ -4441,8 +4577,12 @@ mod tests {
             })
             .await
             .expect("test session should disconnect");
-        connection.shutdown().ok();
-        server_guard.shutdown().ok();
+        connection
+            .shutdown()
+            .expect("Vox client connection should shut down");
+        server_guard
+            .shutdown()
+            .expect("Vox server connection should shut down");
     }
 
     #[tokio::test]
@@ -4526,8 +4666,12 @@ mod tests {
             .expect("raster subscription should stop with its session")
             .expect("raster subscription task should not panic")
             .expect("raster subscription should close cleanly");
-        connection.shutdown().ok();
-        server_guard.shutdown().ok();
+        connection
+            .shutdown()
+            .expect("Vox client connection should shut down");
+        server_guard
+            .shutdown()
+            .expect("Vox server connection should shut down");
     }
 
     #[tokio::test]
@@ -4736,7 +4880,7 @@ mod tests {
                 cancellation: Some(retired.clone()),
             };
             assert!(!retired.is_cancelled());
-        }
+        };
         assert!(retired.is_cancelled());
         assert_eq!(runtime.publication.subscriber_count(), 0);
         assert!(
@@ -4865,6 +5009,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::await_holding_lock,
+        reason = "the test deliberately holds one session lock while proving another session remains responsive"
+    )]
     async fn one_locked_session_does_not_block_another_session_or_the_registry() {
         let service = VoxTerminalService::new();
         let first = service
@@ -4917,6 +5065,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the end-to-end puppet keeps connection, push, content, color, and timing witnesses in one lifecycle"
+    )]
     async fn vox_puppet_runs_power_shell_and_returns_bounded_png() {
         let (client_link, server_link) = vox::memory_link_pair(16);
         let service = VoxTerminalService::new();
@@ -4962,8 +5114,8 @@ mod tests {
                     max_width: MAX_COLUMNS,
                     max_height: MAX_ROWS,
                     max_frame_bytes: MAX_FRAME_BYTES,
-                    backend_id: "".to_string(),
-                    transport_id: "".to_string(),
+                    backend_id: String::new(),
+                    transport_id: String::new(),
                 },
                 client_sequence: 1,
                 correlation_id: "connect-01".to_string(),
@@ -5111,30 +5263,34 @@ mod tests {
             .get(&connected.session_id)
             .cloned()
             .expect("session should remain available");
-        let session = session.state.lock().expect("terminal session lock");
-        let terminal_snapshot = session.terminal.snapshot();
-        let visible_text = terminal_snapshot.visible_text();
-        assert!(
-            visible_text.lines().any(|line| line.trim() == "100"),
-            "Rust terminal state should contain range output 100:\n{visible_text}"
-        );
-        let hello = terminal_snapshot
-            .cells
-            .chunks(usize::from(terminal_snapshot.columns))
-            .enumerate()
-            .find_map(|(row, cells)| {
-                let text: String = cells.iter().map(|cell| cell.character).collect();
-                text.find("hello, world!").map(|column| (row, column))
-            })
-            .unwrap_or_else(|| panic!("Rust terminal state should contain Write-Host output (closed={}, sequence={}, raw={:?}):\n{}", session.closed, session.sequence, String::from_utf8_lossy(&session.debug_output), terminal_snapshot.visible_text()));
-        assert!(matches!(
-            terminal_snapshot
-                .cell(hello.1 as u16, hello.0 as u16)
-                .expect("hello cell")
-                .foreground,
-            Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
-        ));
-        drop(session);
+        {
+            let session = session.state.lock().expect("terminal session lock");
+            let terminal_snapshot = session.terminal.snapshot();
+            let visible_text = terminal_snapshot.visible_text();
+            assert!(
+                visible_text.lines().any(|line| line.trim() == "100"),
+                "Rust terminal state should contain range output 100:\n{visible_text}"
+            );
+            let hello = terminal_snapshot
+                .cells
+                .chunks(usize::from(terminal_snapshot.columns))
+                .enumerate()
+                .find_map(|(row, cells)| {
+                    let text: String = cells.iter().map(|cell| cell.character).collect();
+                    text.find("hello, world!").map(|column| (row, column))
+                })
+                .unwrap_or_else(|| panic!("Rust terminal state should contain Write-Host output (closed={}, sequence={}, raw={:?}):\n{}", session.closed, session.sequence, String::from_utf8_lossy(&session.debug_output), terminal_snapshot.visible_text()));
+            assert!(matches!(
+                terminal_snapshot
+                    .cell(
+                        u16::try_from(hello.1).expect("hello column fits in u16"),
+                        u16::try_from(hello.0).expect("hello row fits in u16"),
+                    )
+                    .expect("hello cell")
+                    .foreground,
+                Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
+            ));
+        };
 
         let content = client
             .get_content(TerminalContentRequest {
@@ -5195,11 +5351,19 @@ mod tests {
             .expect("subscription task should not panic")
             .expect("subscription RPC should complete cleanly");
         assert_eq!(subscription_result.state, TerminalState::Closed);
-        connection.shutdown().ok();
-        server_guard.shutdown().ok();
+        connection
+            .shutdown()
+            .expect("Vox client connection should shut down");
+        server_guard
+            .shutdown()
+            .expect("Vox server connection should shut down");
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the cancellation puppet keeps readiness, interruption, prompt recovery, and cleanup in one lifecycle"
+    )]
     async fn vox_cancel_interrupts_a_running_power_shell_command() {
         let (client_link, server_link) = vox::memory_link_pair(16);
         let service = VoxTerminalService::new();
@@ -5244,8 +5408,8 @@ mod tests {
                     max_width: MAX_COLUMNS,
                     max_height: MAX_ROWS,
                     max_frame_bytes: MAX_FRAME_BYTES,
-                    backend_id: "".to_string(),
-                    transport_id: "".to_string(),
+                    backend_id: String::new(),
+                    transport_id: String::new(),
                 },
                 client_sequence: 1,
                 correlation_id: "connect-cancel-01".to_string(),
@@ -5292,7 +5456,7 @@ mod tests {
             })
             .await
             .expect("long-running PowerShell input should be accepted");
-        tokio::time::sleep(Duration::from_millis(1_000)).await;
+        tokio::time::sleep(Duration::from_secs(1)).await;
 
         let cancelled = client
             .cancel(TerminalCancelRequest {
@@ -5340,8 +5504,12 @@ mod tests {
             })
             .await
             .expect("terminal session should disconnect");
-        connection.shutdown().ok();
-        server_guard.shutdown().ok();
+        connection
+            .shutdown()
+            .expect("Vox client connection should shut down");
+        server_guard
+            .shutdown()
+            .expect("Vox server connection should shut down");
     }
 
     #[test]

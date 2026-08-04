@@ -100,8 +100,7 @@ impl SelectionRange {
     #[must_use]
     pub const fn ordered(self) -> (CursorPosition, CursorPosition) {
         if self.anchor.row < self.focus.row
-            || (self.anchor.row == self.focus.row
-                && self.anchor.column <= self.focus.column)
+            || (self.anchor.row == self.focus.row && self.anchor.column <= self.focus.column)
         {
             (self.anchor, self.focus)
         } else {
@@ -113,8 +112,7 @@ impl SelectionRange {
     #[must_use]
     pub const fn contains(self, position: CursorPosition) -> bool {
         let (start, end) = self.ordered();
-        (position.row > start.row
-            || (position.row == start.row && position.column >= start.column))
+        (position.row > start.row || (position.row == start.row && position.column >= start.column))
             && (position.row < end.row
                 || (position.row == end.row && position.column <= end.column))
     }
@@ -268,9 +266,8 @@ impl TerminalSnapshot {
     /// Return whether a visible cell is selected.
     #[must_use]
     pub fn is_selected(&self, column: u16, row: u16) -> bool {
-        self.selection.is_some_and(|selection| {
-            selection.contains(CursorPosition { column, row })
-        })
+        self.selection
+            .is_some_and(|selection| selection.contains(CursorPosition { column, row }))
     }
 
     /// Return the visible grid as newline-separated text without row padding.
@@ -361,6 +358,10 @@ impl Style {
     }
 }
 
+#[expect(
+    clippy::struct_excessive_bools,
+    reason = "terminal protocol modes are independent flags, not mutually exclusive states"
+)]
 struct TerminalState {
     limits: TerminalLimits,
     columns: u16,
@@ -934,6 +935,10 @@ impl Perform for Performer<'_> {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeping the CSI dispatch table together makes escape-sequence behavior auditable"
+    )]
     fn csi_dispatch(&mut self, params: &Params, intermediates: &[u8], _ignore: bool, action: char) {
         match action {
             'A' => {
@@ -1043,9 +1048,9 @@ impl Perform for Performer<'_> {
                             }
                         }
                         9001 => self.state.win32_input_mode = enabled,
-                        1000 => self.state.mouse_tracking_mode = if enabled { 1 } else { 0 },
-                        1002 => self.state.mouse_tracking_mode = if enabled { 2 } else { 0 },
-                        1003 => self.state.mouse_tracking_mode = if enabled { 3 } else { 0 },
+                        1000 => self.state.mouse_tracking_mode = u8::from(enabled),
+                        1002 => self.state.mouse_tracking_mode = u8::from(enabled) * 2,
+                        1003 => self.state.mouse_tracking_mode = u8::from(enabled) * 3,
                         1006 => self.state.sgr_mouse_mode = enabled,
                         _ => {}
                     }

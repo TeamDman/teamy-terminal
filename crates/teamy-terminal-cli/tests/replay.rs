@@ -108,7 +108,7 @@ fn parse_fixture(path: &Path, contents: &str) -> Result<Fixture> {
 }
 
 fn decode_hex(value: &str) -> Result<Vec<u8>> {
-    if value.len() % 2 != 0 {
+    if !value.len().is_multiple_of(2) {
         eyre::bail!("hex fixture value has odd length: {value}")
     }
     (0..value.len())

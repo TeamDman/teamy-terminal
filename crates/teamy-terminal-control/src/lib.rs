@@ -59,7 +59,9 @@ impl InstanceInfo {
 #[repr(u8)]
 pub enum ControlPhysicalKey {
     /// A single Unicode character key.
-    Character { text: String },
+    Character {
+        text: String,
+    },
     Ctrl,
     Shift,
     Alt,
@@ -126,11 +128,17 @@ pub enum ControlKey {
     },
     /// Press one physical key. Scripted sequences always release outstanding
     /// keys when the request finishes.
-    KeyDown { key: ControlPhysicalKey },
+    KeyDown {
+        key: ControlPhysicalKey,
+    },
     /// Release one physical key.
-    KeyUp { key: ControlPhysicalKey },
+    KeyUp {
+        key: ControlPhysicalKey,
+    },
     /// Pause a scripted key sequence for a bounded duration.
-    Delay { milliseconds: u16 },
+    Delay {
+        milliseconds: u16,
+    },
 }
 
 /// An action sent to the owning application.
@@ -223,13 +231,11 @@ pub fn parse_key_sequence(spec: &str) -> Result<Vec<ControlKey>> {
                 });
             }
             "wait" => {
-                let milliseconds = value.parse::<u16>().map_err(|_| {
-                    eyre::eyre!("invalid send-keys wait duration: {value:?}")
-                })?;
+                let milliseconds = value
+                    .parse::<u16>()
+                    .map_err(|_error| eyre::eyre!("invalid send-keys wait duration: {value:?}"))?;
                 if milliseconds > MAX_KEY_DELAY_MS {
-                    eyre::bail!(
-                        "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
-                    );
+                    eyre::bail!("key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit");
                 }
                 actions.push(ControlKey::Delay { milliseconds });
             }
@@ -372,9 +378,11 @@ pub fn invoke(instance: &InstanceInfo, action: ControlAction) -> Result<ControlR
                         anchor_row,
                         focus_column,
                         focus_row,
-                    } => client
-                        .select(anchor_column, anchor_row, focus_column, focus_row)
-                        .await,
+                    } => {
+                        client
+                            .select(anchor_column, anchor_row, focus_column, focus_row)
+                            .await
+                    }
                     ControlAction::Zoom { steps } => client.zoom(steps).await,
                     ControlAction::SetVisible { visible } => client.set_visible(visible).await,
                     ControlAction::Close => client.close().await,
@@ -385,8 +393,7 @@ pub fn invoke(instance: &InstanceInfo, action: ControlAction) -> Result<ControlR
                 result.map(|()| ControlResponse::Ok)
             }
         };
-        response
-            .map_err(|error| eyre::eyre!("target Teamy Terminal rejected the request: {error}"))
+        response.map_err(|error| eyre::eyre!("target Teamy Terminal rejected the request: {error}"))
     })
 }
 
@@ -518,9 +525,7 @@ fn validate_action(action: &ControlAction) -> Result<()> {
                     },
                     ControlKey::Delay { milliseconds } => {
                         if *milliseconds > MAX_KEY_DELAY_MS {
-                            eyre::bail!(
-                                "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
-                            );
+                            eyre::bail!("key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit");
                         }
                         continue;
                     }
@@ -609,7 +614,7 @@ fn control_key_to_wire(key: &ControlKey) -> String {
     }
 }
 
-fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
+fn control_key_from_wire(wire: &str) -> Result<ControlKey, String> {
     if let Some(text) = wire.strip_prefix("character:") {
         return Ok(ControlKey::Character {
             text: text.to_owned(),
@@ -633,7 +638,7 @@ fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
     if let Some(milliseconds) = wire.strip_prefix("delay:") {
         let milliseconds = milliseconds
             .parse::<u16>()
-            .map_err(|_| format!("invalid Teamy Terminal key delay wire value: {wire}"))?;
+            .map_err(|_error| format!("invalid Teamy Terminal key delay wire value: {wire}"))?;
         if milliseconds > MAX_KEY_DELAY_MS {
             return Err(format!(
                 "key delay exceeds the {MAX_KEY_DELAY_MS}ms control limit"
@@ -641,7 +646,7 @@ fn control_key_from_wire(wire: String) -> Result<ControlKey, String> {
         }
         return Ok(ControlKey::Delay { milliseconds });
     }
-    match wire.as_str() {
+    match wire {
         "enter" => Ok(ControlKey::Enter),
         "tab" => Ok(ControlKey::Tab),
         "backspace" => Ok(ControlKey::Backspace),
@@ -725,10 +730,12 @@ impl TerminalControlService {
                 operation,
                 responder,
             })
-            .map_err(|_| String::from("Teamy Terminal application stopped accepting requests"))?;
+            .map_err(|_error| {
+                String::from("Teamy Terminal application stopped accepting requests")
+            })?;
         response
             .await
-            .map_err(|_| String::from("Teamy Terminal application dropped the response"))?
+            .map_err(|_error| String::from("Teamy Terminal application dropped the response"))?
     }
 }
 
@@ -738,23 +745,31 @@ impl TerminalControl for TerminalControlService {
     }
 
     async fn send_text(&self, text: String) -> Result<(), String> {
-        self.dispatch(ControlAction::SendText { text }).await.map(|_| ())
+        self.dispatch(ControlAction::SendText { text })
+            .await
+            .map(|_| ())
     }
 
     async fn send_keys(&self, keys: Vec<String>) -> Result<(), String> {
         let keys = keys
             .into_iter()
-            .map(control_key_from_wire)
+            .map(|wire| control_key_from_wire(&wire))
             .collect::<Result<Vec<_>, _>>()?;
-        self.dispatch(ControlAction::SendKeys { keys }).await.map(|_| ())
+        self.dispatch(ControlAction::SendKeys { keys })
+            .await
+            .map(|_| ())
     }
 
     async fn resize(&self, width: u32, height: u32) -> Result<(), String> {
-        self.dispatch(ControlAction::Resize { width, height }).await.map(|_| ())
+        self.dispatch(ControlAction::Resize { width, height })
+            .await
+            .map(|_| ())
     }
 
     async fn screenshot(&self, path: String) -> Result<(), String> {
-        self.dispatch(ControlAction::Screenshot { path }).await.map(|_| ())
+        self.dispatch(ControlAction::Screenshot { path })
+            .await
+            .map(|_| ())
     }
 
     async fn get_content(&self) -> Result<String, String> {
@@ -793,7 +808,9 @@ impl TerminalControl for TerminalControlService {
     }
 
     async fn zoom(&self, steps: i16) -> Result<(), String> {
-        self.dispatch(ControlAction::Zoom { steps }).await.map(|_| ())
+        self.dispatch(ControlAction::Zoom { steps })
+            .await
+            .map(|_| ())
     }
 
     async fn set_visible(&self, visible: bool) -> Result<(), String> {
@@ -823,22 +840,26 @@ mod tests {
 
     #[test]
     fn zoom_requests_are_bounded() {
-        assert!(validate_action(&ControlAction::Zoom {
+        validate_action(&ControlAction::Zoom {
             steps: MAX_ZOOM_STEPS,
         })
-        .is_ok());
-        assert!(validate_action(&ControlAction::Zoom {
+        .expect("maximum positive zoom should be valid");
+        validate_action(&ControlAction::Zoom {
             steps: -MAX_ZOOM_STEPS,
         })
-        .is_ok());
-        assert!(validate_action(&ControlAction::Zoom {
-            steps: MAX_ZOOM_STEPS + 1,
-        })
-        .is_err());
-        assert!(validate_action(&ControlAction::Zoom {
-            steps: -(MAX_ZOOM_STEPS + 1),
-        })
-        .is_err());
+        .expect("maximum negative zoom should be valid");
+        assert!(
+            validate_action(&ControlAction::Zoom {
+                steps: MAX_ZOOM_STEPS + 1,
+            })
+            .is_err()
+        );
+        assert!(
+            validate_action(&ControlAction::Zoom {
+                steps: -(MAX_ZOOM_STEPS + 1),
+            })
+            .is_err()
+        );
     }
 
     #[test]
@@ -881,8 +902,7 @@ mod tests {
             ctrl_c
         );
         assert_eq!(
-            parse_key_sequence("down:1 wait:1 up:1")
-                .expect("explicit numeric key should parse"),
+            parse_key_sequence("down:1 wait:1 up:1").expect("explicit numeric key should parse"),
             vec![
                 ControlKey::KeyDown {
                     key: ControlPhysicalKey::Character {
@@ -917,8 +937,7 @@ mod tests {
             "ctrl-b"
         );
         assert_eq!(
-            control_key_from_wire("ctrl-b".to_owned())
-                .expect("Ctrl+B wire value should parse"),
+            control_key_from_wire("ctrl-b").expect("Ctrl+B wire value should parse"),
             ControlKey::CtrlCharacter { character: 'b' }
         );
 
@@ -936,11 +955,11 @@ mod tests {
                 "implicit syntax should be rejected: {invalid}"
             );
         }
-        assert!(parse_key_sequence("").is_err());
-        assert!(parse_key_sequence("wait:5001").is_err());
-        assert!(parse_key_sequence("hold:c").is_err());
-        assert!(parse_key_sequence("down:").is_err());
-        assert!(parse_key_sequence("wait:one").is_err());
+        let _ = parse_key_sequence("").expect_err("empty sequence should be rejected");
+        let _ = parse_key_sequence("wait:5001").expect_err("excessive delay should be rejected");
+        let _ = parse_key_sequence("hold:c").expect_err("unknown action should be rejected");
+        let _ = parse_key_sequence("down:").expect_err("empty physical key should be rejected");
+        let _ = parse_key_sequence("wait:one").expect_err("non-numeric delay should be rejected");
     }
 
     #[test]
@@ -955,13 +974,12 @@ mod tests {
             "key-down:character:1"
         );
         assert_eq!(
-            control_key_from_wire("key-down:character:1".to_owned())
+            control_key_from_wire("key-down:character:1")
                 .expect("numeric key wire value should parse"),
             numeric_key_down
         );
         assert_eq!(
-            control_key_from_wire("delay:1".to_owned())
-                .expect("delay wire value should parse"),
+            control_key_from_wire("delay:1").expect("delay wire value should parse"),
             ControlKey::Delay { milliseconds: 1 }
         );
     }

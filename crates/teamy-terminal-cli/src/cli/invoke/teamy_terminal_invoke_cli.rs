@@ -53,6 +53,12 @@ pub enum InvokeAction {
 }
 
 impl InvokeArgs {
+    /// Sends this invocation to the selected terminal instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the instance cannot be found, the requested action
+    /// is invalid, or the control request cannot be completed.
     pub fn invoke(self) -> eyre::Result<CliOutput> {
         let instance = teamy_terminal_control::find_instance(self.instance_id)?;
         let action = self.action.into_control_action()?;

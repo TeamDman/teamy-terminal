@@ -426,6 +426,11 @@ impl FramePacket {
 
 impl RasterFrameUpdate {
     /// Construct a complete raw or PNG RGBA8 update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dimensions, source bytes, compression, or the
+    /// encoded update violate the portable frame contract.
     pub fn full_rgba(
         sequence: u64,
         width: u32,
@@ -460,6 +465,16 @@ impl RasterFrameUpdate {
     /// Unlike [`Self::dirty_rgba`], this constructor does not require a
     /// complete CPU-visible source frame. Every payload must contain exactly
     /// `rect.width * rect.height * 4` bytes in tight top-to-bottom rows.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dimensions, region ordering or bounds, payload
+    /// lengths, or the packed update violate the portable frame contract.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic for a valid portable frame. Internal
+    /// conversion assertions are protected by the preceding bound checks.
     pub fn dirty_rgba_packed(
         sequence: u64,
         base_sequence: u64,
@@ -495,11 +510,11 @@ impl RasterFrameUpdate {
                     region.rgba.len()
                 ));
             }
-            let payload_offset = u32::try_from(bytes.len())
-                .map_err(|_| eyre::eyre!("dirty payload offset exceeds u32"))?;
+            let payload_offset =
+                u32::try_from(bytes.len()).wrap_err("dirty payload offset exceeds u32")?;
             bytes.extend_from_slice(region.rgba);
-            let payload_length = u32::try_from(region.rgba.len())
-                .map_err(|_| eyre::eyre!("dirty payload length exceeds u32"))?;
+            let payload_length =
+                u32::try_from(region.rgba.len()).wrap_err("dirty payload length exceeds u32")?;
             regions.push(RasterRegion {
                 x: region.rect.x,
                 y: region.rect.y,
@@ -546,6 +561,11 @@ impl RasterFrameUpdate {
     /// This keeps retained encoder buffers useful at transport boundaries
     /// while still applying the same dimensions, byte bound, and PNG header
     /// validation as `full_rgba`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dimensions, the encoded payload, or its PNG
+    /// metadata violate the portable frame contract.
     pub fn full_png(sequence: u64, width: u32, height: u32, encoded: Vec<u8>) -> Result<Self> {
         let update = Self {
             descriptor: RasterUpdateDescriptor {
@@ -569,6 +589,16 @@ impl RasterFrameUpdate {
     }
 
     /// Pack ordered dirty rectangles from a complete RGBA8 source frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when dimensions, source bytes, rectangle ordering or
+    /// bounds, or the packed update violate the portable frame contract.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic for a valid portable frame. Internal
+    /// conversion assertions are protected by the preceding bound checks.
     pub fn dirty_rgba(
         sequence: u64,
         base_sequence: u64,
@@ -604,8 +634,8 @@ impl RasterFrameUpdate {
                 .width
                 .checked_mul(BYTES_PER_PIXEL)
                 .ok_or_else(|| eyre::eyre!("dirty region stride overflows"))?;
-            let payload_offset = u32::try_from(bytes.len())
-                .map_err(|_| eyre::eyre!("dirty payload offset exceeds u32"))?;
+            let payload_offset =
+                u32::try_from(bytes.len()).wrap_err("dirty payload offset exceeds u32")?;
             let row_bytes = usize::try_from(stride).expect("validated stride fits usize");
             let x_bytes = usize::try_from(rect.x)
                 .expect("validated x fits usize")
@@ -644,11 +674,21 @@ impl RasterFrameUpdate {
     }
 
     /// Validate version, bounds, ordering, payload ranges, and base semantics.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the update violates the default portable frame
+    /// bounds or any metadata, payload, ordering, or base-frame invariant.
     pub fn validate(&self) -> Result<()> {
         self.validate_with(FrameLimits::default())
     }
 
     /// Validate against consumer-provided dimensions and byte bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the update exceeds the supplied limits or
+    /// violates any metadata, payload, ordering, or base-frame invariant.
     pub fn validate_with(&self, limits: FrameLimits) -> Result<()> {
         let descriptor = self.descriptor;
         if descriptor.contract_version != RASTER_FRAME_CONTRACT_VERSION {
@@ -669,95 +709,99 @@ impl RasterFrameUpdate {
             ));
         }
         match descriptor.kind {
-            RasterUpdateKind::Full => {
-                if descriptor.base_sequence != 0 || !self.regions.is_empty() {
+            RasterUpdateKind::Full => self.validate_full(descriptor, limits),
+            RasterUpdateKind::DirtyRegions => self.validate_dirty(descriptor),
+        }
+    }
+
+    fn validate_full(&self, descriptor: RasterUpdateDescriptor, limits: FrameLimits) -> Result<()> {
+        if descriptor.base_sequence != 0 || !self.regions.is_empty() {
+            return Err(eyre::eyre!(
+                "complete raster update must have base zero and no regions"
+            ));
+        }
+        let expected_stride = descriptor
+            .width
+            .checked_mul(BYTES_PER_PIXEL)
+            .ok_or_else(|| eyre::eyre!("frame stride overflows"))?;
+        if descriptor.stride != expected_stride {
+            return Err(eyre::eyre!(
+                "complete frame stride {} does not match {expected_stride}",
+                descriptor.stride
+            ));
+        }
+        match descriptor.compression {
+            FrameCompression::Raw => {
+                let expected = checked_len(descriptor.width, descriptor.height, BYTES_PER_PIXEL)?;
+                if self.bytes.len() != expected {
                     return Err(eyre::eyre!(
-                        "complete raster update must have base zero and no regions"
+                        "raw frame has {} bytes, expected {expected}",
+                        self.bytes.len()
                     ));
                 }
-                let expected_stride = descriptor
-                    .width
-                    .checked_mul(BYTES_PER_PIXEL)
-                    .ok_or_else(|| eyre::eyre!("frame stride overflows"))?;
-                if descriptor.stride != expected_stride {
-                    return Err(eyre::eyre!(
-                        "complete frame stride {} does not match {expected_stride}",
-                        descriptor.stride
-                    ));
-                }
-                match descriptor.compression {
-                    FrameCompression::Raw => {
-                        let expected =
-                            checked_len(descriptor.width, descriptor.height, BYTES_PER_PIXEL)?;
-                        if self.bytes.len() != expected {
-                            return Err(eyre::eyre!(
-                                "raw frame has {} bytes, expected {expected}",
-                                self.bytes.len()
-                            ));
-                        }
-                    }
-                    FrameCompression::Png => validate_png(
-                        &self.bytes,
-                        descriptor.width,
-                        descriptor.height,
-                        limits.max_bytes,
-                    )?,
-                }
+                Ok(())
             }
-            RasterUpdateKind::DirtyRegions => {
-                if descriptor.base_sequence == 0
-                    || descriptor.base_sequence >= descriptor.sequence
-                    || descriptor.stride != 0
-                    || descriptor.compression != FrameCompression::Raw
-                {
-                    return Err(eyre::eyre!(
-                        "dirty update requires an earlier nonzero base, zero frame stride, and raw compression"
-                    ));
-                }
-                if self.regions.is_empty() || self.regions.len() > MAX_DIRTY_REGIONS {
-                    return Err(eyre::eyre!(
-                        "dirty update has {} regions, expected 1..={MAX_DIRTY_REGIONS}",
-                        self.regions.len()
-                    ));
-                }
-                let rects = self
-                    .regions
-                    .iter()
-                    .map(|region| RasterRect {
-                        x: region.x,
-                        y: region.y,
-                        width: region.width,
-                        height: region.height,
-                    })
-                    .collect::<Vec<_>>();
-                validate_rect_order_and_overlap(&rects, descriptor.width, descriptor.height)?;
-                let mut next_offset = 0_u32;
-                for region in &self.regions {
-                    let expected_stride = region
-                        .width
-                        .checked_mul(BYTES_PER_PIXEL)
-                        .ok_or_else(|| eyre::eyre!("dirty region stride overflows"))?;
-                    let expected_length = expected_stride
-                        .checked_mul(region.height)
-                        .ok_or_else(|| eyre::eyre!("dirty region payload length overflows"))?;
-                    if region.stride != expected_stride
-                        || region.payload_offset != next_offset
-                        || region.payload_length != expected_length
-                    {
-                        return Err(eyre::eyre!(
-                            "dirty region stride or packed payload range is invalid"
-                        ));
-                    }
-                    next_offset = next_offset
-                        .checked_add(region.payload_length)
-                        .ok_or_else(|| eyre::eyre!("dirty packed payload end overflows"))?;
-                }
-                if usize::try_from(next_offset).ok() != Some(self.bytes.len()) {
-                    return Err(eyre::eyre!(
-                        "dirty packed payload ranges do not cover the payload exactly"
-                    ));
-                }
+            FrameCompression::Png => validate_png(
+                &self.bytes,
+                descriptor.width,
+                descriptor.height,
+                limits.max_bytes,
+            ),
+        }
+    }
+
+    fn validate_dirty(&self, descriptor: RasterUpdateDescriptor) -> Result<()> {
+        if descriptor.base_sequence == 0
+            || descriptor.base_sequence >= descriptor.sequence
+            || descriptor.stride != 0
+            || descriptor.compression != FrameCompression::Raw
+        {
+            return Err(eyre::eyre!(
+                "dirty update requires an earlier nonzero base, zero frame stride, and raw compression"
+            ));
+        }
+        if self.regions.is_empty() || self.regions.len() > MAX_DIRTY_REGIONS {
+            return Err(eyre::eyre!(
+                "dirty update has {} regions, expected 1..={MAX_DIRTY_REGIONS}",
+                self.regions.len()
+            ));
+        }
+        let rects = self
+            .regions
+            .iter()
+            .map(|region| RasterRect {
+                x: region.x,
+                y: region.y,
+                width: region.width,
+                height: region.height,
+            })
+            .collect::<Vec<_>>();
+        validate_rect_order_and_overlap(&rects, descriptor.width, descriptor.height)?;
+        let mut next_offset = 0_u32;
+        for region in &self.regions {
+            let expected_stride = region
+                .width
+                .checked_mul(BYTES_PER_PIXEL)
+                .ok_or_else(|| eyre::eyre!("dirty region stride overflows"))?;
+            let expected_length = expected_stride
+                .checked_mul(region.height)
+                .ok_or_else(|| eyre::eyre!("dirty region payload length overflows"))?;
+            if region.stride != expected_stride
+                || region.payload_offset != next_offset
+                || region.payload_length != expected_length
+            {
+                return Err(eyre::eyre!(
+                    "dirty region stride or packed payload range is invalid"
+                ));
             }
+            next_offset = next_offset
+                .checked_add(region.payload_length)
+                .ok_or_else(|| eyre::eyre!("dirty packed payload end overflows"))?;
+        }
+        if usize::try_from(next_offset).ok() != Some(self.bytes.len()) {
+            return Err(eyre::eyre!(
+                "dirty packed payload ranges do not cover the payload exactly"
+            ));
         }
         Ok(())
     }
@@ -765,6 +809,10 @@ impl RasterFrameUpdate {
 
 impl ComposedRasterFrame {
     /// Create composition state from a complete raw update.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the update is invalid, incomplete, or not raw.
     pub fn from_full(update: &RasterFrameUpdate) -> Result<Self> {
         update.validate()?;
         if update.descriptor.kind != RasterUpdateKind::Full
@@ -781,6 +829,16 @@ impl ComposedRasterFrame {
     }
 
     /// Apply one contiguous-base raw dirty update atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the update is invalid, does not extend the
+    /// current frame, or contains an invalid source or destination range.
+    ///
+    /// # Panics
+    ///
+    /// This function does not panic for a valid portable frame. Internal
+    /// conversion assertions are protected by update validation.
     pub fn apply(&mut self, update: &RasterFrameUpdate) -> Result<()> {
         update.validate()?;
         if update.descriptor.kind != RasterUpdateKind::DirtyRegions
@@ -857,12 +915,12 @@ fn validate_rect_order_and_overlap(
         if rect.width == 0 || rect.height == 0 || right > frame_width || bottom > frame_height {
             return Err(eyre::eyre!("dirty region is outside the complete frame"));
         }
-        if let Some(previous) = index.checked_sub(1).and_then(|i| rects.get(i)) {
-            if (rect.y, rect.x) <= (previous.y, previous.x) {
-                return Err(eyre::eyre!(
-                    "dirty regions are not in canonical top-left order"
-                ));
-            }
+        if let Some(previous) = index.checked_sub(1).and_then(|i| rects.get(i))
+            && (rect.y, rect.x) <= (previous.y, previous.x)
+        {
+            return Err(eyre::eyre!(
+                "dirty regions are not in canonical top-left order"
+            ));
         }
         for previous in &rects[..index] {
             let previous_right = previous.x + previous.width;
@@ -1164,7 +1222,7 @@ mod tests {
             }],
         );
 
-        assert!(result.is_err());
+        let _ = result.expect_err("wrong packed payload length should fail");
     }
 
     #[test]
@@ -1191,7 +1249,7 @@ mod tests {
                 },
             ],
         );
-        assert!(reversed.is_err());
+        let _ = reversed.expect_err("noncanonical region order should fail");
         let overlapping = RasterFrameUpdate::dirty_rgba(
             2,
             1,
@@ -1213,7 +1271,7 @@ mod tests {
                 },
             ],
         );
-        assert!(overlapping.is_err());
+        let _ = overlapping.expect_err("overlapping regions should fail");
 
         let full = RasterFrameUpdate::full_rgba(4, 4, 3, &source, FrameCompression::Raw)
             .expect("full update");

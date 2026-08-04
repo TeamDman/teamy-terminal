@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use teamy_terminal_font::EMBEDDED_FONT_SHA256;
 use teamy_terminal_font::slug::DEFAULT_BAND_SIZE_FONT_UNITS;
 use teamy_terminal_font::slug::DIRECTIONAL_BAND_HEADER_WORDS;
@@ -48,11 +49,13 @@ fn assert_grid_parity(character: char) {
         for column in 0..columns {
             let sample = Point::new(
                 geometry.bounds.min_x
-                    + (geometry.bounds.max_x - geometry.bounds.min_x) * (column as f32 + 0.5)
-                        / columns as f32,
+                    + (geometry.bounds.max_x - geometry.bounds.min_x)
+                        * (column.to_f32().expect("fixture column fits f32") + 0.5)
+                        / columns.to_f32().expect("fixture width fits f32"),
                 geometry.bounds.min_y
-                    + (geometry.bounds.max_y - geometry.bounds.min_y) * (row as f32 + 0.5)
-                        / rows as f32,
+                    + (geometry.bounds.max_y - geometry.bounds.min_y)
+                        * (row.to_f32().expect("fixture row fits f32") + 0.5)
+                        / rows.to_f32().expect("fixture height fits f32"),
             );
             let oracle = coverage_all_curves(&geometry.curves, geometry.bounds, sample, scale)
                 .expect("all-curves coverage should evaluate");
@@ -161,7 +164,10 @@ fn flat_segments_match_the_independent_oracle() {
         .expect("square bands");
     for y in -2..=12 {
         for x in -2..=12 {
-            let sample = Point::new(x as f32 + 0.25, y as f32 + 0.25);
+            let sample = Point::new(
+                x.to_f32().expect("fixture x fits f32") + 0.25,
+                y.to_f32().expect("fixture y fits f32") + 0.25,
+            );
             let oracle =
                 coverage_all_curves(&curves, bounds, sample, 1.0).expect("square oracle coverage");
             let banded =
@@ -312,11 +318,13 @@ fn g_false_line_regression_is_machine_readable_and_oracle_backed() {
         for column in 0..width {
             let sample = Point::new(
                 geometry.bounds.min_x
-                    + (geometry.bounds.max_x - geometry.bounds.min_x) * (column as f32 + 0.5)
-                        / width as f32,
+                    + (geometry.bounds.max_x - geometry.bounds.min_x)
+                        * (column.to_f32().expect("fixture column fits f32") + 0.5)
+                        / width.to_f32().expect("fixture width fits f32"),
                 geometry.bounds.min_y
-                    + (geometry.bounds.max_y - geometry.bounds.min_y) * (row as f32 + 0.5)
-                        / height as f32,
+                    + (geometry.bounds.max_y - geometry.bounds.min_y)
+                        * (row.to_f32().expect("fixture row fits f32") + 0.5)
+                        / height.to_f32().expect("fixture height fits f32"),
             );
             let oracle = coverage_all_curves(&geometry.curves, geometry.bounds, sample, scale)
                 .expect("g oracle should evaluate");
@@ -334,7 +342,11 @@ fn g_false_line_regression_is_machine_readable_and_oracle_backed() {
             } else {
                 *run = 0;
             }
-            let quantized = (banded * 255.0).round().clamp(0.0, 255.0) as u8;
+            let quantized = (banded * 255.0)
+                .round()
+                .clamp(0.0, 255.0)
+                .to_u8()
+                .expect("clamped coverage fits u8");
             hash ^= u64::from(quantized);
             hash = hash.wrapping_mul(0x0000_0100_0000_01B3);
         }
@@ -375,7 +387,10 @@ fn g_false_line_regression_is_machine_readable_and_oracle_backed() {
         height,
         DIRECTIONAL_BAND_HEADER_WORDS,
         distinct_directional_lists,
-        (max_delta * 1_000_000.0).ceil() as u32,
+        (max_delta * 1_000_000.0)
+            .ceil()
+            .to_u32()
+            .expect("bounded coverage delta fits u32"),
         mismatch_pixels,
         false_positive_pixels,
         longest_false_positive_vertical_run,

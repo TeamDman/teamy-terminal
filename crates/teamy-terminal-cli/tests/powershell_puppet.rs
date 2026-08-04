@@ -2,12 +2,21 @@
 //! integration plans.
 
 #[cfg(windows)]
-use std::time::{Duration, Instant};
-
+use std::time::Duration;
 #[cfg(windows)]
-use teamy_terminal_core::{Color, TerminalLimits, TerminalSession};
+use std::time::Instant;
 #[cfg(windows)]
-use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
+use teamy_terminal_core::Color;
+#[cfg(windows)]
+use teamy_terminal_core::TerminalLimits;
+#[cfg(windows)]
+use teamy_terminal_core::TerminalSession;
+#[cfg(windows)]
+use teamy_terminal_pty::PtyConfig;
+#[cfg(windows)]
+use teamy_terminal_pty::PtyEvent;
+#[cfg(windows)]
+use teamy_terminal_pty::PtySession;
 
 /// Run the same bounded command sequence that the Minecraft terminal puppet
 /// captures.  The PTY bytes are fed into the renderer-free core so this test
@@ -15,7 +24,8 @@ use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession};
 #[cfg(windows)]
 #[test]
 fn powershell_puppet_captures_range_and_cyan_write_host() {
-    let session = PtySession::spawn(&PtyConfig::test()).expect("PowerShell should start in a test PTY");
+    let session =
+        PtySession::spawn(&PtyConfig::test()).expect("PowerShell should start in a test PTY");
     session
         .write_input(b"1..100; Write-Host -ForegroundColor Cyan \"hello, world!\"; exit\r")
         .expect("PowerShell should accept the puppet command");
@@ -53,8 +63,14 @@ fn powershell_puppet_captures_range_and_cyan_write_host() {
     terminal.process_bytes(&output);
     let snapshot = terminal.snapshot();
     let rows = snapshot.visible_text();
-    assert!(rows.lines().any(|line| line.trim() == "1"), "range output must contain 1:\n{rows}");
-    assert!(rows.lines().any(|line| line.trim() == "100"), "range output must contain 100:\n{rows}");
+    assert!(
+        rows.lines().any(|line| line.trim() == "1"),
+        "range output must contain 1:\n{rows}"
+    );
+    assert!(
+        rows.lines().any(|line| line.trim() == "100"),
+        "range output must contain 100:\n{rows}"
+    );
 
     let (hello_row, hello_column) = rows
         .lines()
@@ -62,11 +78,17 @@ fn powershell_puppet_captures_range_and_cyan_write_host() {
         .find_map(|(row, line)| line.find("hello, world!").map(|column| (row, column)))
         .expect("Write-Host output should be visible in the captured snapshot");
     let hello_color = snapshot
-        .cell(hello_column as u16, hello_row as u16)
+        .cell(
+            u16::try_from(hello_column).expect("hello column should fit the terminal grid"),
+            u16::try_from(hello_row).expect("hello row should fit the terminal grid"),
+        )
         .expect("hello cell should be inside the captured grid")
         .foreground;
     assert!(
-        matches!(hello_color, Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)),
+        matches!(
+            hello_color,
+            Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
+        ),
         "Write-Host Cyan should retain cyan ANSI metadata, got {hello_color:?}"
     );
 }

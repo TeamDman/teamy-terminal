@@ -106,6 +106,11 @@ pub struct OffscreenFrame {
 
 impl OffscreenFrame {
     /// Create a zero-filled RGBA8 off-screen frame.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the requested dimensions overflow the addressable
+    /// RGBA8 byte length.
     pub fn new(width: u32, height: u32) -> Result<Self> {
         let pixels = usize::try_from(width)
             .ok()
@@ -120,6 +125,11 @@ impl OffscreenFrame {
     }
 
     /// Adopt a CPU-visible RGBA8 frame as an off-screen readback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dimensions overflow the addressable RGBA8
+    /// byte length or the pixel buffer length does not match those dimensions.
     pub fn from_rasterized(frame: RasterizedFrame) -> Result<Self> {
         let expected = usize::try_from(frame.width)
             .ok()
@@ -142,6 +152,11 @@ impl OffscreenFrame {
     }
 
     /// Encode the complete readback as a portable packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the dimensions, source bytes, or encoded payload
+    /// exceed the portable frame bounds.
     pub fn full_packet(&self, sequence: u64, compression: FrameCompression) -> Result<FramePacket> {
         FramePacket::full_rgba(
             sequence,
@@ -153,6 +168,11 @@ impl OffscreenFrame {
     }
 
     /// Encode one dirty tile from the complete readback.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the tile, dimensions, source bytes, or encoded
+    /// payload violate the portable frame bounds.
     pub fn dirty_packet(
         &self,
         sequence: u64,
@@ -616,6 +636,10 @@ impl VulkanRenderer {
         }
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "keeping the ordered Vulkan barriers and copy commands together makes the presenter synchronization contract auditable"
+    )]
     fn record_copy_command(
         &self,
         image_index: u32,
@@ -1284,6 +1308,6 @@ mod tests {
             height: 2,
             pixels: vec![0; 3],
         });
-        assert!(result.is_err());
+        let _error = result.expect_err("an undersized readback must be rejected");
     }
 }

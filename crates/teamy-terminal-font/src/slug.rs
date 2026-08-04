@@ -5,14 +5,13 @@
 //! contract consumed by raster backends, and provides an independent CPU
 //! oracle plus a banded evaluator for conformance tests.
 
+use super::EMBEDDED_FONT;
+use num_traits::ToPrimitive;
 use std::error::Error;
 use std::fmt;
-
 use ttf_parser::Face;
 use ttf_parser::GlyphId;
 use ttf_parser::OutlineBuilder;
-
-use super::EMBEDDED_FONT;
 
 /// Default band span in font units.
 pub const DEFAULT_BAND_SIZE_FONT_UNITS: f32 = 64.0;
@@ -53,23 +52,20 @@ pub enum SlugError {
 }
 
 impl fmt::Display for SlugError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::InvalidFont => formatter.write_str("font face could not be parsed"),
+            Self::InvalidFont => f.write_str("font face could not be parsed"),
             Self::MissingFallbackGlyph(character) => {
-                write!(
-                    formatter,
-                    "font face does not contain fallback glyph {character:?}"
-                )
+                write!(f, "font face does not contain fallback glyph {character:?}")
             }
-            Self::NonFiniteGeometry => formatter.write_str("outline geometry is not finite"),
-            Self::InvalidBounds => formatter.write_str("glyph bounds are non-finite or inverted"),
-            Self::InvalidScale => formatter.write_str("scale must be finite and positive"),
+            Self::NonFiniteGeometry => f.write_str("outline geometry is not finite"),
+            Self::InvalidBounds => f.write_str("glyph bounds are non-finite or inverted"),
+            Self::InvalidScale => f.write_str("scale must be finite and positive"),
             Self::CountOverflow(label) => {
-                write!(formatter, "{label} does not fit the canonical u32 contract")
+                write!(f, "{label} does not fit the canonical u32 contract")
             }
             Self::MalformedBands(reason) => {
-                write!(formatter, "directional band data is malformed: {reason}")
+                write!(f, "directional band data is malformed: {reason}")
             }
         }
     }
@@ -176,6 +172,11 @@ pub struct GlyphBounds {
 
 impl GlyphBounds {
     /// Construct validated bounds.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlugError::InvalidBounds`] when any coordinate is non-finite
+    /// or either minimum coordinate exceeds its corresponding maximum.
     pub fn new(min_x: f32, min_y: f32, max_x: f32, max_y: f32) -> Result<Self, SlugError> {
         let bounds = Self {
             min_x,
@@ -289,6 +290,12 @@ impl GpuGlyphMetadata {
 }
 
 /// Build fixed shader metadata after a renderer has assigned buffer offsets.
+///
+/// # Errors
+///
+/// Returns an error when the directional bands are malformed, their bounds do
+/// not match the glyph, or a curve or band count exceeds the canonical `u32`
+/// representation.
 pub fn build_gpu_glyph_metadata(
     geometry: &GlyphGeometry,
     bands: &DirectionalBands,
@@ -303,11 +310,11 @@ pub fn build_gpu_glyph_metadata(
         ));
     }
     let curve_count = u32::try_from(geometry.curves.len())
-        .map_err(|_| SlugError::CountOverflow("glyph curve count"))?;
+        .map_err(|_conversion_error| SlugError::CountOverflow("glyph curve count"))?;
     let horizontal_count = u32::try_from(bands.horizontal.len())
-        .map_err(|_| SlugError::CountOverflow("horizontal band count"))?;
+        .map_err(|_conversion_error| SlugError::CountOverflow("horizontal band count"))?;
     let vertical_count = u32::try_from(bands.vertical.len())
-        .map_err(|_| SlugError::CountOverflow("vertical band count"))?;
+        .map_err(|_conversion_error| SlugError::CountOverflow("vertical band count"))?;
     let flags = if geometry.used_fallback {
         GPU_GLYPH_FLAG_FALLBACK
     } else {
@@ -343,9 +350,8 @@ pub struct SlugFont<'a> {
 }
 
 impl fmt::Debug for SlugFont<'_> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("SlugFont")
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("SlugFont")
             .field("fallback_character", &self.fallback_character)
             .field("fallback_glyph", &self.fallback_glyph.0)
             .field("metrics", &self.metrics())
@@ -355,6 +361,11 @@ impl fmt::Debug for SlugFont<'_> {
 
 impl SlugFont<'static> {
     /// Parse the deterministic embedded Caskaydia Cove Nerd Font Mono face.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the embedded face cannot be parsed or does not
+    /// contain the configured `?` fallback glyph.
     pub fn embedded() -> Result<Self, SlugError> {
         Self::parse(EMBEDDED_FONT, 0, '?')
     }
@@ -362,12 +373,18 @@ impl SlugFont<'static> {
 
 impl<'a> SlugFont<'a> {
     /// Parse a font face and bind an explicit missing-glyph fallback.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SlugError::InvalidFont`] when `bytes` and `face_index` do not
+    /// select a parseable face, or [`SlugError::MissingFallbackGlyph`] when the
+    /// selected face lacks `fallback_character`.
     pub fn parse(
         bytes: &'a [u8],
         face_index: u32,
         fallback_character: char,
     ) -> Result<Self, SlugError> {
-        let face = Face::parse(bytes, face_index).map_err(|_| SlugError::InvalidFont)?;
+        let face = Face::parse(bytes, face_index).map_err(|_parse_error| SlugError::InvalidFont)?;
         let fallback_glyph = face
             .glyph_index(fallback_character)
             .ok_or(SlugError::MissingFallbackGlyph(fallback_character))?;
@@ -389,6 +406,11 @@ impl<'a> SlugFont<'a> {
     }
 
     /// Extract one glyph, falling back to the configured character when absent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the selected outline or advance contains non-finite
+    /// geometry, or if its derived bounds are non-finite or inverted.
     pub fn glyph_geometry(&self, character: char) -> Result<GlyphGeometry, SlugError> {
         let (glyph_id, resolved_character, used_fallback) =
             self.face.glyph_index(character).map_or(
@@ -438,6 +460,12 @@ impl<'a> SlugFont<'a> {
 }
 
 /// Approximate a cubic segment with bounded quadratic segments.
+///
+/// # Errors
+///
+/// Returns [`SlugError::NonFiniteGeometry`] when the cubic has a non-finite
+/// coordinate, or [`SlugError::InvalidScale`] when `tolerance` is non-finite or
+/// non-positive.
 pub fn approximate_cubic(
     cubic: CubicCurve,
     tolerance: f32,
@@ -670,6 +698,11 @@ pub struct DirectionalBands {
 
 impl DirectionalBands {
     /// Validate offsets, counts, splits, transforms, and curve indices.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the bounds, transforms, band counts, header ranges,
+    /// splits, or referenced curve indices violate the canonical contract.
     pub fn validate(&self, curve_count: usize) -> Result<(), SlugError> {
         self.bounds.validate()?;
         if self.horizontal.is_empty() || self.vertical.is_empty() {
@@ -700,6 +733,11 @@ impl DirectionalBands {
     /// Pack headers followed by index lists for direct GPU-buffer upload.
     ///
     /// Packed offsets are absolute word offsets into the returned buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when validation fails or a packed header, index, or
+    /// total word count cannot be represented without overflow.
     pub fn packed_words(&self, curve_count: usize) -> Result<Vec<u32>, SlugError> {
         self.validate(curve_count)?;
         let header_count = self
@@ -711,7 +749,7 @@ impl DirectionalBands {
             .checked_mul(DIRECTIONAL_BAND_HEADER_WORDS)
             .ok_or(SlugError::CountOverflow("band header words"))?;
         let table_words_u32 = u32::try_from(table_words)
-            .map_err(|_| SlugError::CountOverflow("band header words"))?;
+            .map_err(|_conversion_error| SlugError::CountOverflow("band header words"))?;
         let total_words = table_words
             .checked_add(self.curve_indices.len())
             .ok_or(SlugError::CountOverflow("packed band words"))?;
@@ -736,6 +774,12 @@ impl DirectionalBands {
 }
 
 /// Build directional horizontal/vertical bands for one glyph.
+///
+/// # Errors
+///
+/// Returns an error for non-finite curve geometry, invalid bounds, a non-finite
+/// or non-positive band size, malformed generated bands, or counts and offsets
+/// that exceed the canonical representation.
 pub fn build_directional_bands(
     curves: &[QuadraticCurve],
     bounds: GlyphBounds,
@@ -854,12 +898,12 @@ fn build_axis_headers(
             fallback_max,
         );
         let curve_count = u32::try_from(members.len())
-            .map_err(|_| SlugError::CountOverflow("band curve count"))?;
+            .map_err(|_conversion_error| SlugError::CountOverflow("band curve count"))?;
         let descending_offset = u32::try_from(indices.len())
-            .map_err(|_| SlugError::CountOverflow("descending index offset"))?;
+            .map_err(|_conversion_error| SlugError::CountOverflow("descending index offset"))?;
         append_indices(indices, &descending)?;
         let ascending_offset = u32::try_from(indices.len())
-            .map_err(|_| SlugError::CountOverflow("ascending index offset"))?;
+            .map_err(|_conversion_error| SlugError::CountOverflow("ascending index offset"))?;
         append_indices(indices, &ascending)?;
         headers.push(DirectionalBandHeader {
             curve_count,
@@ -873,7 +917,10 @@ fn build_axis_headers(
 
 fn append_indices(output: &mut Vec<u32>, indices: &[usize]) -> Result<(), SlugError> {
     for index in indices {
-        output.push(u32::try_from(*index).map_err(|_| SlugError::CountOverflow("curve index"))?);
+        output.push(
+            u32::try_from(*index)
+                .map_err(|_conversion_error| SlugError::CountOverflow("curve index"))?,
+        );
     }
     Ok(())
 }
@@ -917,10 +964,11 @@ fn validate_header(
         return Err(SlugError::MalformedBands("band split is not finite"));
     }
     let count = usize::try_from(header.curve_count)
-        .map_err(|_| SlugError::MalformedBands("curve count does not fit usize"))?;
+        .map_err(|_conversion_error| SlugError::MalformedBands("curve count does not fit usize"))?;
     for offset in [header.descending_offset, header.ascending_offset] {
-        let start = usize::try_from(offset)
-            .map_err(|_| SlugError::MalformedBands("list offset does not fit usize"))?;
+        let start = usize::try_from(offset).map_err(|_conversion_error| {
+            SlugError::MalformedBands("list offset does not fit usize")
+        })?;
         let end = start
             .checked_add(count)
             .ok_or(SlugError::MalformedBands("list range overflow"))?;
@@ -970,14 +1018,18 @@ fn ascending_value(extents: CurveExtents, axis: Axis) -> f32 {
 
 fn compute_band_count(span: f32, band_size: f32) -> usize {
     let count = (span.max(1.0) / band_size).ceil();
-    usize::try_from(count as u64)
+    count
+        .to_usize()
         .unwrap_or(MAX_BAND_COUNT)
         .clamp(1, MAX_BAND_COUNT)
 }
 
 fn compute_band_scale(minimum: f32, maximum: f32, count: usize) -> f32 {
     let _ = minimum;
-    count as f32 / (maximum - minimum).max(1.0)
+    let count = count
+        .to_f32()
+        .expect("canonical band count is at most 255 and exactly representable as f32");
+    count / (maximum - minimum).max(1.0)
 }
 
 fn compute_band_offset(minimum: f32, maximum: f32, count: usize) -> f32 {
@@ -985,8 +1037,15 @@ fn compute_band_offset(minimum: f32, maximum: f32, count: usize) -> f32 {
 }
 
 fn band_index(value: f32, scale: f32, offset: f32, count: usize) -> usize {
-    let upper = count.saturating_sub(1) as f32;
-    ((value * scale) + offset).trunc().clamp(0.0, upper) as usize
+    let upper = count
+        .saturating_sub(1)
+        .to_f32()
+        .expect("canonical band index is at most 254 and exactly representable as f32");
+    ((value * scale) + offset)
+        .trunc()
+        .clamp(0.0, upper)
+        .to_usize()
+        .expect("validated finite band coordinates produce a non-negative bounded index")
 }
 
 fn validate_curves(curves: &[QuadraticCurve]) -> Result<(), SlugError> {
@@ -1008,6 +1067,12 @@ enum RayDirection {
 /// derives ray splits once from validated curves, then walks every curve;
 /// offsets, index lists, packed words, and early-exit pruning cannot influence
 /// the reference result.
+///
+/// # Errors
+///
+/// Returns an error for non-finite curve or sample geometry, invalid bounds, an
+/// invalid pixel scale, or a failure to construct the internal directional
+/// split oracle.
 pub fn coverage_all_curves(
     curves: &[QuadraticCurve],
     bounds: GlyphBounds,
@@ -1027,6 +1092,11 @@ pub fn coverage_all_curves(
 }
 
 /// Evaluate supersampled coverage through directional band lists and splits.
+///
+/// # Errors
+///
+/// Returns an error for non-finite curve or sample geometry, invalid bounds or
+/// pixel scale, or malformed directional band metadata.
 pub fn coverage_banded(
     curves: &[QuadraticCurve],
     bands: &DirectionalBands,
@@ -1178,8 +1248,9 @@ fn coverage_banded_single_sample(
     };
     let mut accumulator = CoverageAccumulator::default();
     for curve_index in indices_for_header(bands, horizontal, horizontal_direction)? {
-        let curve_index = usize::try_from(*curve_index)
-            .map_err(|_| SlugError::MalformedBands("curve index does not fit usize"))?;
+        let curve_index = usize::try_from(*curve_index).map_err(|_conversion_error| {
+            SlugError::MalformedBands("curve index does not fit usize")
+        })?;
         let curve = curves
             .get(curve_index)
             .ok_or(SlugError::MalformedBands("curve index is out of bounds"))?;
@@ -1215,8 +1286,9 @@ fn coverage_banded_single_sample(
         RayDirection::Right
     };
     for curve_index in indices_for_header(bands, vertical, vertical_direction)? {
-        let curve_index = usize::try_from(*curve_index)
-            .map_err(|_| SlugError::MalformedBands("curve index does not fit usize"))?;
+        let curve_index = usize::try_from(*curve_index).map_err(|_conversion_error| {
+            SlugError::MalformedBands("curve index does not fit usize")
+        })?;
         let curve = curves
             .get(curve_index)
             .ok_or(SlugError::MalformedBands("curve index is out of bounds"))?;
@@ -1251,9 +1323,9 @@ fn indices_for_header(
         RayDirection::Right => header.descending_offset,
     };
     let start = usize::try_from(offset)
-        .map_err(|_| SlugError::MalformedBands("list offset does not fit usize"))?;
+        .map_err(|_conversion_error| SlugError::MalformedBands("list offset does not fit usize"))?;
     let count = usize::try_from(header.curve_count)
-        .map_err(|_| SlugError::MalformedBands("curve count does not fit usize"))?;
+        .map_err(|_conversion_error| SlugError::MalformedBands("curve count does not fit usize"))?;
     let end = start
         .checked_add(count)
         .ok_or(SlugError::MalformedBands("list range overflow"))?;

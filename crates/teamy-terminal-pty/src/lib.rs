@@ -937,6 +937,10 @@ mod tests {
     #[cfg(windows)]
     #[test]
     #[ignore = "requires the desktop account; the Codex sandbox cannot deliver ConPTY console-control events"]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the ignored live ConPTY witness keeps its complete setup, interaction, and teardown sequence auditable in one test"
+    )]
     fn interactive_shell_ctrl_c_interrupts_a_running_command() {
         let config = PtyConfig::interactive();
         let session = PtySession::spawn(&config).expect("pwsh should start in a test PTY");

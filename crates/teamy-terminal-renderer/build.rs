@@ -77,18 +77,20 @@ fn main() {
     .expect("write generated combining-glyph ABI");
     writeln!(
         generated,
-        "#[allow(clippy::unreadable_literal)]\npub(crate) const GPU_SLUG_SHADER_SOURCE_FNV1A64: u64 = 0x{source_hash:016x};"
+        "pub(crate) const GPU_SLUG_SHADER_SOURCE_FNV1A64: u64 = {};",
+        readable_hex_u64(source_hash)
     )
     .expect("write generated source identity");
     writeln!(
         generated,
-        "#[allow(clippy::unreadable_literal)]\npub(crate) const GPU_SLUG_SHADER_WORDS: &[u32] = &["
+        "pub(crate) const GPU_SLUG_SHADER_WORDS: &[u32] = &["
     )
     .expect("write generated shader words header");
     for chunk in words.chunks(8) {
         generated.push_str("    ");
         for word in chunk {
-            write!(generated, "0x{word:08x}, ").expect("write generated shader word");
+            write!(generated, "{}, ", readable_hex_u32(*word))
+                .expect("write generated shader word");
         }
         generated.push('\n');
     }
@@ -104,4 +106,18 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash
+}
+
+fn readable_hex_u64(value: u64) -> String {
+    format!(
+        "0x{:04x}_{:04x}_{:04x}_{:04x}",
+        value >> 48,
+        (value >> 32) & 0xffff,
+        (value >> 16) & 0xffff,
+        value & 0xffff
+    )
+}
+
+fn readable_hex_u32(value: u32) -> String {
+    format!("0x{:04x}_{:04x}", value >> 16, value & 0xffff)
 }
