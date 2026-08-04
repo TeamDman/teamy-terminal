@@ -17,6 +17,7 @@ fontdue.workspace = true
 num-traits.workspace = true
 swash.workspace = true
 teamy-terminal-core.workspace = true
+ttf-parser.workspace = true
 unicode-width.workspace = true
 
 [lints]

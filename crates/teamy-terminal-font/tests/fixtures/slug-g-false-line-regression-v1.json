@@ -1,0 +1,15 @@
+{
+  "schema": "teamy-terminal.slug-g-false-line.v1",
+  "font_sha256": "32aa528c1d9be2240ceac90aa05f4e554679cabeb11b93684eb24ec4930bd0ea",
+  "glyph": "g",
+  "grid_width": 96,
+  "grid_height": 96,
+  "font_size_pixels": 256,
+  "directional_header_words": 4,
+  "distinct_directional_lists": 40,
+  "max_oracle_delta_millionths": 1,
+  "structural_mismatch_pixels": 0,
+  "false_positive_pixels": 0,
+  "longest_false_positive_vertical_run": 0,
+  "coverage_fnv1a64": "8aed3192e3f774f3"
+}

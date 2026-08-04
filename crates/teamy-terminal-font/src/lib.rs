@@ -7,6 +7,9 @@
 //! Vulkan; the renderer is responsible for presenting those frames through the
 //! graphics API.
 
+/// Renderer-neutral outline geometry and analytic Slug-style coverage.
+pub mod slug;
+
 use eyre::Result;
 use fontdb::Database;
 use fontdb::Family;

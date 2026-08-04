@@ -3105,6 +3105,7 @@ dependencies = [
  "num-traits",
  "swash",
  "teamy-terminal-core",
+ "ttf-parser 0.25.1",
  "unicode-width",
 ]
 
