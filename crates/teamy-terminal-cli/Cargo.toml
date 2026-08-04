@@ -51,9 +51,9 @@ windows.workspace = true
 
 [features]
 default = ["dirty_rendering"]
-extended_observability = []
+extended_observability = ["teamy-terminal-renderer/extended_observability"]
 dirty_rendering = []
-tracy = ["extended_observability", "dep:tracing-tracy"]
+tracy = ["extended_observability", "dep:tracing-tracy", "teamy-terminal-renderer/tracy"]
 
 [build-dependencies]
 embed-resource.workspace = true

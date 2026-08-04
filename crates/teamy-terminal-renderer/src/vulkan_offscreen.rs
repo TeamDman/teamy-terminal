@@ -255,6 +255,56 @@ pub struct VulkanOffscreenReadback {
     pub height: u32,
     /// Tightly packed RGBA8 pixels.
     pub rgba: Vec<u8>,
+    /// Distinct CPU/GPU/readback stage timings for this operation.
+    pub timings: VulkanOffscreenStageTimings,
+}
+
+/// One bounded top-left image region requested for tight GPU readback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct VulkanOffscreenRegion {
+    /// Left pixel coordinate.
+    pub x: u32,
+    /// Top pixel coordinate.
+    pub y: u32,
+    /// Region width.
+    pub width: u32,
+    /// Region height.
+    pub height: u32,
+}
+
+/// Tight bytes for one requested no-window image region.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VulkanOffscreenRegionReadback {
+    /// Source region copied from the GPU image.
+    pub region: VulkanOffscreenRegion,
+    /// Tight top-left RGBA8 rows for this region only.
+    pub rgba: Vec<u8>,
+}
+
+/// Regional-only readback; no full-frame GPU-to-host copy is implied.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VulkanOffscreenRegionalReadback {
+    /// Native source image width.
+    pub frame_width: u32,
+    /// Native source image height.
+    pub frame_height: u32,
+    /// Ordered tight region payloads.
+    pub regions: Vec<VulkanOffscreenRegionReadback>,
+    /// Distinct CPU/GPU/readback stage timings for this operation.
+    pub timings: VulkanOffscreenStageTimings,
+}
+
+/// Timings measured inside one retained offscreen submission/readback operation.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct VulkanOffscreenStageTimings {
+    /// CPU command-buffer reset, barriers, caller recording, and finalization.
+    pub command_record_us: u64,
+    /// CPU queue-lock plus `vkQueueSubmit` duration.
+    pub queue_submit_us: u64,
+    /// Measured completion-fence wait after submission.
+    pub gpu_completion_wait_us: u64,
+    /// Host memory map/invalidate/copy/unmap duration.
+    pub readback_map_copy_us: u64,
 }
 
 /// Process-shareable retained Vulkan instance/device/queue and target cache.
@@ -323,6 +373,7 @@ pub(crate) struct VulkanOffscreenRecording<'a> {
     device: &'a ash::Device,
     command_buffer: vk::CommandBuffer,
     image: vk::Image,
+    image_view: vk::ImageView,
     extent: vk::Extent2D,
 }
 
@@ -379,6 +430,11 @@ impl VulkanOffscreenRecording<'_> {
     /// Retained target image in the pass layout documented by the caller seam.
     pub(crate) fn image(&self) -> vk::Image {
         self.image
+    }
+
+    /// Retained storage-image view for compute descriptor binding.
+    pub(crate) fn image_view(&self) -> vk::ImageView {
+        self.image_view
     }
 
     /// Native target extent in pixels.
@@ -457,6 +513,7 @@ struct TargetResources {
     key: TargetKey,
     allocation_id: u64,
     image: vk::Image,
+    image_view: vk::ImageView,
     image_memory: vk::DeviceMemory,
     staging_buffer: vk::Buffer,
     staging_memory: vk::DeviceMemory,
@@ -485,9 +542,16 @@ struct PassSynchronization {
     source_access: vk::AccessFlags,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct SubmissionTimings {
+    command_record_us: u64,
+    queue_submit_us: u64,
+}
+
 struct TargetAllocationGuard {
     shared: Arc<DeviceShared>,
     image: vk::Image,
+    image_view: vk::ImageView,
     image_memory: vk::DeviceMemory,
     staging_buffer: vk::Buffer,
     staging_memory: vk::DeviceMemory,
@@ -506,6 +570,11 @@ impl VulkanOffscreenContext {
 
     /// Create a retained no-window context with an explicit target-cache bound.
     pub fn with_target_cache_capacity(capacity: usize) -> Result<Self, VulkanOffscreenError> {
+        let _runtime_span = tracing::info_span!(
+            "vulkan_offscreen_context_create",
+            target_cache_capacity = capacity
+        )
+        .entered();
         Self::with_entry_loader(capacity, || {
             // SAFETY: Loading the process Vulkan entry points does not access
             // application-owned memory. The Entry is retained for the full
@@ -519,6 +588,7 @@ impl VulkanOffscreenContext {
     /// Probe availability without ever creating a native window or surface.
     #[must_use]
     pub fn probe() -> VulkanOffscreenAvailability {
+        let _availability_span = tracing::info_span!("vulkan_offscreen_availability").entered();
         match Self::new() {
             Ok(context) => VulkanOffscreenAvailability::Available(context.device_facts().clone()),
             Err(error) => VulkanOffscreenAvailability::Unavailable(
@@ -924,6 +994,36 @@ impl VulkanOffscreenTarget {
         )
     }
 
+    /// Record compute work and copy only the requested tight regions to host memory.
+    ///
+    /// No full-image GPU-to-host transfer occurs on this path. Regions are
+    /// validated, ordered as supplied, and packed contiguously in the retained
+    /// readback allocation.
+    pub(crate) fn record_compute_and_readback_regions<F>(
+        &self,
+        regions: &[VulkanOffscreenRegion],
+        timeout: Duration,
+        cancellation: Option<&VulkanOffscreenCancellation>,
+        record: F,
+    ) -> Result<VulkanOffscreenRegionalReadback, VulkanOffscreenError>
+    where
+        F: FnOnce(&VulkanOffscreenRecording<'_>) -> Result<(), VulkanOffscreenError>,
+    {
+        self.execute_pass_and_readback_regions(
+            PassSynchronization {
+                layout: vk::ImageLayout::GENERAL,
+                destination_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+                destination_access: vk::AccessFlags::SHADER_READ | vk::AccessFlags::SHADER_WRITE,
+                source_stage: vk::PipelineStageFlags::COMPUTE_SHADER,
+                source_access: vk::AccessFlags::SHADER_WRITE,
+            },
+            regions,
+            timeout,
+            cancellation,
+            record,
+        )
+    }
+
     fn execute_pass_and_readback<F>(
         &self,
         synchronization: PassSynchronization,
@@ -931,6 +1031,47 @@ impl VulkanOffscreenTarget {
         cancellation: Option<&VulkanOffscreenCancellation>,
         record: F,
     ) -> Result<VulkanOffscreenReadback, VulkanOffscreenError>
+    where
+        F: FnOnce(&VulkanOffscreenRecording<'_>) -> Result<(), VulkanOffscreenError>,
+    {
+        let full = [VulkanOffscreenRegion {
+            x: 0,
+            y: 0,
+            width: self.width(),
+            height: self.height(),
+        }];
+        let regional = self.execute_pass_and_readback_regions(
+            synchronization,
+            &full,
+            timeout,
+            cancellation,
+            record,
+        )?;
+        let region =
+            regional
+                .regions
+                .into_iter()
+                .next()
+                .ok_or(VulkanOffscreenError::Operation {
+                    operation: "full readback produced no region",
+                    source: vk::Result::ERROR_INITIALIZATION_FAILED,
+                })?;
+        Ok(VulkanOffscreenReadback {
+            width: regional.frame_width,
+            height: regional.frame_height,
+            rgba: region.rgba,
+            timings: regional.timings,
+        })
+    }
+
+    fn execute_pass_and_readback_regions<F>(
+        &self,
+        synchronization: PassSynchronization,
+        regions: &[VulkanOffscreenRegion],
+        timeout: Duration,
+        cancellation: Option<&VulkanOffscreenCancellation>,
+        record: F,
+    ) -> Result<VulkanOffscreenRegionalReadback, VulkanOffscreenError>
     where
         F: FnOnce(&VulkanOffscreenRecording<'_>) -> Result<(), VulkanOffscreenError>,
     {
@@ -942,20 +1083,42 @@ impl VulkanOffscreenTarget {
                 operation: "clear/readback",
             });
         }
+        self.resources.validate_readback_regions(regions)?;
         let mut operation = self
             .resources
             .operation
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut gpu_completion_wait_us = 0_u64;
         if operation.in_flight {
-            self.resources
-                .wait_for_completion(&mut operation, timeout, cancellation)?;
+            gpu_completion_wait_us = gpu_completion_wait_us.saturating_add(
+                self.resources
+                    .wait_for_completion(&mut operation, timeout, cancellation)?,
+            );
         }
-        self.resources
-            .record_pass_and_submit(&mut operation, synchronization, record)?;
-        self.resources
-            .wait_for_completion(&mut operation, timeout, cancellation)?;
-        self.resources.readback()
+        let submission = self.resources.record_pass_and_submit(
+            &mut operation,
+            synchronization,
+            regions,
+            record,
+        )?;
+        gpu_completion_wait_us = gpu_completion_wait_us.saturating_add(
+            self.resources
+                .wait_for_completion(&mut operation, timeout, cancellation)?,
+        );
+        let readback_start = Instant::now();
+        let readback = self.resources.readback_regions(regions)?;
+        Ok(VulkanOffscreenRegionalReadback {
+            frame_width: self.width(),
+            frame_height: self.height(),
+            regions: readback,
+            timings: VulkanOffscreenStageTimings {
+                command_record_us: submission.command_record_us,
+                queue_submit_us: submission.queue_submit_us,
+                gpu_completion_wait_us,
+                readback_map_copy_us: elapsed_micros(readback_start),
+            },
+        })
     }
 }
 
@@ -1029,6 +1192,14 @@ impl TargetResources {
                 .bind_image_memory(guard.image, guard.image_memory, 0)
         }
         .map_err(|source| operation_error(&shared, "image-memory bind", source))?;
+        let image_view_info = vk::ImageViewCreateInfo::default()
+            .image(guard.image)
+            .view_type(vk::ImageViewType::TYPE_2D)
+            .format(OFFSCREEN_FORMAT)
+            .subresource_range(color_subresource_range());
+        // SAFETY: The image is live, bound, and has the matching RGBA8 format.
+        guard.image_view = unsafe { shared.device.create_image_view(&image_view_info, None) }
+            .map_err(|source| allocation_error(&shared, "offscreen image view", source))?;
 
         let staging_info = vk::BufferCreateInfo::default()
             .size(byte_len)
@@ -1133,6 +1304,7 @@ impl TargetResources {
             key,
             allocation_id,
             image: guard.image,
+            image_view: guard.image_view,
             image_memory: guard.image_memory,
             staging_buffer: guard.staging_buffer,
             staging_memory: guard.staging_memory,
@@ -1156,11 +1328,13 @@ impl TargetResources {
         &self,
         operation: &mut TargetOperation,
         synchronization: PassSynchronization,
+        readback_regions: &[VulkanOffscreenRegion],
         record: F,
-    ) -> Result<(), VulkanOffscreenError>
+    ) -> Result<SubmissionTimings, VulkanOffscreenError>
     where
         F: FnOnce(&VulkanOffscreenRecording<'_>) -> Result<(), VulkanOffscreenError>,
     {
+        let command_record_start = Instant::now();
         // SAFETY: The fence belongs to this device and any previous work was
         // waited before this method is called.
         unsafe { self.shared.device.reset_fences(&[self.fence]) }
@@ -1219,6 +1393,7 @@ impl TargetResources {
             device: &self.shared.device,
             command_buffer: self.command_buffer,
             image: self.image,
+            image_view: self.image_view,
             extent: vk::Extent2D {
                 width: self.key.width,
                 height: self.key.height,
@@ -1246,23 +1421,38 @@ impl TargetResources {
                 &[to_copy],
             )
         };
-        let copy = vk::BufferImageCopy::default()
-            .buffer_offset(0)
-            .buffer_row_length(0)
-            .buffer_image_height(0)
-            .image_subresource(
-                vk::ImageSubresourceLayers::default()
-                    .aspect_mask(vk::ImageAspectFlags::COLOR)
-                    .mip_level(0)
-                    .base_array_layer(0)
-                    .layer_count(1),
-            )
-            .image_offset(vk::Offset3D::default())
-            .image_extent(vk::Extent3D {
-                width: self.key.width,
-                height: self.key.height,
-                depth: 1,
-            });
+        let subresource = vk::ImageSubresourceLayers::default()
+            .aspect_mask(vk::ImageAspectFlags::COLOR)
+            .mip_level(0)
+            .base_array_layer(0)
+            .layer_count(1);
+        let mut buffer_offset = 0_u64;
+        let copies = readback_regions
+            .iter()
+            .map(|region| {
+                let copy = vk::BufferImageCopy::default()
+                    .buffer_offset(buffer_offset)
+                    .buffer_row_length(0)
+                    .buffer_image_height(0)
+                    .image_subresource(subresource)
+                    .image_offset(vk::Offset3D {
+                        x: i32::try_from(region.x).unwrap_or(i32::MAX),
+                        y: i32::try_from(region.y).unwrap_or(i32::MAX),
+                        z: 0,
+                    })
+                    .image_extent(vk::Extent3D {
+                        width: region.width,
+                        height: region.height,
+                        depth: 1,
+                    });
+                buffer_offset = buffer_offset.saturating_add(
+                    u64::from(region.width)
+                        .saturating_mul(u64::from(region.height))
+                        .saturating_mul(4),
+                );
+                copy
+            })
+            .collect::<Vec<_>>();
         // SAFETY: The image is transfer-source, the buffer is large enough,
         // and both resources are exclusively owned by this target operation.
         unsafe {
@@ -1271,7 +1461,7 @@ impl TargetResources {
                 self.image,
                 vk::ImageLayout::TRANSFER_SRC_OPTIMAL,
                 self.readback_buffer,
-                &[copy],
+                &copies,
             )
         };
         let host_read = vk::BufferMemoryBarrier::default()
@@ -1298,8 +1488,10 @@ impl TargetResources {
         // remain live until its fence completes.
         unsafe { self.shared.device.end_command_buffer(self.command_buffer) }
             .map_err(|source| operation_error(&self.shared, "command-buffer end", source))?;
+        let command_record_us = elapsed_micros(command_record_start);
         let command_buffers = [self.command_buffer];
         let submit = [vk::SubmitInfo::default().command_buffers(&command_buffers)];
+        let queue_submit_start = Instant::now();
         let queue_guard = self
             .shared
             .queue_submit
@@ -1316,7 +1508,10 @@ impl TargetResources {
         submit_result.map_err(|source| operation_error(&self.shared, "queue submit", source))?;
         operation.in_flight = true;
         operation.layout = vk::ImageLayout::TRANSFER_SRC_OPTIMAL;
-        Ok(())
+        Ok(SubmissionTimings {
+            command_record_us,
+            queue_submit_us: elapsed_micros(queue_submit_start),
+        })
     }
 
     fn wait_for_completion(
@@ -1324,7 +1519,8 @@ impl TargetResources {
         operation: &mut TargetOperation,
         timeout: Duration,
         cancellation: Option<&VulkanOffscreenCancellation>,
-    ) -> Result<(), VulkanOffscreenError> {
+    ) -> Result<u64, VulkanOffscreenError> {
+        let wait_start = Instant::now();
         let wait_result = poll_until_complete(timeout, cancellation, |wait_ns| {
             // SAFETY: The fence is live. Polling does not mutate application memory.
             unsafe {
@@ -1336,7 +1532,7 @@ impl TargetResources {
         match wait_result {
             Ok(()) => {
                 operation.in_flight = false;
-                Ok(())
+                Ok(elapsed_micros(wait_start))
             }
             Err(VulkanOffscreenError::Operation { operation, source }) => {
                 Err(operation_error(&self.shared, operation, source))
@@ -1345,7 +1541,71 @@ impl TargetResources {
         }
     }
 
-    fn readback(&self) -> Result<VulkanOffscreenReadback, VulkanOffscreenError> {
+    fn validate_readback_regions(
+        &self,
+        regions: &[VulkanOffscreenRegion],
+    ) -> Result<(), VulkanOffscreenError> {
+        if regions.is_empty() || regions.len() > 64 {
+            return Err(VulkanOffscreenError::InvalidExtent {
+                width: self.key.width,
+                height: self.key.height,
+                detail: "regional readback requires 1..=64 regions".to_owned(),
+            });
+        }
+        let mut total = 0_u64;
+        for region in regions {
+            if region.width == 0
+                || region.height == 0
+                || region.x.saturating_add(region.width) > self.key.width
+                || region.y.saturating_add(region.height) > self.key.height
+                || region.x > i32::MAX as u32
+                || region.y > i32::MAX as u32
+            {
+                return Err(VulkanOffscreenError::InvalidExtent {
+                    width: region.width,
+                    height: region.height,
+                    detail: format!(
+                        "readback region ({},{}) {}x{} exceeds target {}x{}",
+                        region.x,
+                        region.y,
+                        region.width,
+                        region.height,
+                        self.key.width,
+                        self.key.height,
+                    ),
+                });
+            }
+            total = total
+                .checked_add(
+                    u64::from(region.width)
+                        .checked_mul(u64::from(region.height))
+                        .and_then(|pixels| pixels.checked_mul(4))
+                        .ok_or(VulkanOffscreenError::InvalidExtent {
+                            width: region.width,
+                            height: region.height,
+                            detail: "regional RGBA byte length overflows".to_owned(),
+                        })?,
+                )
+                .ok_or(VulkanOffscreenError::InvalidExtent {
+                    width: self.key.width,
+                    height: self.key.height,
+                    detail: "combined regional RGBA byte length overflows".to_owned(),
+                })?;
+        }
+        if total > self.readback_allocation_size {
+            return Err(VulkanOffscreenError::InvalidExtent {
+                width: self.key.width,
+                height: self.key.height,
+                detail: "combined regional readback exceeds retained allocation".to_owned(),
+            });
+        }
+        Ok(())
+    }
+
+    fn readback_regions(
+        &self,
+        regions: &[VulkanOffscreenRegion],
+    ) -> Result<Vec<VulkanOffscreenRegionReadback>, VulkanOffscreenError> {
         // SAFETY: The memory is host-visible, GPU writes are complete, and the
         // requested range lies inside the allocation.
         let mapped = unsafe {
@@ -1372,22 +1632,28 @@ impl TargetResources {
                 },
             )?;
         }
-        let byte_len = usize::try_from(checked_byte_len(self.key.width, self.key.height)?)
-            .map_err(|_| VulkanOffscreenError::InvalidExtent {
-                width: self.key.width,
-                height: self.key.height,
-                detail: "readback byte length exceeds host address space".to_owned(),
-            })?;
-        // SAFETY: The mapped pointer covers at least byte_len bytes and remains
-        // valid until unmap_memory below.
-        let rgba = unsafe { std::slice::from_raw_parts(mapped.cast::<u8>(), byte_len) }.to_vec();
+        let mut offset = 0_usize;
+        let mut output = Vec::with_capacity(regions.len());
+        for region in regions {
+            let byte_len = usize::try_from(u64::from(region.width) * u64::from(region.height) * 4)
+                .map_err(|_| VulkanOffscreenError::InvalidExtent {
+                    width: region.width,
+                    height: region.height,
+                    detail: "regional readback byte length exceeds host address space".to_owned(),
+                })?;
+            // SAFETY: Validation proved the packed offset/range lies in the mapped allocation.
+            let rgba =
+                unsafe { std::slice::from_raw_parts(mapped.cast::<u8>().add(offset), byte_len) }
+                    .to_vec();
+            output.push(VulkanOffscreenRegionReadback {
+                region: *region,
+                rgba,
+            });
+            offset = offset.saturating_add(byte_len);
+        }
         // SAFETY: The allocation is currently mapped exactly once by this serialized target.
         unsafe { self.shared.device.unmap_memory(self.readback_memory) };
-        Ok(VulkanOffscreenReadback {
-            width: self.key.width,
-            height: self.key.height,
-            rgba,
-        })
+        Ok(output)
     }
 }
 
@@ -1419,6 +1685,7 @@ impl Drop for TargetResources {
             self.shared.device.free_memory(self.readback_memory, None);
             self.shared.device.destroy_buffer(self.staging_buffer, None);
             self.shared.device.free_memory(self.staging_memory, None);
+            self.shared.device.destroy_image_view(self.image_view, None);
             self.shared.device.destroy_image(self.image, None);
             self.shared.device.free_memory(self.image_memory, None);
         }
@@ -1431,6 +1698,7 @@ impl TargetAllocationGuard {
         Self {
             shared,
             image: vk::Image::null(),
+            image_view: vk::ImageView::null(),
             image_memory: vk::DeviceMemory::null(),
             staging_buffer: vk::Buffer::null(),
             staging_memory: vk::DeviceMemory::null(),
@@ -1474,6 +1742,9 @@ impl Drop for TargetAllocationGuard {
                 self.shared.device.free_memory(self.staging_memory, None);
             }
             if self.image != vk::Image::null() {
+                if self.image_view != vk::ImageView::null() {
+                    self.shared.device.destroy_image_view(self.image_view, None);
+                }
                 self.shared.device.destroy_image(self.image, None);
             }
             if self.image_memory != vk::DeviceMemory::null() {
@@ -1627,6 +1898,10 @@ fn checked_byte_len(width: u32, height: u32) -> Result<vk::DeviceSize, VulkanOff
             height,
             detail: "RGBA8 byte length overflows Vulkan device size".to_owned(),
         })
+}
+
+fn elapsed_micros(start: Instant) -> u64 {
+    u64::try_from(start.elapsed().as_micros()).unwrap_or(u64::MAX)
 }
 
 fn color_subresource_range() -> vk::ImageSubresourceRange {
@@ -1859,6 +2134,60 @@ mod tests {
             })
             .expect("empty compute recording seam should submit and read back");
         assert_eq!(readback.rgba.len(), 5 * 3 * 4);
+    }
+
+    #[test]
+    fn regional_compute_readback_copies_only_tight_requested_pixels_when_vulkan_is_available() {
+        let _gpu_test = gpu_test_lock();
+        let context = match VulkanOffscreenContext::new() {
+            Ok(context) => context,
+            Err(error) => {
+                eprintln!("SKIP GPU-only regional readback proof: {error}");
+                return;
+            }
+        };
+        let target = context
+            .create_session()
+            .target(16, 12)
+            .expect("regional target should allocate");
+        let regions = [
+            VulkanOffscreenRegion {
+                x: 1,
+                y: 2,
+                width: 3,
+                height: 4,
+            },
+            VulkanOffscreenRegion {
+                x: 11,
+                y: 8,
+                width: 5,
+                height: 2,
+            },
+        ];
+        target
+            .clear_and_readback([0.25, 0.5, 0.75, 1.0], Duration::from_secs(5))
+            .expect("setup clear should complete");
+        let readback = target
+            .record_compute_and_readback_regions(
+                &regions,
+                Duration::from_secs(5),
+                None,
+                |_recording| Ok(()),
+            )
+            .expect("regional readback should complete");
+        assert_eq!((readback.frame_width, readback.frame_height), (16, 12));
+        assert_eq!(readback.regions.len(), 2);
+        assert_eq!(readback.regions[0].region, regions[0]);
+        assert_eq!(readback.regions[1].region, regions[1]);
+        assert_eq!(readback.regions[0].rgba, [64, 127, 191, 255].repeat(12));
+        assert_eq!(readback.regions[1].rgba, [64, 127, 191, 255].repeat(10));
+        let copied_bytes = readback
+            .regions
+            .iter()
+            .map(|region| region.rgba.len())
+            .sum::<usize>();
+        assert_eq!(copied_bytes, (3 * 4 + 5 * 2) * 4);
+        assert!(copied_bytes < 16 * 12 * 4);
     }
 
     #[test]

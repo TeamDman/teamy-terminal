@@ -9,15 +9,28 @@ repository.workspace = true
 keywords.workspace = true
 categories.workspace = true
 description = "Low-level Vulkan terminal renderer boundary"
+build = "build.rs"
+
+[features]
+default = []
+extended_observability = []
+tracy = ["extended_observability"]
 
 [dependencies]
 ash.workspace = true
 ash-window.workspace = true
 eyre.workspace = true
+num-traits.workspace = true
 raw-window-handle.workspace = true
+teamy-terminal-core.workspace = true
 teamy-terminal-font.workspace = true
 teamy-terminal-frame.workspace = true
+tracing.workspace = true
+unicode-width.workspace = true
 winit.workspace = true
+
+[build-dependencies]
+naga = { version = "=29.0.4", default-features = false, features = ["spv-out", "wgsl-in"] }
 
 [target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
