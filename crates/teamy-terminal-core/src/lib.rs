@@ -40,6 +40,52 @@ pub struct CursorPosition {
     pub row: u16,
 }
 
+/// The bounded cursor presentation selected through DECSCUSR.
+///
+/// Blink phase is intentionally not part of a terminal snapshot. Renderers
+/// preserve whether blinking was requested while producing deterministic
+/// geometry for one snapshot.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[repr(u8)]
+pub enum CursorShape {
+    /// Blinking block (`CSI 0 SP q` or `CSI 1 SP q`).
+    #[default]
+    BlinkingBlock = 0,
+    /// Steady block (`CSI 2 SP q`).
+    SteadyBlock = 1,
+    /// Blinking underline (`CSI 3 SP q`).
+    BlinkingUnderline = 2,
+    /// Steady underline (`CSI 4 SP q`).
+    SteadyUnderline = 3,
+    /// Blinking vertical bar (`CSI 5 SP q`).
+    BlinkingBar = 4,
+    /// Steady vertical bar (`CSI 6 SP q`).
+    SteadyBar = 5,
+}
+
+impl CursorShape {
+    /// Decode a valid DECSCUSR parameter. Unsupported values leave the
+    /// current shape unchanged.
+    #[must_use]
+    pub const fn from_decscusr(parameter: u16) -> Option<Self> {
+        match parameter {
+            0 | 1 => Some(Self::BlinkingBlock),
+            2 => Some(Self::SteadyBlock),
+            3 => Some(Self::BlinkingUnderline),
+            4 => Some(Self::SteadyUnderline),
+            5 => Some(Self::BlinkingBar),
+            6 => Some(Self::SteadyBar),
+            _ => None,
+        }
+    }
+
+    /// Stable renderer ABI value.
+    #[must_use]
+    pub const fn renderer_code(self) -> u8 {
+        self as u8
+    }
+}
+
 /// A visible-grid text selection owned by the terminal session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct SelectionRange {
@@ -107,6 +153,10 @@ pub enum Color {
 }
 
 /// The style and contents of one visible cell.
+///
+/// A base scalar retains a bounded suffix of zero-width Unicode scalars. The
+/// fixed-size representation keeps copies, equality, damage detection, and
+/// fixture identities deterministic.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct Cell {
     /// The character displayed by the cell.
@@ -121,6 +171,49 @@ pub struct Cell {
     pub underline: bool,
     /// Whether foreground and background are visually inverted.
     pub inverse: bool,
+    combining: [char; MAX_COMBINING_SCALARS_PER_CELL],
+    combining_len: u8,
+}
+
+/// Maximum zero-width Unicode scalars retained after one base cell.
+pub const MAX_COMBINING_SCALARS_PER_CELL: usize = 4;
+
+impl Cell {
+    /// Retained combining scalars in input order.
+    #[must_use]
+    pub fn combining_scalars(&self) -> impl ExactSizeIterator<Item = char> + '_ {
+        self.combining[..usize::from(self.combining_len)]
+            .iter()
+            .copied()
+    }
+
+    /// Append one zero-width scalar when bounded storage remains.
+    ///
+    /// Returns `true` only when the scalar was valid and retained.
+    #[must_use]
+    pub fn append_combining(&mut self, character: char) -> bool {
+        if character.width() != Some(0) {
+            return false;
+        }
+        let index = usize::from(self.combining_len);
+        let Some(slot) = self.combining.get_mut(index) else {
+            return false;
+        };
+        *slot = character;
+        self.combining_len = self.combining_len.saturating_add(1);
+        true
+    }
+
+    /// Number of retained combining scalars.
+    #[must_use]
+    pub const fn combining_count(&self) -> u8 {
+        self.combining_len
+    }
+
+    fn clear_combining(&mut self) {
+        self.combining = ['\0'; MAX_COMBINING_SCALARS_PER_CELL];
+        self.combining_len = 0;
+    }
 }
 
 impl Default for Cell {
@@ -132,6 +225,8 @@ impl Default for Cell {
             bold: false,
             underline: false,
             inverse: false,
+            combining: ['\0'; MAX_COMBINING_SCALARS_PER_CELL],
+            combining_len: 0,
         }
     }
 }
@@ -147,6 +242,8 @@ pub struct TerminalSnapshot {
     pub cursor: CursorPosition,
     /// Whether the cursor should be painted.
     pub cursor_visible: bool,
+    /// Requested cursor shape.
+    pub cursor_shape: CursorShape,
     /// Visible cells in row-major order.
     pub cells: Vec<Cell>,
     /// Number of retained scrollback rows.
@@ -183,10 +280,11 @@ impl TerminalSnapshot {
         for row in 0..self.rows {
             let start = usize::from(row) * usize::from(self.columns);
             let end = start + usize::from(self.columns);
-            let mut text = self.cells[start..end]
-                .iter()
-                .map(|cell| cell.character)
-                .collect::<String>();
+            let mut text = String::new();
+            for cell in &self.cells[start..end] {
+                text.push(cell.character);
+                text.extend(cell.combining_scalars());
+            }
             while text.ends_with(' ') {
                 let _ = text.pop();
             }
@@ -219,6 +317,8 @@ struct SavedScreen {
     cursor: CursorPosition,
     saved_cursor: CursorPosition,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
+    saved_cursor_shape: CursorShape,
     wrap_pending: bool,
     style: Style,
     cells: Vec<Cell>,
@@ -230,6 +330,7 @@ struct SavedScreen {
 struct SavedCursor {
     cursor: CursorPosition,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
     style: Style,
 }
 
@@ -254,6 +355,8 @@ impl Style {
             bold: self.bold,
             underline: self.underline,
             inverse: self.inverse,
+            combining: ['\0'; MAX_COMBINING_SCALARS_PER_CELL],
+            combining_len: 0,
         }
     }
 }
@@ -265,6 +368,8 @@ struct TerminalState {
     cursor: CursorPosition,
     saved_cursor: CursorPosition,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
+    saved_cursor_shape: CursorShape,
     wrap_pending: bool,
     style: Style,
     cells: Vec<Cell>,
@@ -293,6 +398,8 @@ impl TerminalState {
             cursor: CursorPosition::default(),
             saved_cursor: CursorPosition::default(),
             cursor_visible: true,
+            cursor_shape: CursorShape::default(),
+            saved_cursor_shape: CursorShape::default(),
             wrap_pending: false,
             style: Style::default(),
             cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
@@ -398,6 +505,8 @@ impl TerminalState {
         self.cells.fill(Cell::default());
         self.cursor = CursorPosition::default();
         self.saved_cursor = CursorPosition::default();
+        self.cursor_shape = CursorShape::default();
+        self.saved_cursor_shape = CursorShape::default();
         self.style = Style::default();
         self.wrap_pending = false;
         self.row_wrapped.fill(false);
@@ -414,6 +523,7 @@ impl TerminalState {
         self.saved_private_cursor = Some(SavedCursor {
             cursor: self.cursor,
             cursor_visible: self.cursor_visible,
+            cursor_shape: self.cursor_shape,
             style: self.style,
         });
     }
@@ -427,6 +537,7 @@ impl TerminalState {
             row: saved_cursor.cursor.row.min(self.rows - 1),
         };
         self.cursor_visible = saved_cursor.cursor_visible;
+        self.cursor_shape = saved_cursor.cursor_shape;
         self.style = saved_cursor.style;
         self.wrap_pending = false;
     }
@@ -442,6 +553,8 @@ impl TerminalState {
             cursor: self.cursor,
             saved_cursor: self.saved_cursor,
             cursor_visible: self.cursor_visible,
+            cursor_shape: self.cursor_shape,
+            saved_cursor_shape: self.saved_cursor_shape,
             wrap_pending: self.wrap_pending,
             style: self.style,
             cells: self.cells.clone(),
@@ -455,6 +568,7 @@ impl TerminalState {
         self.scrollback.clear();
         self.cursor = CursorPosition::default();
         self.cursor_visible = true;
+        self.cursor_shape = CursorShape::default();
         self.style = Style::default();
         self.wrap_pending = false;
     }
@@ -473,6 +587,8 @@ impl TerminalState {
         self.cursor = saved_screen.cursor;
         self.saved_cursor = saved_screen.saved_cursor;
         self.cursor_visible = saved_screen.cursor_visible;
+        self.cursor_shape = saved_screen.cursor_shape;
+        self.saved_cursor_shape = saved_screen.saved_cursor_shape;
         self.wrap_pending = saved_screen.wrap_pending;
         self.style = saved_screen.style;
         self.cells = saved_screen.cells;
@@ -505,10 +621,11 @@ impl TerminalState {
             let row_start = usize::from(row) * usize::from(self.columns);
             let row_end = row_start + usize::from(self.columns);
             let cells = &self.cells[row_start..row_end];
-            let mut line = cells[usize::from(first_column)..=usize::from(last_column)]
-                .iter()
-                .map(|cell| cell.character)
-                .collect::<String>();
+            let mut line = String::new();
+            for cell in &cells[usize::from(first_column)..=usize::from(last_column)] {
+                line.push(cell.character);
+                line.extend(cell.combining_scalars());
+            }
             while line.ends_with(' ') {
                 let _ = line.pop();
             }
@@ -605,6 +722,10 @@ impl TerminalState {
     }
 
     fn put_char(&mut self, character: char) {
+        if character.width() == Some(0) {
+            self.put_combining(character);
+            return;
+        }
         if self.wrap_pending {
             self.cursor.column = 0;
             self.line_feed(true);
@@ -626,6 +747,26 @@ impl TerminalState {
         } else {
             self.cursor.column += width;
         }
+    }
+
+    fn put_combining(&mut self, character: char) {
+        let mut column = if self.wrap_pending {
+            self.cursor.column
+        } else if self.cursor.column > 0 {
+            self.cursor.column - 1
+        } else {
+            return;
+        };
+        let row = self.cursor.row;
+        if column > 0 {
+            let current = self.cells[self.cell_index(column, row)];
+            let previous = self.cells[self.cell_index(column - 1, row)];
+            if is_wide_continuation(previous, current) {
+                column -= 1;
+            }
+        }
+        let index = self.cell_index(column, row);
+        let _retained = self.cells[index].append_combining(character);
     }
 
     fn clear_screen(&mut self, mode: u16) {
@@ -867,6 +1008,12 @@ impl Perform for Performer<'_> {
             'J' => self.state.clear_screen(Self::parameter_or_zero(params, 0)),
             'K' => self.state.clear_line(Self::parameter_or_zero(params, 0)),
             'm' => Self::apply_sgr(self, params),
+            'q' if intermediates == [b' '] => {
+                if let Some(shape) = CursorShape::from_decscusr(Self::parameter_or_zero(params, 0))
+                {
+                    self.state.cursor_shape = shape;
+                }
+            }
             'h' | 'l' if intermediates == [b'?'] => {
                 for parameter in params.iter().filter_map(|values| values.first().copied()) {
                     let enabled = action == 'h';
@@ -935,10 +1082,15 @@ impl Perform for Performer<'_> {
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, byte: u8) {
         match byte {
-            b'7' => self.state.saved_cursor = self.state.cursor,
-            b'8' => self
-                .state
-                .move_cursor(self.state.saved_cursor.column, self.state.saved_cursor.row),
+            b'7' => {
+                self.state.saved_cursor = self.state.cursor;
+                self.state.saved_cursor_shape = self.state.cursor_shape;
+            }
+            b'8' => {
+                self.state
+                    .move_cursor(self.state.saved_cursor.column, self.state.saved_cursor.row);
+                self.state.cursor_shape = self.state.saved_cursor_shape;
+            }
             b'c' => self.state.clear(),
             b'D' | b'E' => {
                 self.state.line_feed(false);
@@ -1031,6 +1183,7 @@ fn reflow_rows(
                 let continuation = unit.continuation.unwrap_or_else(|| {
                     let mut continuation = unit.cell;
                     continuation.character = ' ';
+                    continuation.clear_combining();
                     continuation
                 });
                 output_cells.push(continuation);
@@ -1061,6 +1214,7 @@ fn reflow_rows(
 fn is_wide_continuation(previous: Cell, current: Cell) -> bool {
     previous.character.width().is_some_and(|width| width >= 2)
         && current.character == ' '
+        && current.combining_len == 0
         && current.foreground == previous.foreground
         && current.background == previous.background
         && current.bold == previous.bold
@@ -1184,6 +1338,7 @@ impl TerminalSession {
             rows: self.state.rows,
             cursor: self.state.cursor,
             cursor_visible: self.state.cursor_visible,
+            cursor_shape: self.state.cursor_shape,
             cells: self.state.cells.clone(),
             scrollback_rows: self.state.scrollback.len(),
             selection: self.state.selection,
@@ -1492,6 +1647,112 @@ mod tests {
         assert_eq!(
             snapshot.cell(4, 2).map(|cell| cell.foreground),
             Some(Color::Indexed(1))
+        );
+    }
+
+    #[test]
+    fn decscusr_parses_every_bounded_cursor_shape() {
+        let mut terminal = session();
+        for (parameter, expected) in [
+            (0, CursorShape::BlinkingBlock),
+            (1, CursorShape::BlinkingBlock),
+            (2, CursorShape::SteadyBlock),
+            (3, CursorShape::BlinkingUnderline),
+            (4, CursorShape::SteadyUnderline),
+            (5, CursorShape::BlinkingBar),
+            (6, CursorShape::SteadyBar),
+        ] {
+            terminal.process_bytes(format!("\x1b[{parameter} q").as_bytes());
+            assert_eq!(terminal.snapshot().cursor_shape, expected);
+        }
+
+        terminal.process_bytes(b"\x1b[99 q");
+        assert_eq!(terminal.snapshot().cursor_shape, CursorShape::SteadyBar);
+    }
+
+    #[test]
+    fn cursor_shape_is_saved_by_dec_private_and_alternate_screen_paths() {
+        let mut terminal = session();
+        terminal.process_bytes(b"\x1b[4 q\x1b7\x1b[6 q\x1b8");
+        assert_eq!(
+            terminal.snapshot().cursor_shape,
+            CursorShape::SteadyUnderline
+        );
+
+        terminal.process_bytes(b"\x1b[3 q\x1b[?1048h\x1b[5 q\x1b[?1048l");
+        assert_eq!(
+            terminal.snapshot().cursor_shape,
+            CursorShape::BlinkingUnderline
+        );
+
+        terminal.process_bytes(b"\x1b[6 q\x1b[?1049h");
+        assert_eq!(terminal.snapshot().cursor_shape, CursorShape::BlinkingBlock);
+        terminal.process_bytes(b"\x1b[4 q\x1b[?1049l");
+        assert_eq!(terminal.snapshot().cursor_shape, CursorShape::SteadyBar);
+    }
+
+    #[test]
+    fn combining_scalars_are_bounded_and_do_not_advance_the_cursor() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 8, 2);
+        terminal.process_bytes("e\u{0301}\u{0327}x".as_bytes());
+        let snapshot = terminal.snapshot();
+        assert_eq!(snapshot.cursor, CursorPosition { column: 2, row: 0 });
+        assert_eq!(snapshot.cell(0, 0).map(|cell| cell.character), Some('e'));
+        assert_eq!(
+            snapshot
+                .cell(0, 0)
+                .map(|cell| cell.combining_scalars().collect::<Vec<_>>()),
+            Some(vec!['\u{0301}', '\u{0327}'])
+        );
+        assert_eq!(snapshot.cell(1, 0).map(|cell| cell.character), Some('x'));
+        assert_eq!(snapshot.visible_text(), "e\u{0301}\u{0327}x\n");
+
+        terminal.process_bytes("\rA\u{0300}\u{0301}\u{0302}\u{0303}\u{0304}".as_bytes());
+        let bounded = terminal.snapshot();
+        assert_eq!(bounded.cursor, CursorPosition { column: 1, row: 0 });
+        assert_eq!(
+            bounded
+                .cell(0, 0)
+                .map(|cell| cell.combining_scalars().collect::<Vec<_>>()),
+            Some(vec!['\u{0300}', '\u{0301}', '\u{0302}', '\u{0303}'])
+        );
+    }
+
+    #[test]
+    fn combining_scalars_attach_to_wide_base_without_corrupting_continuation() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 4, 1);
+        terminal.process_bytes("A界\u{0301}Z".as_bytes());
+        let snapshot = terminal.snapshot();
+        assert_eq!(snapshot.cursor, CursorPosition { column: 3, row: 0 });
+        assert_eq!(snapshot.cell(1, 0).map(|cell| cell.character), Some('界'));
+        assert_eq!(
+            snapshot
+                .cell(1, 0)
+                .map(|cell| cell.combining_scalars().collect::<Vec<_>>()),
+            Some(vec!['\u{0301}'])
+        );
+        assert_eq!(snapshot.cell(2, 0).map(|cell| cell.character), Some(' '));
+        assert_eq!(
+            snapshot
+                .cell(2, 0)
+                .map(|cell| cell.combining_scalars().count()),
+            Some(0)
+        );
+        assert_eq!(snapshot.cell(3, 0).map(|cell| cell.character), Some('Z'));
+
+        terminal.resize(8, 1);
+        let resized = terminal.snapshot();
+        assert_eq!(
+            resized
+                .cell(1, 0)
+                .map(|cell| cell.combining_scalars().collect::<Vec<_>>()),
+            Some(vec!['\u{0301}'])
+        );
+        assert_eq!(
+            resized
+                .cell(2, 0)
+                .map(|cell| cell.combining_scalars().count()),
+            Some(0)
         );
     }
 }

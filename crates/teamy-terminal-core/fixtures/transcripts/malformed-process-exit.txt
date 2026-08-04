@@ -10,4 +10,4 @@ expect cursor-visible true
 expect scrollback 0
 expect process-exit 7 false
 expect cancelled true
-expect hash eda326e29c600d4e
+expect hash 43b0a8ca6aa06340

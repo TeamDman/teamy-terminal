@@ -21,6 +21,7 @@ use std::time::Duration;
 use std::time::Instant;
 use teamy_terminal_core::Cell;
 use teamy_terminal_core::Color;
+use teamy_terminal_core::MAX_COMBINING_SCALARS_PER_CELL;
 use teamy_terminal_core::TerminalSnapshot;
 use teamy_terminal_font::CellRect;
 use teamy_terminal_font::EMBEDDED_FONT_ID;
@@ -51,7 +52,10 @@ pub const GPU_SLUG_MIN_PIXEL_SIZE: f32 = 1.0;
 /// Maximum effective em size accepted by the current bridge sizing policy.
 pub const GPU_SLUG_MAX_PIXEL_SIZE: f32 = 64.0;
 
-const CELL_WORDS: usize = 8;
+const CELL_WORDS: usize = 8 + MAX_COMBINING_SCALARS_PER_CELL;
+const CELL_COMBINING_START: usize = 8;
+const _: [(); CELL_WORDS] = [(); GPU_SLUG_SHADER_CELL_WORDS];
+const _: [(); MAX_COMBINING_SCALARS_PER_CELL] = [(); GPU_SLUG_SHADER_MAX_COMBINING_GLYPHS];
 const FRAME_WORDS: usize = 16;
 const REGION_WORDS: usize = 4;
 const MAX_RETAINED_GLYPHS: usize = 1_024;
@@ -177,11 +181,8 @@ pub struct GpuSlugRenderStats {
 pub struct GpuSlugRenderRequest<'a> {
     /// Authoritative visible terminal state.
     ///
-    /// The current core snapshot stores one Unicode scalar per cell. Combining
-    /// scalars therefore occupy the cell assigned by the core; this renderer
-    /// preserves that model and does not claim grapheme shaping. The current
-    /// snapshot also carries cursor position/visibility but no cursor-shape
-    /// enum, so this backend reproduces the existing two-pixel bar cursor.
+    /// Combining scalars and the requested cursor shape are consumed directly
+    /// from the bounded renderer-neutral snapshot model.
     pub snapshot: &'a TerminalSnapshot,
     /// Native output width. Java must present without bitmap stretching.
     pub width: u32,
@@ -1720,6 +1721,11 @@ fn unique_render_characters(snapshot: &TerminalSnapshot) -> Vec<char> {
         if !characters.contains(&cell.character) {
             characters.push(cell.character);
         }
+        for combining in cell.combining_scalars() {
+            if !characters.contains(&combining) {
+                characters.push(combining);
+            }
+        }
     }
     if !characters.contains(&' ') {
         characters.push(' ');
@@ -1743,6 +1749,7 @@ fn build_cell_words(
                     })?;
             let continuation = column > 0
                 && cell.character == ' '
+                && cell.combining_count() == 0
                 && snapshot.cell(column - 1, row).is_some_and(|previous| {
                     previous.character.width().is_some_and(|width| width >= 2)
                 });
@@ -1757,6 +1764,7 @@ fn build_cell_words(
                 )
             };
             let glyph = state.ensure_glyph_for_cell(render_cell.character)?;
+            let combining_count = usize::from(render_cell.combining_count());
             let selected_column = u16::try_from(origin_column).unwrap_or(column);
             let (foreground, background) =
                 cell_colors(render_cell, snapshot.is_selected(selected_column, row));
@@ -1769,10 +1777,25 @@ fn build_cell_words(
                 origin_column,
                 glyph_width,
                 u32::from(render_cell.character),
-                0,
+                u32::from(render_cell.combining_count()),
             ]);
+            debug_assert_eq!(output.len() % CELL_WORDS, CELL_COMBINING_START);
+            for combining in render_cell.combining_scalars() {
+                output.push(state.ensure_glyph_for_cell(combining)?);
+            }
+            output.resize(
+                output
+                    .len()
+                    .saturating_add(MAX_COMBINING_SCALARS_PER_CELL)
+                    .saturating_sub(combining_count),
+                0,
+            );
         }
     }
+    debug_assert_eq!(
+        output.len(),
+        snapshot.cells.len().saturating_mul(CELL_WORDS)
+    );
     Ok(output)
 }
 
@@ -1889,7 +1912,7 @@ fn frame_words(
         u32::from(snapshot.cursor_visible),
         u32::try_from(GPU_GLYPH_METADATA_WORDS).unwrap_or(u32::MAX),
         u32::try_from(region_count).unwrap_or(u32::MAX),
-        0,
+        u32::from(snapshot.cursor_shape.renderer_code()),
         metrics.ascender.to_bits(),
         metrics.descender.to_bits(),
         surface.font_pixel_size.to_bits(),
@@ -1929,6 +1952,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use teamy_terminal_core::CursorPosition;
+    use teamy_terminal_core::CursorShape;
     use teamy_terminal_core::PromptMetadata;
     use teamy_terminal_core::SelectionRange;
     use teamy_terminal_core::TerminalLimits;
@@ -1947,6 +1971,7 @@ mod tests {
             rows,
             cursor: CursorPosition::default(),
             cursor_visible: false,
+            cursor_shape: CursorShape::default(),
             cells,
             scrollback_rows: 0,
             selection: None,
@@ -1993,7 +2018,12 @@ mod tests {
         assert_eq!(GPU_SLUG_SHADER_ENTRY, "gpu_slug_main");
         assert_eq!(GPU_SLUG_SHADER_WORDS.first(), Some(&0x0723_0203));
         assert!(GPU_SLUG_SHADER_WORDS.len() > 128);
-        assert_eq!(CELL_WORDS, 8);
+        assert_eq!(CELL_WORDS, 12);
+        assert_eq!(CELL_WORDS, GPU_SLUG_SHADER_CELL_WORDS);
+        assert_eq!(
+            MAX_COMBINING_SCALARS_PER_CELL,
+            GPU_SLUG_SHADER_MAX_COMBINING_GLYPHS
+        );
         assert_eq!(GPU_GLYPH_METADATA_WORDS, 16);
         let font = SlugFont::embedded().expect("embedded Slug font");
         assert!(matches!(
@@ -2110,6 +2140,7 @@ mod tests {
         });
         snapshot.cursor = CursorPosition { column: 0, row: 0 };
         snapshot.cursor_visible = true;
+        snapshot.cursor_shape = CursorShape::SteadyBar;
         let result = renderer
             .render(GpuSlugRenderRequest::full(
                 &snapshot,
@@ -2160,6 +2191,53 @@ mod tests {
         assert_eq!(result.identity.frame_sequence, 7);
         assert_eq!(result.identity.presentation_generation, "generation:gpu/3");
         assert_eq!(result.identity.correlation_id, "corr:not-a-number");
+    }
+
+    #[test]
+    fn every_cursor_shape_matches_cpu_geometry() {
+        let Some(mut renderer) = gpu_renderer() else {
+            return;
+        };
+        let metrics = renderer.surface_metrics(32.0).expect("GPU surface metrics");
+        let mut cpu = TerminalFont::new(32.0).expect("CPU semantic oracle font");
+        assert_eq!(cpu.cell_width(), metrics.cell_width);
+        assert_eq!(cpu.cell_height(), metrics.cell_height);
+        let mut frames = Vec::new();
+
+        for shape in [
+            CursorShape::BlinkingBlock,
+            CursorShape::SteadyBlock,
+            CursorShape::BlinkingUnderline,
+            CursorShape::SteadyUnderline,
+            CursorShape::BlinkingBar,
+            CursorShape::SteadyBar,
+        ] {
+            let mut snapshot = snapshot(" ", 1, 1);
+            snapshot.cursor_visible = true;
+            snapshot.cursor_shape = shape;
+            let gpu = renderer
+                .render(GpuSlugRenderRequest::full(
+                    &snapshot,
+                    metrics.cell_width,
+                    metrics.cell_height,
+                    32.0,
+                    GpuSlugRenderIdentity::default(),
+                ))
+                .expect("GPU cursor frame");
+            let cpu_frame = cpu.render(&snapshot, metrics.cell_width, metrics.cell_height);
+            assert_eq!(
+                full_rgba(&gpu),
+                cpu_frame.pixels,
+                "cursor mismatch for {shape:?}"
+            );
+            frames.push(full_rgba(&gpu).to_vec());
+        }
+
+        assert_eq!(frames[0], frames[1]);
+        assert_eq!(frames[2], frames[3]);
+        assert_eq!(frames[4], frames[5]);
+        assert_ne!(frames[0], frames[2]);
+        assert_ne!(frames[2], frames[4]);
     }
 
     #[test]
@@ -2301,7 +2379,36 @@ mod tests {
                 .any(|pixel| pixel[0] > 30)
         );
 
-        let combining = snapshot("e\u{0301}", 2, 1);
+        let mut combining_terminal = TerminalSession::new(TerminalLimits::default(), 2, 1);
+        combining_terminal.process_bytes("\u{001b}[?25le\u{0301}".as_bytes());
+        let combining = combining_terminal.snapshot();
+        assert_eq!(combining.cursor, CursorPosition { column: 1, row: 0 });
+        assert_eq!(
+            combining
+                .cell(0, 0)
+                .map(|cell| cell.combining_scalars().collect::<Vec<_>>()),
+            Some(vec!['\u{0301}'])
+        );
+        let prepared = unique_render_characters(&combining);
+        for character in prepared {
+            renderer
+                .state
+                .ensure_glyph(&renderer.runtime.font, character)
+                .expect("combining fixture glyph preparation");
+        }
+        let words =
+            build_cell_words(&combining, &mut renderer.state).expect("combining cell words");
+        assert_eq!(words[7], 1);
+        assert_eq!(
+            words[CELL_COMBINING_START],
+            renderer
+                .state
+                .glyphs
+                .get(&'\u{0301}')
+                .expect("combining glyph cache entry")
+                .slot
+        );
+        assert_eq!(words[CELL_WORDS + 7], 0);
         let combining_result = renderer
             .render(GpuSlugRenderRequest::full(
                 &combining,
@@ -2310,7 +2417,7 @@ mod tests {
                 32.0,
                 GpuSlugRenderIdentity::default(),
             ))
-            .expect("one-scalar-per-cell combining fixture");
+            .expect("combining-overlay fixture");
         let combining_rgba = full_rgba(&combining_result);
         let second_cell_start = usize::try_from(combining_result.metrics.cell_width).unwrap();
         let second_cell_has_ink = (0..combining_result.metrics.cell_height.min(48)).any(|y| {
@@ -2320,8 +2427,8 @@ mod tests {
             })
         });
         assert!(
-            second_cell_has_ink,
-            "combining scalar must not be silently dropped"
+            !second_cell_has_ink,
+            "combining scalar must overlay the base instead of consuming the next cell"
         );
 
         let missing_character = char::from_u32(0x10_FFFF).expect("valid scalar");
@@ -2347,6 +2454,74 @@ mod tests {
             .expect("question-mark glyph");
         assert_eq!(missing_result.visual_hash, question_result.visual_hash);
         assert_eq!(full_rgba(&missing_result), full_rgba(&question_result));
+    }
+
+    #[test]
+    fn combining_damage_composes_exactly_and_retains_mark_geometry() {
+        let Some(mut renderer) = gpu_renderer() else {
+            return;
+        };
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 8, 1);
+        terminal.process_bytes("\u{001b}[?25le\u{0301}X".as_bytes());
+        let first = terminal.snapshot();
+        let first_result = renderer
+            .render(GpuSlugRenderRequest::full(
+                &first,
+                256,
+                48,
+                32.0,
+                GpuSlugRenderIdentity::default(),
+            ))
+            .expect("first combining frame");
+
+        terminal.process_bytes("\re\u{0327}".as_bytes());
+        let second = terminal.snapshot();
+        let (damage, full_refresh) = teamy_terminal_font::damage_regions(Some(&first), &second);
+        assert!(!full_refresh);
+        assert!(!damage.is_empty());
+        let dirty = renderer
+            .render(GpuSlugRenderRequest {
+                snapshot: &second,
+                width: 256,
+                height: 48,
+                font_pixel_size: 32.0,
+                damage: &damage,
+                force_full_refresh: false,
+                identity: GpuSlugRenderIdentity::default(),
+                timeout: DEFAULT_RENDER_TIMEOUT,
+                cancellation: None,
+            })
+            .expect("dirty combining frame");
+        let direct = renderer
+            .render(GpuSlugRenderRequest::full(
+                &second,
+                256,
+                48,
+                32.0,
+                GpuSlugRenderIdentity::default(),
+            ))
+            .expect("direct combining frame");
+
+        let mut composed = full_rgba(&first_result).to_vec();
+        for region in &dirty.dirty_regions {
+            let row_bytes = usize::try_from(region.width).unwrap() * 4;
+            for row in 0..region.height {
+                let destination = (usize::try_from(region.y + row).unwrap() * 256
+                    + usize::try_from(region.x).unwrap())
+                    * 4;
+                let source = usize::try_from(row).unwrap() * row_bytes;
+                composed[destination..destination + row_bytes]
+                    .copy_from_slice(&region.rgba[source..source + row_bytes]);
+            }
+        }
+
+        assert_eq!(composed, full_rgba(&direct));
+        assert_ne!(full_rgba(&first_result), full_rgba(&direct));
+        assert!(dirty.cache.geometry_misses > first_result.cache.geometry_misses);
+        assert_eq!(
+            dirty.stats.target_allocation_id,
+            first_result.stats.target_allocation_id
+        );
     }
 
     #[test]

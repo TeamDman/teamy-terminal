@@ -30,6 +30,7 @@ use swash::scale::StrikeWith;
 use swash::scale::image::Content;
 use teamy_terminal_core::Cell;
 use teamy_terminal_core::Color;
+use teamy_terminal_core::CursorShape;
 use teamy_terminal_core::TerminalSnapshot;
 use unicode_width::UnicodeWidthChar;
 
@@ -583,8 +584,16 @@ impl TerminalFont {
                 let x = u32::from(snapshot.cursor.column) * self.cell_width;
                 let y = u32::from(snapshot.cursor.row) * self.cell_height;
                 let cursor_color = [210, 210, 210, 190];
-                for cursor_y in y..(y + self.cell_height).min(frame.height) {
-                    for cursor_x in x..(x + 2).min(frame.width) {
+                let (cursor_x, cursor_y, cursor_width, cursor_height) = cursor_rectangle(
+                    snapshot.cursor_shape,
+                    x,
+                    y,
+                    self.cell_width,
+                    self.cell_height,
+                );
+                for cursor_y in cursor_y..cursor_y.saturating_add(cursor_height).min(frame.height) {
+                    for cursor_x in cursor_x..cursor_x.saturating_add(cursor_width).min(frame.width)
+                    {
                         put_pixel(
                             &mut frame.pixels,
                             frame.width,
@@ -631,7 +640,7 @@ impl TerminalFont {
             }
         }
 
-        if cell.character != ' ' {
+        if cell.character != ' ' || cell.combining_count() > 0 {
             let glyph = self.glyph(cell.character);
             let glyph_cell_width = glyph_cell_width_px
                 .to_f32()
@@ -647,17 +656,20 @@ impl TerminalFont {
                 frame_width,
                 frame_height,
             };
-            draw_glyph(
-                &mut target,
-                &glyph,
-                GlyphPlacement {
-                    origin_x: glyph_origin_x,
-                    cell_y: y,
-                    baseline: self.baseline,
-                    right: glyph_right,
-                    foreground,
-                },
-            );
+            let placement = GlyphPlacement {
+                origin_x: glyph_origin_x,
+                cell_y: y,
+                baseline: self.baseline,
+                right: glyph_right,
+                foreground,
+            };
+            if cell.character != ' ' {
+                draw_glyph(&mut target, &glyph, placement);
+            }
+            for combining in cell.combining_scalars() {
+                let combining_glyph = self.glyph(combining);
+                draw_glyph(&mut target, &combining_glyph, placement);
+            }
         }
         if cell.underline {
             let underline_y =
@@ -727,6 +739,25 @@ impl TerminalFont {
             .fonts
             .iter()
             .position(|font| font.font.has_glyph(character))
+    }
+}
+
+fn cursor_rectangle(
+    shape: CursorShape,
+    x: u32,
+    y: u32,
+    cell_width: u32,
+    cell_height: u32,
+) -> (u32, u32, u32, u32) {
+    match shape {
+        CursorShape::BlinkingBlock | CursorShape::SteadyBlock => (x, y, cell_width, cell_height),
+        CursorShape::BlinkingUnderline | CursorShape::SteadyUnderline => (
+            x,
+            y.saturating_add(cell_height.saturating_sub(2)),
+            cell_width,
+            cell_height.min(2),
+        ),
+        CursorShape::BlinkingBar | CursorShape::SteadyBar => (x, y, cell_width.min(2), cell_height),
     }
 }
 
@@ -823,7 +854,7 @@ fn is_wide_character_continuation(
     row: u16,
     cell: Cell,
 ) -> bool {
-    if cell.character != ' ' || column == 0 {
+    if cell.character != ' ' || cell.combining_count() > 0 || column == 0 {
         return false;
     }
     snapshot
@@ -996,6 +1027,7 @@ mod tests {
             rows,
             cursor: CursorPosition::default(),
             cursor_visible: false,
+            cursor_shape: CursorShape::default(),
             cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
             scrollback_rows: 0,
             selection: None,
@@ -1182,6 +1214,96 @@ mod tests {
                 .chunks_exact(4)
                 .any(|pixel| pixel == [70, 100, 170, 255])
         );
+    }
+
+    #[test]
+    fn every_decscusr_shape_uses_deterministic_block_underline_or_bar_geometry() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let width = font.cell_width();
+        let height = font.cell_height();
+        let cursor_color = [210, 210, 210, 190];
+        let mut rendered = Vec::new();
+        for shape in [
+            CursorShape::BlinkingBlock,
+            CursorShape::SteadyBlock,
+            CursorShape::BlinkingUnderline,
+            CursorShape::SteadyUnderline,
+            CursorShape::BlinkingBar,
+            CursorShape::SteadyBar,
+        ] {
+            let mut snapshot = blank_snapshot(1, 1);
+            snapshot.cursor_visible = true;
+            snapshot.cursor_shape = shape;
+            let frame = font.render(&snapshot, width, height);
+            let cursor_pixels = frame
+                .pixels
+                .chunks_exact(4)
+                .filter(|pixel| *pixel == cursor_color)
+                .count();
+            rendered.push((frame, cursor_pixels));
+        }
+
+        assert_eq!(rendered[0].0, rendered[1].0);
+        assert_eq!(rendered[2].0, rendered[3].0);
+        assert_eq!(rendered[4].0, rendered[5].0);
+        assert_eq!(rendered[0].1, usize::try_from(width * height).unwrap());
+        assert_eq!(
+            rendered[2].1,
+            usize::try_from(width * height.min(2)).unwrap()
+        );
+        assert_eq!(
+            rendered[4].1,
+            usize::try_from(width.min(2) * height).unwrap()
+        );
+    }
+
+    #[test]
+    fn cursor_shape_damage_matches_a_direct_full_render() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let mut previous = blank_snapshot(4, 1);
+        previous.cursor = CursorPosition { column: 1, row: 0 };
+        previous.cursor_visible = true;
+        previous.cursor_shape = CursorShape::SteadyBar;
+        let width = font.cell_width() * 4;
+        let height = font.cell_height();
+        let mut composed = font.render(&previous, width, height);
+
+        let mut current = previous.clone();
+        current.cursor_shape = CursorShape::SteadyUnderline;
+        let expected = font.render(&current, width, height);
+        let (regions, full_refresh) = damage_regions(Some(&previous), &current);
+        assert!(!full_refresh);
+        assert!(!regions.is_empty());
+        font.render_cells(&current, &mut composed, &regions);
+
+        assert_eq!(composed, expected);
+    }
+
+    #[test]
+    fn combining_marks_overlay_the_base_and_dirty_render_matches_full() {
+        let mut font = TerminalFont::embedded().expect("embedded font should parse");
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 8, 1);
+        terminal.process_bytes("\u{001b}[?25le\u{0301}X".as_bytes());
+        let first = terminal.snapshot();
+        assert_eq!(first.cursor, CursorPosition { column: 2, row: 0 });
+        let width = font.cell_width() * 8;
+        let height = font.cell_height();
+        let base = font.render(&first, width, height);
+        let cache_after_first = font.cache_stats();
+        assert!(cache_after_first.cached_glyphs >= 3);
+
+        terminal.process_bytes("\re\u{0327}".as_bytes());
+        let second = terminal.snapshot();
+        assert_eq!(second.cursor, CursorPosition { column: 1, row: 0 });
+        let expected = font.render(&second, width, height);
+        let (regions, full_refresh) = damage_regions(Some(&first), &second);
+        assert!(!full_refresh);
+        assert!(!regions.is_empty());
+        let mut composed = base;
+        font.render_cells(&second, &mut composed, &regions);
+
+        assert_eq!(composed, expected);
+        assert_ne!(font.render(&first, width, height), expected);
     }
 
     #[test]

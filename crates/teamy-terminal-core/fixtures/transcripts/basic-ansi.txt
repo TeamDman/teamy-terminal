@@ -6,4 +6,4 @@ expect rows 3
 expect cursor 9 0
 expect cursor-visible true
 expect scrollback 0
-expect hash 984dbd186858750e
+expect hash 2b48cb55b575e4fc

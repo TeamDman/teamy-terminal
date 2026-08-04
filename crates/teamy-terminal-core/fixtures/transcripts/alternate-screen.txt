@@ -7,4 +7,4 @@ expect rows 4
 expect cursor 5 2
 expect cursor-visible true
 expect scrollback 0
-expect hash 1aec03b030e8ce7d
+expect hash 4a6f1fe569daeb4f

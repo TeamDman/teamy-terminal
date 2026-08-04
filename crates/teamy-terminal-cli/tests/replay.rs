@@ -131,9 +131,14 @@ fn snapshot_hash(snapshot: &TerminalSnapshot) -> u64 {
     update_hash(&mut hash, snapshot.cursor.column.to_le_bytes());
     update_hash(&mut hash, snapshot.cursor.row.to_le_bytes());
     update_hash(&mut hash, [u8::from(snapshot.cursor_visible)]);
+    update_hash(&mut hash, [snapshot.cursor_shape.renderer_code()]);
     update_hash(&mut hash, (snapshot.scrollback_rows as u64).to_le_bytes());
     for cell in &snapshot.cells {
         update_hash(&mut hash, (cell.character as u32).to_le_bytes());
+        update_hash(&mut hash, [cell.combining_count()]);
+        for combining in cell.combining_scalars() {
+            update_hash(&mut hash, (combining as u32).to_le_bytes());
+        }
         hash_color(&mut hash, cell.foreground);
         hash_color(&mut hash, cell.background);
         update_hash(

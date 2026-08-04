@@ -1,7 +1,8 @@
 // Repository-owned compute shader for the rust-gpu-slug renderer.
 // Descriptor ABI is frozen by gpu_slug.rs and validated by build.rs through Naga.
 
-const CELL_WORDS: u32 = 8u;
+const CELL_WORDS: u32 = 12u;
+const MAX_COMBINING_GLYPHS: u32 = 4u;
 const GLYPH_WORDS: u32 = 16u;
 const BAND_HEADER_WORDS: u32 = 4u;
 const COVERAGE_EPSILON: f32 = 0.0000152587890625;
@@ -326,12 +327,31 @@ fn gpu_slug_main(@builtin(global_invocation_id) invocation: vec3<u32>) {
         let coverage = glyph_coverage(glyph_base, sample, scale);
         output = mix(background, foreground, coverage);
 
+        let combining_count = min(cells.words[cell_base + 7u], MAX_COMBINING_GLYPHS);
+        var combining_index = 0u;
+        while (combining_index < combining_count) {
+            let combining_glyph_index = cells.words[cell_base + 8u + combining_index];
+            let combining_glyph_base = combining_glyph_index * GLYPH_WORDS;
+            let combining_coverage = glyph_coverage(combining_glyph_base, sample, scale);
+            output = mix(output, foreground, combining_coverage);
+            combining_index = combining_index + 1u;
+        }
+
         if ((flags & 1u) != 0u && pixel.y % cell_height == cell_height - 2u) {
             output = foreground;
         }
         if (frame.words[8u] != 0u && cell_position.x == frame.words[6u] &&
-            cell_position.y == frame.words[7u] && pixel.x % cell_width < 2u) {
-            output = vec4<f32>(210.0, 210.0, 210.0, 190.0) / 255.0;
+            cell_position.y == frame.words[7u]) {
+            let cursor_shape = frame.words[11u];
+            let cursor_x = pixel.x % cell_width;
+            let cursor_y = pixel.y % cell_height;
+            let block = cursor_shape <= 1u;
+            let underline = cursor_shape >= 2u && cursor_shape <= 3u &&
+                cursor_y + min(cell_height, 2u) >= cell_height;
+            let bar = cursor_shape >= 4u && cursor_x < min(cell_width, 2u);
+            if (block || underline || bar) {
+                output = vec4<f32>(210.0, 210.0, 210.0, 190.0) / 255.0;
+            }
         }
     }
     textureStore(output_image, vec2<i32>(pixel), output);

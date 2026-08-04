@@ -5,10 +5,22 @@ use std::path::PathBuf;
 
 const SHADER_PATH: &str = "shaders/gpu_slug.wgsl";
 const ENTRY_POINT: &str = "gpu_slug_main";
+const CELL_WORDS: usize = 12;
+const MAX_COMBINING_GLYPHS: usize = 4;
 
 fn main() {
     println!("cargo:rerun-if-changed={SHADER_PATH}");
     let source = fs::read_to_string(SHADER_PATH).expect("read rust-gpu-slug WGSL source");
+    assert!(
+        source.contains(&format!("const CELL_WORDS: u32 = {CELL_WORDS}u;")),
+        "WGSL cell-word ABI changed without updating build.rs"
+    );
+    assert!(
+        source.contains(&format!(
+            "const MAX_COMBINING_GLYPHS: u32 = {MAX_COMBINING_GLYPHS}u;"
+        )),
+        "WGSL combining-glyph ABI changed without updating build.rs"
+    );
     let module = naga::front::wgsl::parse_str(&source)
         .unwrap_or_else(|error| panic!("parse rust-gpu-slug WGSL: {error}"));
     let entry = module
@@ -53,6 +65,16 @@ fn main() {
         "pub(crate) const GPU_SLUG_SHADER_ENTRY: &str = {ENTRY_POINT:?};"
     )
     .expect("write generated shader entry");
+    writeln!(
+        generated,
+        "pub(crate) const GPU_SLUG_SHADER_CELL_WORDS: usize = {CELL_WORDS};"
+    )
+    .expect("write generated cell-word ABI");
+    writeln!(
+        generated,
+        "pub(crate) const GPU_SLUG_SHADER_MAX_COMBINING_GLYPHS: usize = {MAX_COMBINING_GLYPHS};"
+    )
+    .expect("write generated combining-glyph ABI");
     writeln!(
         generated,
         "#[allow(clippy::unreadable_literal)]\npub(crate) const GPU_SLUG_SHADER_SOURCE_FNV1A64: u64 = 0x{source_hash:016x};"
