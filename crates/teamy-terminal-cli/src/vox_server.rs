@@ -112,7 +112,7 @@ use vox_terminal as vox;
 
 const MAX_COLUMNS: u16 = 240;
 const MAX_ROWS: u16 = 120;
-const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
+const MAX_FRAME_BYTES: u32 = 64 * 1024 * 1024;
 const MAX_CONTENT_CHARS: u32 = 256 * 1024;
 const MAX_PIXEL_WIDTH: u16 = 4096;
 const MAX_PIXEL_HEIGHT: u16 = 4096;
