@@ -17,6 +17,7 @@ use spec_proto::terminal::{
     TerminalPresentationCapabilitiesResult, TerminalPresentationMode, TerminalPromptMetadata,
     TerminalPublicationTelemetry, TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent,
     TerminalRasterFrameKind, TerminalRasterRegion, TerminalRasterSnapshotTiming,
+    TerminalRasterizationOwner,
     TerminalRasterSubscribeRequest, TerminalResizeRequest, TerminalResizeResult, TerminalSelection,
     TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming, TerminalState,
     TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
@@ -1240,6 +1241,7 @@ impl VoxTerminalService {
         .into_iter()
         .map(|transport| TerminalPresentationMode {
             renderer_id: RasterRenderer::CpuFontdue.renderer_id().to_string(),
+            rasterization_owner: TerminalRasterizationOwner::Server,
             damage_mode_id: transport.damage_mode_id().to_string(),
             transport_id: transport.transport_id().to_string(),
             transport_version: RASTER_TRANSPORT_VERSION,
@@ -1773,6 +1775,7 @@ impl Terminal for VoxTerminalService {
         let session = Self::lock_session(&session)?;
         Ok(TerminalPresentationCapabilitiesResult {
             session_id: request.session_id,
+            default_renderer_id: CPU_RENDERER_ID.to_string(),
             default_transport_id: TRANSPORT_FULL_PNG.to_string(),
             modes: Self::presentation_modes(),
             server_sequence: session.sequence,
@@ -2351,10 +2354,10 @@ impl Terminal for VoxTerminalService {
         request: TerminalRasterSubscribeRequest,
         frames: vox::Tx<TerminalRasterFrameEvent>,
     ) -> Result<TerminalOperationResult, TerminalError> {
-        if request.transport_generation.trim().is_empty() {
+        if request.presentation_generation.trim().is_empty() {
             return Err(Self::error(
                 TerminalErrorCode::InvalidRequest,
-                "raster subscription transport_generation must not be blank",
+                "raster subscription presentation_generation must not be blank",
                 0,
             ));
         }
@@ -2507,7 +2510,7 @@ impl Terminal for VoxTerminalService {
                 session_id: request.session_id.clone(),
                 connection_epoch: runtime.connection_epoch.to_string(),
                 session_epoch: runtime.session_epoch.to_string(),
-                transport_generation: request.transport_generation.clone(),
+                presentation_generation: request.presentation_generation.clone(),
                 terminal_sequence: capture.terminal_sequence,
                 frame_sequence: i64::try_from(descriptor.sequence).unwrap_or(i64::MAX),
                 base_frame_sequence: i64::try_from(descriptor.base_sequence).unwrap_or(i64::MAX),
@@ -2786,7 +2789,7 @@ mod tests {
             requested_damage_mode_id: transport.damage_mode_id().to_string(),
             requested_transport_id: transport.transport_id().to_string(),
             requested_transport_version: RASTER_TRANSPORT_VERSION,
-            transport_generation: "generation-01".to_string(),
+            presentation_generation: "generation-01".to_string(),
             after_terminal_sequence: 0,
             after_frame_sequence: 0,
             max_frame_bytes: MAX_FRAME_BYTES,
@@ -3042,7 +3045,7 @@ mod tests {
 
         let mut request = test_raster_request(RasterTransport::FullPng);
         request.session_id = connected.session_id.clone();
-        request.transport_generation = "generation-switch-17".to_string();
+        request.presentation_generation = "generation-switch-17".to_string();
         request.client_sequence = 3;
         request.correlation_id = "v3-initial-01".to_string();
         let (frame_tx, mut frame_rx) = vox::channel::<TerminalRasterFrameEvent>();
@@ -3059,7 +3062,7 @@ mod tests {
             .expect("initial V3 frame receive should succeed")
             .expect("initial V3 frame should be present");
         let initial = own_raster_frame(initial);
-        assert_eq!(initial.transport_generation, "generation-switch-17");
+        assert_eq!(initial.presentation_generation, "generation-switch-17");
         assert_eq!(initial.renderer_id, CPU_RENDERER_ID);
         assert_eq!(initial.damage_mode_id, DAMAGE_FULL);
         assert_eq!(initial.transport_id, TRANSPORT_FULL_PNG);
@@ -3127,7 +3130,7 @@ mod tests {
             .expect("terminal raster lane should open");
         let mut request = test_raster_request(RasterTransport::FullRawRgba);
         request.session_id = connected.session_id.clone();
-        request.transport_generation = "generation-control-witness".to_string();
+        request.presentation_generation = "generation-control-witness".to_string();
         request.client_sequence = 2;
         request.correlation_id = "v3-control-during-raster-01".to_string();
         let (frame_tx, mut frame_rx) = vox::channel::<TerminalRasterFrameEvent>();

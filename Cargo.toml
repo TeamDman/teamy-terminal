@@ -58,16 +58,15 @@ tracing-tracy = { version = "0.11", default-features = false, features = [
 tokio = { version = "1.49.0", features = ["full"] }
 teamy-cancellation = { git = "https://github.com/TeamDman/teamy-cancellation.git", rev = "7c77848", features = ["arbitrary"] }
 
-# Keep every Facet/Figue package on the same TeamDman/facet revision. The
-# revision is the tested mine/main synchronization commit and is also the
-# source of the dependency-family evidence recorded in the implementation plan.
-facet = { path = "../facet/facet", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
-facet-csv = { path = "../facet/facet-csv", package = "facet-csv" }
-facet-json = { path = "../facet/facet-json", package = "facet-json" }
-facet-pretty = { path = "../facet/facet-pretty", package = "facet-pretty" }
-figue = { path = "../facet/figue", package = "figue", features = ["arbitrary"] }
-spec-proto = { path = "../facet/vox/spec/spec-proto", package = "spec-proto" }
-vox-terminal = { path = "../facet/vox/rust/vox", package = "vox", default-features = false, features = ["runtime", "transport-tcp"] }
+# Keep every Facet/Figue/Vox package on the same reviewed and published
+# TeamDman/facet presentation-contract revision.
+facet = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
+facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "facet-csv" }
+facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "facet-json" }
+facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "facet-pretty" }
+figue = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "figue", features = ["arbitrary"] }
+spec-proto = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "spec-proto" }
+vox-terminal = { git = "https://github.com/TeamDman/facet.git", rev = "9225acdf574807814d35e79209f41f0b03bd448c", package = "vox", default-features = false, features = ["runtime", "transport-tcp"] }
 
 embed-resource = "3.0.6"
 portable-pty = "0.9"
@@ -90,9 +89,6 @@ windows = { version = "0.62.2", features = [
     "Win32_System_Diagnostics_ToolHelp",
     "Win32_System_Threading",
 ] }
-
-# These local paths are temporary until the Facet content-witness commit is
-# published and can replace the paths with an immutable git revision.
 
 [workspace.lints.rust]
 ambiguous_negative_literals = "warn"
