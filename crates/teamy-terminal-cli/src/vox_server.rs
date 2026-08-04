@@ -18,10 +18,11 @@ use spec_proto::terminal::{
     TerminalPresentationCapabilitiesResult, TerminalPresentationMode,
     TerminalPresentationUnavailable, TerminalPromptMetadata, TerminalPublicationTelemetry,
     TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent, TerminalRasterFrameKind,
-    TerminalRasterRegion, TerminalRasterSnapshotTiming, TerminalRasterSubscribeRequest,
-    TerminalRasterizationOwner, TerminalResizeRequest, TerminalResizeResult, TerminalSelection,
-    TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming, TerminalState,
-    TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
+    TerminalRasterRegion, TerminalRasterRendererTelemetry, TerminalRasterSnapshotTiming,
+    TerminalRasterSubscribeRequest, TerminalRasterizationOwner, TerminalResizeRequest,
+    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
+    TerminalSnapshotTiming, TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics,
+    TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -41,9 +42,9 @@ use teamy_terminal_frame::{
 };
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
 use teamy_terminal_renderer::{
-    GpuSlugCacheStats, GpuSlugRenderIdentity, GpuSlugRenderRequest, GpuSlugRenderStats,
-    GpuSlugRenderer, GpuSlugRendererError, GpuSlugRuntime, VulkanOffscreenCancellation,
-    VulkanOffscreenContext, VulkanOffscreenError,
+    GPU_SLUG_SHADER_SOURCE_IDENTITY, GpuSlugCacheStats, GpuSlugRenderIdentity,
+    GpuSlugRenderRequest, GpuSlugRenderStats, GpuSlugRenderer, GpuSlugRendererError,
+    GpuSlugRuntime, VulkanOffscreenCancellation, VulkanOffscreenContext, VulkanOffscreenError,
 };
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use vox_terminal as vox;
@@ -1213,6 +1214,7 @@ impl TerminalRenderResources {
             raster_micros,
             png_encode_micros,
             payload_pack_micros,
+            resource_stats: self.snapshot_stats(),
             gpu_evidence: None,
         }))
     }
@@ -1282,11 +1284,33 @@ impl TerminalRenderResources {
             timeout: Duration::from_secs(5),
             cancellation: gpu_cancellation,
         };
-        let rendered = self.ensure_gpu_renderer()?.render(request)?;
+        let renderer = self.ensure_gpu_renderer()?;
+        let device = renderer.device_facts();
+        let device_identity = format!(
+            "{};vendor={:#06x};device={:#06x};driver={};api={};queue={}",
+            device.device_name,
+            device.vendor_id,
+            device.device_id,
+            device.driver_version,
+            device.api_version,
+            device.queue_family_index
+        );
+        let rendered = renderer.render(request)?;
         self.gpu_surface = Some((width, height));
-        let gpu_evidence = GpuRasterEvidence {
+        let readback_bytes = rendered.full_rgba.as_ref().map_or_else(
+            || {
+                rendered.dirty_regions.iter().fold(0_u64, |total, region| {
+                    total.saturating_add(u64::try_from(region.rgba.len()).unwrap_or(u64::MAX))
+                })
+            },
+            |rgba| u64::try_from(rgba.len()).unwrap_or(u64::MAX),
+        );
+        let mut gpu_evidence = GpuRasterEvidence {
             identity: rendered.identity.clone(),
             visual_hash: rendered.visual_hash,
+            device_identity,
+            shader_identity: format!("fnv1a64:{GPU_SLUG_SHADER_SOURCE_IDENTITY:016x}"),
+            readback_bytes,
             stats: rendered.stats,
             cache: rendered.cache,
         };
@@ -1354,8 +1378,10 @@ impl TerminalRenderResources {
         };
         let packet_micros = encode_started.elapsed().as_micros() as u64;
         let (png_encode_micros, payload_pack_micros) = if transport == RasterTransport::FullPng {
+            gpu_evidence.stats.png_packet_pack_us = Some(packet_micros);
             (packet_micros, render_stats.payload_pack_us)
         } else {
+            gpu_evidence.stats.raw_packet_pack_us = Some(packet_micros);
             (
                 0,
                 render_stats.payload_pack_us.saturating_add(packet_micros),
@@ -1375,6 +1401,7 @@ impl TerminalRenderResources {
             raster_micros: render_stats.total_us,
             png_encode_micros,
             payload_pack_micros,
+            resource_stats: self.snapshot_stats(),
             gpu_evidence: Some(gpu_evidence),
         }))
     }
@@ -1538,6 +1565,7 @@ struct RenderedRasterUpdate {
     raster_micros: u64,
     png_encode_micros: u64,
     payload_pack_micros: u64,
+    resource_stats: TerminalRenderResourceStats,
     gpu_evidence: Option<GpuRasterEvidence>,
 }
 
@@ -1545,8 +1573,19 @@ struct RenderedRasterUpdate {
 struct GpuRasterEvidence {
     identity: GpuSlugRenderIdentity,
     visual_hash: Option<u64>,
+    device_identity: String,
+    shader_identity: String,
+    readback_bytes: u64,
     stats: GpuSlugRenderStats,
     cache: GpuSlugCacheStats,
+}
+
+fn telemetry_i64(value: u64) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
+}
+
+fn telemetry_usize(value: usize) -> i64 {
+    i64::try_from(value).unwrap_or(i64::MAX)
 }
 
 struct CapturedTerminal {
@@ -1895,8 +1934,7 @@ impl VoxTerminalService {
             }
             return Ok(());
         };
-        let expected_terminal_sequence =
-            u64::try_from(terminal_sequence).unwrap_or(u64::MAX);
+        let expected_terminal_sequence = u64::try_from(terminal_sequence).unwrap_or(u64::MAX);
         let expected_frame_sequence = u64::try_from(frame_sequence).unwrap_or(u64::MAX);
         if evidence.identity.session_sequence != runtime.session_sequence
             || evidence.identity.terminal_sequence != expected_terminal_sequence
@@ -2229,11 +2267,105 @@ impl VoxTerminalService {
         })
     }
 
+    fn raster_renderer_telemetry(
+        rendered: &RenderedRasterUpdate,
+    ) -> TerminalRasterRendererTelemetry {
+        let resources = rendered.resource_stats;
+        let cpu_renderer = rendered.gpu_evidence.is_none();
+        let mut telemetry = TerminalRasterRendererTelemetry {
+            raw_packet_pack_present: cpu_renderer
+                && rendered.update.descriptor.compression == FrameCompression::Raw,
+            png_packet_pack_present: cpu_renderer
+                && rendered.update.descriptor.compression == FrameCompression::Png,
+            raw_packet_pack_us: if cpu_renderer
+                && rendered.update.descriptor.compression == FrameCompression::Raw
+            {
+                telemetry_i64(rendered.payload_pack_micros)
+            } else {
+                0
+            },
+            png_packet_pack_us: if cpu_renderer
+                && rendered.update.descriptor.compression == FrameCompression::Png
+            {
+                telemetry_i64(rendered.png_encode_micros)
+            } else {
+                0
+            },
+            font_catalog_acquisitions: telemetry_i64(resources.font_catalog_acquisitions),
+            process_font_catalog_loads: telemetry_i64(resources.process_font_catalog_loads),
+            font_renderer_cache_hits: telemetry_i64(resources.font_renderer_cache_hits),
+            font_renderer_cache_misses: telemetry_i64(resources.font_renderer_cache_misses),
+            font_renderer_constructions: telemetry_i64(resources.font_renderer_constructions),
+            font_renderer_evictions: telemetry_i64(resources.font_renderer_evictions),
+            font_renderer_cache_len: telemetry_i64(resources.font_renderer_cache_len),
+            font_renderer_cache_capacity: telemetry_i64(resources.font_renderer_cache_capacity),
+            glyph_cache_hits: telemetry_i64(resources.glyph_cache_hits),
+            glyph_cache_misses: telemetry_i64(resources.glyph_cache_misses),
+            glyph_cache_evictions: telemetry_i64(resources.glyph_cache_evictions),
+            cached_glyphs: telemetry_i64(resources.cached_glyphs),
+            glyph_cache_capacity: telemetry_i64(resources.glyph_cache_capacity),
+            frame_buffer_grows: telemetry_i64(resources.frame_buffer_grows),
+            frame_buffer_reuses: telemetry_i64(resources.frame_buffer_reuses),
+            frame_buffer_capacity_bytes: telemetry_i64(resources.frame_buffer_capacity_bytes),
+            png_buffer_grows: telemetry_i64(resources.png_buffer_grows),
+            png_buffer_reuses: telemetry_i64(resources.png_buffer_reuses),
+            png_buffer_capacity_bytes: telemetry_i64(resources.png_buffer_capacity_bytes),
+            transport_payload_copies: telemetry_i64(resources.transport_payload_copies),
+            ..TerminalRasterRendererTelemetry::default()
+        };
+
+        if let Some(gpu) = &rendered.gpu_evidence {
+            let stats = gpu.stats;
+            let cache = gpu.cache;
+            telemetry.device_identity.clone_from(&gpu.device_identity);
+            telemetry.shader_identity.clone_from(&gpu.shader_identity);
+            telemetry.gpu_stages_present = true;
+            telemetry.full_rgba_pack_present = stats.full_rgba_pack_us.is_some();
+            telemetry.dirty_region_pack_present = stats.dirty_region_pack_us.is_some();
+            telemetry.raw_packet_pack_present = stats.raw_packet_pack_us.is_some();
+            telemetry.png_packet_pack_present = stats.png_packet_pack_us.is_some();
+            telemetry.geometry_build_us = telemetry_i64(stats.geometry_build_us);
+            telemetry.outline_extraction_us = telemetry_i64(stats.outline_extraction_us);
+            telemetry.directional_band_build_us = telemetry_i64(stats.directional_band_build_us);
+            telemetry.upload_bytes = telemetry_i64(stats.upload_bytes);
+            telemetry.upload_us = telemetry_i64(stats.upload_us);
+            telemetry.command_record_us = telemetry_i64(stats.command_record_us);
+            telemetry.queue_submit_us = telemetry_i64(stats.queue_submit_us);
+            telemetry.gpu_completion_wait_us = telemetry_i64(stats.gpu_completion_wait_us);
+            telemetry.readback_map_copy_us = telemetry_i64(stats.readback_map_copy_us);
+            telemetry.full_rgba_pack_us =
+                telemetry_i64(stats.full_rgba_pack_us.unwrap_or_default());
+            telemetry.dirty_region_pack_us =
+                telemetry_i64(stats.dirty_region_pack_us.unwrap_or_default());
+            telemetry.raw_packet_pack_us =
+                telemetry_i64(stats.raw_packet_pack_us.unwrap_or_default());
+            telemetry.png_packet_pack_us =
+                telemetry_i64(stats.png_packet_pack_us.unwrap_or_default());
+            telemetry.requested_pixels = telemetry_i64(stats.requested_pixels);
+            telemetry.readback_bytes = telemetry_i64(gpu.readback_bytes);
+            telemetry.target_allocation_id = telemetry_i64(stats.target_allocation_id);
+            telemetry.geometry_hits = telemetry_i64(cache.geometry_hits);
+            telemetry.geometry_misses = telemetry_i64(cache.geometry_misses);
+            telemetry.geometry_evictions = telemetry_i64(cache.geometry_evictions);
+            telemetry.retained_glyphs = telemetry_usize(cache.retained_glyphs);
+            telemetry.glyph_capacity = telemetry_usize(cache.glyph_capacity);
+            telemetry.buffer_allocations = telemetry_i64(cache.buffer_allocations);
+            telemetry.target_capacity = telemetry_usize(cache.targets.capacity);
+            telemetry.retained_targets = telemetry_usize(cache.targets.retained_targets);
+            telemetry.target_allocations = telemetry_i64(cache.targets.allocations);
+            telemetry.target_reuses = telemetry_i64(cache.targets.reuses);
+            telemetry.target_evictions = telemetry_i64(cache.targets.evictions);
+            telemetry.target_destructions = telemetry_i64(cache.targets.destructions);
+        }
+        telemetry
+    }
+
     fn raster_frame(
         capture: &CapturedTerminal,
         rendered: RenderedRasterUpdate,
         total_us: i64,
     ) -> Result<TerminalRasterFrame, TerminalError> {
+        let renderer = Self::raster_renderer_telemetry(&rendered);
         let descriptor = rendered.update.descriptor;
         let encoding = match descriptor.compression {
             FrameCompression::Raw => TerminalFrameEncoding::Rgba8,
@@ -2351,6 +2483,7 @@ impl VoxTerminalService {
                 payload_pack_us: i64::try_from(rendered.payload_pack_micros).unwrap_or(i64::MAX),
                 total_us,
             },
+            renderer,
         })
     }
 }
@@ -3774,9 +3907,18 @@ mod tests {
             assert_eq!(evidence.identity, test_gpu_identity(frame_sequence));
             assert!(evidence.stats.requested_pixels > 0);
             assert!(evidence.stats.target_allocation_id > 0);
+            let telemetry = VoxTerminalService::raster_renderer_telemetry(&rendered);
+            assert!(telemetry.gpu_stages_present);
+            assert!(!telemetry.device_identity.is_empty());
+            assert!(telemetry.shader_identity.starts_with("fnv1a64:"));
+            assert!(telemetry.requested_pixels > 0);
+            assert!(telemetry.readback_bytes > 0);
+            assert!(telemetry.target_allocation_id > 0);
             assert_eq!(rendered.update.descriptor.kind, RasterUpdateKind::Full);
             match transport {
                 RasterTransport::FullPng => {
+                    assert!(telemetry.png_packet_pack_present);
+                    assert!(!telemetry.raw_packet_pack_present);
                     assert_eq!(
                         rendered.update.descriptor.compression,
                         FrameCompression::Png
@@ -3784,6 +3926,8 @@ mod tests {
                     assert!(rendered.update.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
                 }
                 RasterTransport::FullRawRgba | RasterTransport::DirtyRawRgba => {
+                    assert!(telemetry.raw_packet_pack_present);
+                    assert!(!telemetry.png_packet_pack_present);
                     assert_eq!(
                         rendered.update.descriptor.compression,
                         FrameCompression::Raw
@@ -3896,6 +4040,12 @@ mod tests {
             .expect("initial render is a complete resync");
         assert_eq!(full.update.descriptor.kind, RasterUpdateKind::Full);
         assert!(full.full_recovery);
+        let full_telemetry = VoxTerminalService::raster_renderer_telemetry(&full);
+        assert!(!full_telemetry.gpu_stages_present);
+        assert!(full_telemetry.raw_packet_pack_present);
+        assert!(!full_telemetry.png_packet_pack_present);
+        assert!(full_telemetry.font_renderer_constructions > 0);
+        assert!(full_telemetry.glyph_cache_misses > 0);
         let mut composed =
             ComposedRasterFrame::from_full(&full.update).expect("compose full frame");
 
@@ -3918,6 +4068,11 @@ mod tests {
         assert_eq!(dirty.update.descriptor.kind, RasterUpdateKind::DirtyRegions);
         assert!(!dirty.full_recovery);
         assert_eq!(dirty.update.descriptor.base_sequence, 1);
+        let dirty_telemetry = VoxTerminalService::raster_renderer_telemetry(&dirty);
+        assert!(!dirty_telemetry.gpu_stages_present);
+        assert!(dirty_telemetry.raw_packet_pack_present);
+        assert!(dirty_telemetry.font_renderer_cache_hits > full_telemetry.font_renderer_cache_hits);
+        assert!(dirty_telemetry.glyph_cache_hits >= full_telemetry.glyph_cache_hits);
         composed.apply(&dirty.update).expect("compose dirty update");
         assert_eq!(composed.pixels, resources.frame.pixels);
     }
@@ -5216,12 +5371,7 @@ mod tests {
             b"\x1b[39;77;0;1;264;1_"
         );
         assert_eq!(
-            key_input_bytes(
-                GLFW_KEY_LEFT,
-                GLFW_MOD_CONTROL | GLFW_MOD_SHIFT,
-                true,
-                true,
-            ),
+            key_input_bytes(GLFW_KEY_LEFT, GLFW_MOD_CONTROL | GLFW_MOD_SHIFT, true, true,),
             b"\x1b[37;75;0;1;280;1_"
         );
         assert_eq!(
@@ -5249,10 +5399,7 @@ mod tests {
 
     #[test]
     fn unmodified_character_key_codes_are_supported_for_protocol_tests() {
-        assert_eq!(
-            key_input_bytes(65, 0, true, true),
-            b"\x1b[65;30;97;1;0;1_"
-        );
+        assert_eq!(key_input_bytes(65, 0, true, true), b"\x1b[65;30;97;1;0;1_");
         assert_eq!(
             key_input_bytes(65, GLFW_MOD_SHIFT, true, true),
             b"\x1b[65;30;65;1;16;1_"
