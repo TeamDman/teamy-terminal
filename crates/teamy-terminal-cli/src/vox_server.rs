@@ -52,7 +52,8 @@ const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
 const SESSION_ACTOR_CAPACITY: usize = 64;
 const RASTER_TRANSPORT_VERSION: u16 = 1;
-const RENDERER_ID: &str = "rust-cpu-fontdue";
+const CPU_RENDERER_ID: &str = "rust-cpu-fontdue";
+const GPU_RENDERER_ID: &str = "rust-gpu-slug";
 const DAMAGE_FULL: &str = "full";
 const DAMAGE_DIRTY: &str = "dirty";
 const TRANSPORT_FULL_PNG: &str = "full-png";
@@ -896,6 +897,35 @@ struct EncodedPng {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum RasterRenderer {
+    CpuFontdue,
+}
+
+impl RasterRenderer {
+    const fn renderer_id(self) -> &'static str {
+        match self {
+            Self::CpuFontdue => CPU_RENDERER_ID,
+        }
+    }
+
+    fn from_request(requested_renderer_id: &str) -> Result<Self, TerminalError> {
+        match requested_renderer_id {
+            CPU_RENDERER_ID => Ok(Self::CpuFontdue),
+            GPU_RENDERER_ID => Err(VoxTerminalService::error(
+                TerminalErrorCode::UnsupportedCapability,
+                "terminal renderer rust-gpu-slug is not available until its Vulkan context initializes",
+                0,
+            )),
+            unsupported => Err(VoxTerminalService::error(
+                TerminalErrorCode::UnsupportedCapability,
+                format!("unsupported terminal renderer: {unsupported}"),
+                0,
+            )),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RasterTransport {
     FullPng,
     FullRawRgba,
@@ -933,16 +963,6 @@ impl RasterTransport {
     }
 
     fn from_request(request: &TerminalRasterSubscribeRequest) -> Result<Self, TerminalError> {
-        if request.requested_renderer_id != RENDERER_ID {
-            return Err(VoxTerminalService::error(
-                TerminalErrorCode::UnsupportedCapability,
-                format!(
-                    "unsupported terminal renderer: {}",
-                    request.requested_renderer_id
-                ),
-                0,
-            ));
-        }
         if request.requested_transport_version != RASTER_TRANSPORT_VERSION {
             return Err(VoxTerminalService::error(
                 TerminalErrorCode::UnsupportedCapability,
@@ -978,6 +998,21 @@ impl RasterTransport {
             ));
         }
         Ok(transport)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct RasterPresentation {
+    renderer: RasterRenderer,
+    transport: RasterTransport,
+}
+
+impl RasterPresentation {
+    fn from_request(request: &TerminalRasterSubscribeRequest) -> Result<Self, TerminalError> {
+        Ok(Self {
+            renderer: RasterRenderer::from_request(&request.requested_renderer_id)?,
+            transport: RasterTransport::from_request(request)?,
+        })
     }
 }
 
@@ -1191,7 +1226,7 @@ impl VoxTerminalService {
             max_width: MAX_COLUMNS,
             max_height: MAX_ROWS,
             max_frame_bytes: MAX_FRAME_BYTES,
-            backend_id: RENDERER_ID.to_string(),
+            backend_id: CPU_RENDERER_ID.to_string(),
             transport_id: TRANSPORT_FULL_PNG.to_string(),
         }
     }
@@ -1204,7 +1239,7 @@ impl VoxTerminalService {
         ]
         .into_iter()
         .map(|transport| TerminalPresentationMode {
-            renderer_id: RENDERER_ID.to_string(),
+            renderer_id: RasterRenderer::CpuFontdue.renderer_id().to_string(),
             damage_mode_id: transport.damage_mode_id().to_string(),
             transport_id: transport.transport_id().to_string(),
             transport_version: RASTER_TRANSPORT_VERSION,
@@ -2337,7 +2372,8 @@ impl Terminal for VoxTerminalService {
                 0,
             ));
         }
-        let transport = RasterTransport::from_request(&request)?;
+        let presentation = RasterPresentation::from_request(&request)?;
+        let transport = presentation.transport;
         let runtime = self.session(&request.session_id)?;
         if runtime.closed.load(Ordering::Acquire) {
             return Err(Self::error(
@@ -2476,7 +2512,7 @@ impl Terminal for VoxTerminalService {
                 frame_sequence: i64::try_from(descriptor.sequence).unwrap_or(i64::MAX),
                 base_frame_sequence: i64::try_from(descriptor.base_sequence).unwrap_or(i64::MAX),
                 full_resync,
-                renderer_id: RENDERER_ID.to_string(),
+                renderer_id: presentation.renderer.renderer_id().to_string(),
                 damage_mode_id: transport.damage_mode_id().to_string(),
                 transport_id: transport.transport_id().to_string(),
                 transport_version: RASTER_TRANSPORT_VERSION,
@@ -2746,7 +2782,7 @@ mod tests {
     fn test_raster_request(transport: RasterTransport) -> TerminalRasterSubscribeRequest {
         TerminalRasterSubscribeRequest {
             session_id: "session-01".to_string(),
-            requested_renderer_id: RENDERER_ID.to_string(),
+            requested_renderer_id: CPU_RENDERER_ID.to_string(),
             requested_damage_mode_id: transport.damage_mode_id().to_string(),
             requested_transport_id: transport.transport_id().to_string(),
             requested_transport_version: RASTER_TRANSPORT_VERSION,
@@ -2794,18 +2830,27 @@ mod tests {
             RasterTransport::DirtyRawRgba,
         ] {
             assert_eq!(
-                RasterTransport::from_request(&test_raster_request(transport)),
-                Ok(transport)
+                RasterPresentation::from_request(&test_raster_request(transport)),
+                Ok(RasterPresentation {
+                    renderer: RasterRenderer::CpuFontdue,
+                    transport,
+                })
             );
         }
         let mut unsupported = test_raster_request(RasterTransport::FullPng);
         unsupported.requested_damage_mode_id = DAMAGE_DIRTY.to_string();
         assert_eq!(
-            RasterTransport::from_request(&unsupported)
+            RasterPresentation::from_request(&unsupported)
                 .expect_err("a mismatched damage mode must not silently fall back")
                 .code,
             TerminalErrorCode::UnsupportedCapability
         );
+        unsupported = test_raster_request(RasterTransport::FullPng);
+        unsupported.requested_renderer_id = GPU_RENDERER_ID.to_string();
+        let error = RasterPresentation::from_request(&unsupported)
+            .expect_err("an uninitialized GPU renderer must not silently fall back to CPU");
+        assert_eq!(error.code, TerminalErrorCode::UnsupportedCapability);
+        assert!(error.message.contains(GPU_RENDERER_ID));
     }
 
     #[test]
@@ -3015,7 +3060,7 @@ mod tests {
             .expect("initial V3 frame should be present");
         let initial = own_raster_frame(initial);
         assert_eq!(initial.transport_generation, "generation-switch-17");
-        assert_eq!(initial.renderer_id, RENDERER_ID);
+        assert_eq!(initial.renderer_id, CPU_RENDERER_ID);
         assert_eq!(initial.damage_mode_id, DAMAGE_FULL);
         assert_eq!(initial.transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(initial.frame.kind, TerminalRasterFrameKind::Full);
