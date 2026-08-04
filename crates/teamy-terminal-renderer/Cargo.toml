@@ -19,5 +19,8 @@ teamy-terminal-font.workspace = true
 teamy-terminal-frame.workspace = true
 winit.workspace = true
 
+[target.'cfg(windows)'.dev-dependencies]
+windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
+
 [lints]
 workspace = true

@@ -20,6 +20,20 @@ use teamy_terminal_frame::FrameKind;
 use teamy_terminal_frame::FramePacket;
 use winit::window::Window;
 
+mod vulkan_offscreen;
+
+pub use vulkan_offscreen::VulkanDeviceFacts;
+pub use vulkan_offscreen::VulkanOffscreenAvailability;
+pub use vulkan_offscreen::VulkanOffscreenCacheStats;
+pub use vulkan_offscreen::VulkanOffscreenCancellation;
+pub use vulkan_offscreen::VulkanOffscreenContext;
+pub use vulkan_offscreen::VulkanOffscreenError;
+pub use vulkan_offscreen::VulkanOffscreenReadback;
+pub use vulkan_offscreen::VulkanOffscreenSession;
+pub use vulkan_offscreen::VulkanOffscreenTarget;
+pub use vulkan_offscreen::VulkanOffscreenUnavailable;
+pub use vulkan_offscreen::VulkanOffscreenUnavailableKind;
+
 struct SwapchainState {
     handle: vk::SwapchainKHR,
     extent: vk::Extent2D,

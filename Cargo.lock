@@ -3110,6 +3110,7 @@ dependencies = [
  "raw-window-handle",
  "teamy-terminal-font",
  "teamy-terminal-frame",
+ "windows",
  "winit",
 ]
 
