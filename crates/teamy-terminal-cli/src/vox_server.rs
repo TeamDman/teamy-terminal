@@ -1,8 +1,9 @@
 //! Rust-authoritative Vox terminal endpoint.
 //!
-//! The endpoint owns the PowerShell PTY, VT parsing, and CPU PNG rasterization.
-//! Java receives only bounded full-frame PNG snapshots and sends input text
-//! back through the generated Vox contract.
+//! The endpoint owns the PowerShell PTY, VT parsing, and negotiated Rust-side
+//! rasterization. CPU Fontdue/full-PNG remains the compatibility default, while
+//! CPU Fontdue and no-window GPU Slug can each publish full PNG, full raw RGBA,
+//! or packed dirty raw RGBA through the generated Vox contract.
 
 use eyre::{Context, Result};
 use facet::Facet;
@@ -14,13 +15,13 @@ use spec_proto::terminal::{
     TerminalErrorCode, TerminalFrameEncoding, TerminalFrameEvent, TerminalFrameKind,
     TerminalFrameOrigin, TerminalInputResult, TerminalKeyInput, TerminalMouseInput,
     TerminalOperationResult, TerminalPresentationCapabilitiesRequest,
-    TerminalPresentationCapabilitiesResult, TerminalPresentationMode, TerminalPromptMetadata,
-    TerminalPublicationTelemetry, TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent,
-    TerminalRasterFrameKind, TerminalRasterRegion, TerminalRasterSnapshotTiming,
-    TerminalRasterSubscribeRequest, TerminalRasterizationOwner, TerminalResizeRequest,
-    TerminalResizeResult, TerminalSelection, TerminalSnapshot, TerminalSnapshotRequest,
-    TerminalSnapshotTiming, TerminalState, TerminalSubscribeRequest, TerminalSurfaceMetrics,
-    TerminalTextInput,
+    TerminalPresentationCapabilitiesResult, TerminalPresentationMode,
+    TerminalPresentationUnavailable, TerminalPromptMetadata, TerminalPublicationTelemetry,
+    TerminalRange, TerminalRasterFrame, TerminalRasterFrameEvent, TerminalRasterFrameKind,
+    TerminalRasterRegion, TerminalRasterSnapshotTiming, TerminalRasterSubscribeRequest,
+    TerminalRasterizationOwner, TerminalResizeRequest, TerminalResizeResult, TerminalSelection,
+    TerminalSnapshot, TerminalSnapshotRequest, TerminalSnapshotTiming, TerminalState,
+    TerminalSubscribeRequest, TerminalSurfaceMetrics, TerminalTextInput,
 };
 use std::collections::BTreeMap;
 use std::io::Cursor;
@@ -35,10 +36,14 @@ use teamy_terminal_font::{
     TerminalFontCatalog, damage_regions,
 };
 use teamy_terminal_frame::{
-    FrameCompression, MAX_DIRTY_REGIONS, RASTER_FRAME_CONTRACT_VERSION, RasterFrameUpdate,
-    RasterRect, RasterUpdateKind,
+    FrameCompression, MAX_DIRTY_REGIONS, PackedRasterRegion, RASTER_FRAME_CONTRACT_VERSION,
+    RasterFrameUpdate, RasterRect, RasterUpdateKind,
 };
 use teamy_terminal_pty::{PtyConfig, PtyEvent, PtySession, PtySessionControl};
+use teamy_terminal_renderer::{
+    GpuSlugRenderIdentity, GpuSlugRenderRequest, GpuSlugRenderer, GpuSlugRendererError,
+    GpuSlugRuntime, VulkanOffscreenContext, VulkanOffscreenError,
+};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, watch};
 use vox_terminal as vox;
 
@@ -64,6 +69,7 @@ const TRANSPORT_DIRTY_RAW_RGBA: &str = "dirty-raw-rgba";
 pub const DEFAULT_LISTEN_ADDRESS: &str = "127.0.0.1:63946";
 
 static PROCESS_EPOCH: OnceLock<String> = OnceLock::new();
+static PROCESS_GPU_REGISTRY: OnceLock<Arc<GpuRendererRegistry>> = OnceLock::new();
 static NEXT_CONNECTION_EPOCH: AtomicU64 = AtomicU64::new(1);
 static NEXT_SESSION_EPOCH: AtomicU64 = AtomicU64::new(1);
 
@@ -305,7 +311,120 @@ pub struct VoxTerminalService {
     sessions: Arc<Mutex<BTreeMap<String, Arc<TerminalSessionRuntime>>>>,
     process_epoch: Arc<str>,
     connection_epoch: Arc<str>,
+    gpu_registry: Arc<GpuRendererRegistry>,
     latest_snapshot_timing: Arc<Mutex<Option<TerminalSnapshotTimingWitness>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedGpuError {
+    code: TerminalErrorCode,
+    message: String,
+    retryable: bool,
+}
+
+enum GpuRendererState {
+    Available(GpuSlugRuntime),
+    Unavailable(CachedGpuError),
+}
+
+struct GpuRendererRegistry {
+    state: Mutex<GpuRendererState>,
+}
+
+impl GpuRendererRegistry {
+    fn initialize() -> Self {
+        let state = match VulkanOffscreenContext::new() {
+            Ok(context) => match GpuSlugRuntime::new(context) {
+                Ok(runtime) => {
+                    tracing::info!(
+                        renderer_id = GPU_RENDERER_ID,
+                        device = ?runtime.device_facts(),
+                        "cached no-window GPU terminal renderer is available"
+                    );
+                    GpuRendererState::Available(runtime)
+                }
+                Err(error) => GpuRendererState::Unavailable(CachedGpuError {
+                    code: TerminalErrorCode::UnsupportedCapability,
+                    message: format!("{GPU_RENDERER_ID} unavailable: {error}"),
+                    retryable: false,
+                }),
+            },
+            Err(error) => GpuRendererState::Unavailable(CachedGpuError {
+                code: TerminalErrorCode::UnsupportedCapability,
+                message: format!("{GPU_RENDERER_ID} unavailable: {error}"),
+                retryable: false,
+            }),
+        };
+        if let GpuRendererState::Unavailable(error) = &state {
+            tracing::warn!(
+                renderer_id = GPU_RENDERER_ID,
+                reason = error.message,
+                "cached no-window GPU terminal renderer is unavailable"
+            );
+        }
+        Self {
+            state: Mutex::new(state),
+        }
+    }
+
+    fn runtime(&self, server_sequence: i64) -> Result<GpuSlugRuntime, TerminalError> {
+        let state = self.state.lock().map_err(|_| {
+            VoxTerminalService::error(
+                TerminalErrorCode::Internal,
+                "GPU terminal renderer registry lock poisoned",
+                server_sequence,
+            )
+        })?;
+        match &*state {
+            GpuRendererState::Available(runtime) => Ok(runtime.clone()),
+            GpuRendererState::Unavailable(error) => Err(TerminalError {
+                code: error.code,
+                message: error.message.clone(),
+                retryable: error.retryable,
+                server_sequence,
+            }),
+        }
+    }
+
+    fn is_available(&self) -> bool {
+        self.state
+            .lock()
+            .is_ok_and(|state| matches!(*state, GpuRendererState::Available(_)))
+    }
+
+    fn unavailable_error(&self, server_sequence: i64) -> Option<TerminalError> {
+        let state = self.state.lock().ok()?;
+        match &*state {
+            GpuRendererState::Available(_) => None,
+            GpuRendererState::Unavailable(error) => Some(TerminalError {
+                code: error.code,
+                message: error.message.clone(),
+                retryable: error.retryable,
+                server_sequence,
+            }),
+        }
+    }
+
+    fn retire_on_device_loss(&self, error: &eyre::Report) {
+        let Some(GpuSlugRendererError::Vulkan(VulkanOffscreenError::DeviceLost { operation })) =
+            error.downcast_ref::<GpuSlugRendererError>()
+        else {
+            return;
+        };
+        if let Ok(mut state) = self.state.lock() {
+            *state = GpuRendererState::Unavailable(CachedGpuError {
+                code: TerminalErrorCode::UnsupportedCapability,
+                message: format!(
+                    "{GPU_RENDERER_ID} unavailable after Vulkan device loss during {operation}; restart the server after repairing the GPU/driver"
+                ),
+                retryable: false,
+            });
+        }
+    }
+}
+
+fn process_gpu_registry() -> Arc<GpuRendererRegistry> {
+    Arc::clone(PROCESS_GPU_REGISTRY.get_or_init(|| Arc::new(GpuRendererRegistry::initialize())))
 }
 
 struct TerminalSessionState {
@@ -414,8 +533,10 @@ enum SessionActorMessage {
 
 struct TerminalSessionRuntime {
     session_id: String,
+    session_sequence: u64,
     connection_epoch: Arc<str>,
     session_epoch: Arc<str>,
+    gpu_registry: Arc<GpuRendererRegistry>,
     state: Mutex<TerminalSessionState>,
     publication: PublicationHub,
     explicit_render_resources: Mutex<Option<TerminalRenderResources>>,
@@ -482,7 +603,11 @@ impl TerminalSessionRuntime {
             .lock()
             .ok()
             .and_then(|mut resources| resources.pop())
-            .unwrap_or_default();
+            .unwrap_or_else(|| {
+                TerminalRenderResources::with_gpu_runtime(
+                    self.gpu_registry.runtime(self.sequence()).ok(),
+                )
+            });
         Ok(TerminalRenderResourceLease {
             runtime: Arc::clone(self),
             resources: Some(resources),
@@ -593,6 +718,9 @@ struct TerminalRenderResources {
     use_sequence: u64,
     frame: RasterizedFrame,
     png_scratch: Vec<u8>,
+    gpu_runtime: Option<GpuSlugRuntime>,
+    gpu_renderer: Option<GpuSlugRenderer>,
+    gpu_surface: Option<(u32, u32)>,
     stats: TerminalRenderResourceStats,
 }
 
@@ -608,6 +736,9 @@ impl Default for TerminalRenderResources {
                 pixels: Vec::new(),
             },
             png_scratch: Vec::new(),
+            gpu_runtime: None,
+            gpu_renderer: None,
+            gpu_surface: None,
             stats: TerminalRenderResourceStats {
                 font_renderer_cache_capacity: MAX_CACHED_FONT_SIZES as u64,
                 ..TerminalRenderResourceStats::default()
@@ -617,6 +748,27 @@ impl Default for TerminalRenderResources {
 }
 
 impl TerminalRenderResources {
+    fn with_gpu_runtime(gpu_runtime: Option<GpuSlugRuntime>) -> Self {
+        Self {
+            gpu_runtime,
+            ..Self::default()
+        }
+    }
+
+    fn ensure_gpu_renderer(&mut self) -> Result<&mut GpuSlugRenderer> {
+        if self.gpu_renderer.is_none() {
+            let runtime = self
+                .gpu_runtime
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("cached {GPU_RENDERER_ID} runtime is unavailable"))?;
+            self.gpu_renderer = Some(runtime.create_renderer()?);
+        }
+        Ok(self
+            .gpu_renderer
+            .as_mut()
+            .expect("GPU renderer was initialized above"))
+    }
+
     fn ensure_font(&mut self, pixel_size: f32) -> Result<usize> {
         let pixel_size = pixel_size.max(MIN_FONT_PIXEL_SIZE);
         let pixel_size_bits = pixel_size.to_bits();
@@ -790,7 +942,51 @@ impl TerminalRenderResources {
         })
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the renderer-neutral bridge carries the negotiated presentation and frame identity"
+    )]
     fn render_raster_update(
+        &mut self,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+        presentation: RasterPresentation,
+        previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
+        frame_sequence: u64,
+        base_frame_sequence: u64,
+        force_full: bool,
+        max_regions: u16,
+        gpu_identity: GpuSlugRenderIdentity,
+    ) -> Result<Option<RenderedRasterUpdate>> {
+        match presentation.renderer {
+            RasterRenderer::CpuFontdue => self.render_cpu_raster_update(
+                snapshot,
+                requested_pixel_width,
+                requested_pixel_height,
+                presentation.transport,
+                previous_snapshot,
+                frame_sequence,
+                base_frame_sequence,
+                force_full,
+                max_regions,
+            ),
+            RasterRenderer::GpuSlug => self.render_gpu_raster_update(
+                snapshot,
+                requested_pixel_width,
+                requested_pixel_height,
+                presentation.transport,
+                previous_snapshot,
+                frame_sequence,
+                base_frame_sequence,
+                force_full,
+                max_regions,
+                gpu_identity,
+            ),
+        }
+    }
+
+    fn render_cpu_raster_update(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
         requested_pixel_width: u16,
@@ -945,6 +1141,160 @@ impl TerminalRenderResources {
             payload_pack_micros,
         }))
     }
+
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the GPU render transaction mirrors the complete negotiated frame contract"
+    )]
+    fn render_gpu_raster_update(
+        &mut self,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+        transport: RasterTransport,
+        previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
+        frame_sequence: u64,
+        base_frame_sequence: u64,
+        force_full: bool,
+        max_regions: u16,
+        gpu_identity: GpuSlugRenderIdentity,
+    ) -> Result<Option<RenderedRasterUpdate>> {
+        let runtime = self
+            .gpu_runtime
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| eyre::eyre!("cached {GPU_RENDERER_ID} runtime is unavailable"))?;
+        let metrics = runtime.fit_surface_metrics(
+            snapshot.columns,
+            snapshot.rows,
+            u32::from(requested_pixel_width),
+            u32::from(requested_pixel_height),
+        )?;
+        let width = metrics.native_width(snapshot.columns);
+        let height = metrics.native_height(snapshot.rows);
+        let dimensions_changed = self.gpu_surface != Some((width, height));
+        let damage_started = Instant::now();
+        let (cell_regions, damage_forces_full) =
+            if transport == RasterTransport::DirtyRawRgba && !force_full && !dimensions_changed {
+                damage_regions(previous_snapshot, snapshot)
+            } else {
+                (Vec::new(), true)
+            };
+        let damage_micros = damage_started.elapsed().as_micros() as u64;
+        let negotiated_region_fallback = transport == RasterTransport::DirtyRawRgba
+            && cell_regions.len() > usize::from(max_regions);
+        let render_full = transport != RasterTransport::DirtyRawRgba
+            || force_full
+            || dimensions_changed
+            || damage_forces_full
+            || negotiated_region_fallback;
+        let full_recovery = force_full
+            || (transport == RasterTransport::DirtyRawRgba
+                && (dimensions_changed || damage_forces_full || negotiated_region_fallback));
+        if !render_full && cell_regions.is_empty() {
+            return Ok(None);
+        }
+
+        let request = GpuSlugRenderRequest {
+            snapshot,
+            width,
+            height,
+            font_pixel_size: metrics.font_pixel_size,
+            damage: if render_full { &[] } else { &cell_regions },
+            force_full_refresh: render_full,
+            identity: gpu_identity,
+            timeout: Duration::from_secs(5),
+            cancellation: None,
+        };
+        let rendered = self.ensure_gpu_renderer()?.render(request)?;
+        self.gpu_surface = Some((width, height));
+        let render_stats = rendered.stats;
+
+        let encode_started = Instant::now();
+        let update = if render_full && transport == RasterTransport::FullPng {
+            let pixels = rendered.full_rgba.as_deref().ok_or_else(|| {
+                eyre::eyre!("{GPU_RENDERER_ID} full PNG render omitted complete RGBA readback")
+            })?;
+            let png_capacity_before = self.png_scratch.capacity();
+            self.png_scratch.clear();
+            {
+                let mut encoder =
+                    png::Encoder::new(Cursor::new(&mut self.png_scratch), width, height);
+                encoder.set_color(png::ColorType::Rgba);
+                encoder.set_depth(png::BitDepth::Eight);
+                let mut writer = encoder.write_header()?;
+                writer.write_image_data(pixels)?;
+            }
+            if self.png_scratch.capacity() > png_capacity_before {
+                self.stats.png_buffer_grows = self.stats.png_buffer_grows.saturating_add(1);
+            } else {
+                self.stats.png_buffer_reuses = self.stats.png_buffer_reuses.saturating_add(1);
+            }
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::full_png(frame_sequence, width, height, self.png_scratch.clone())?
+        } else if render_full {
+            let pixels = rendered.full_rgba.as_deref().ok_or_else(|| {
+                eyre::eyre!("{GPU_RENDERER_ID} full raw render omitted complete RGBA readback")
+            })?;
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::full_rgba(
+                frame_sequence,
+                width,
+                height,
+                pixels,
+                FrameCompression::Raw,
+            )?
+        } else {
+            let packed = rendered
+                .dirty_regions
+                .iter()
+                .map(|region| PackedRasterRegion {
+                    rect: RasterRect {
+                        x: region.x,
+                        y: region.y,
+                        width: region.width,
+                        height: region.height,
+                    },
+                    rgba: &region.rgba,
+                })
+                .collect::<Vec<_>>();
+            self.stats.transport_payload_copies =
+                self.stats.transport_payload_copies.saturating_add(1);
+            RasterFrameUpdate::dirty_rgba_packed(
+                frame_sequence,
+                base_frame_sequence,
+                width,
+                height,
+                &packed,
+            )?
+        };
+        let packet_micros = encode_started.elapsed().as_micros() as u64;
+        let (png_encode_micros, payload_pack_micros) = if transport == RasterTransport::FullPng {
+            (packet_micros, render_stats.payload_pack_us)
+        } else {
+            (
+                0,
+                render_stats.payload_pack_us.saturating_add(packet_micros),
+            )
+        };
+
+        Ok(Some(RenderedRasterUpdate {
+            update,
+            full_recovery,
+            cell_width: u16::try_from(metrics.cell_width)?,
+            cell_height: u16::try_from(metrics.cell_height)?,
+            font_pixel_size: metrics.font_pixel_size.round() as u16,
+            font_load_micros: render_stats
+                .outline_extraction_us
+                .saturating_add(render_stats.directional_band_build_us),
+            damage_micros,
+            raster_micros: render_stats.total_us,
+            png_encode_micros,
+            payload_pack_micros,
+        }))
+    }
 }
 
 struct EncodedPng {
@@ -964,27 +1314,32 @@ struct EncodedPng {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum RasterRenderer {
     CpuFontdue,
+    GpuSlug,
 }
 
 impl RasterRenderer {
     const fn renderer_id(self) -> &'static str {
         match self {
             Self::CpuFontdue => CPU_RENDERER_ID,
+            Self::GpuSlug => GPU_RENDERER_ID,
         }
     }
 
-    fn from_request(requested_renderer_id: &str) -> Result<Self, TerminalError> {
+    fn from_request(
+        requested_renderer_id: &str,
+        gpu_registry: &GpuRendererRegistry,
+        server_sequence: i64,
+    ) -> Result<Self, TerminalError> {
         match requested_renderer_id {
             CPU_RENDERER_ID => Ok(Self::CpuFontdue),
-            GPU_RENDERER_ID => Err(VoxTerminalService::error(
-                TerminalErrorCode::UnsupportedCapability,
-                "terminal renderer rust-gpu-slug is not available until its Vulkan context initializes",
-                0,
-            )),
+            GPU_RENDERER_ID => {
+                gpu_registry.runtime(server_sequence)?;
+                Ok(Self::GpuSlug)
+            }
             unsupported => Err(VoxTerminalService::error(
                 TerminalErrorCode::UnsupportedCapability,
                 format!("unsupported terminal renderer: {unsupported}"),
-                0,
+                server_sequence,
             )),
         }
     }
@@ -1073,9 +1428,17 @@ struct RasterPresentation {
 }
 
 impl RasterPresentation {
-    fn from_request(request: &TerminalRasterSubscribeRequest) -> Result<Self, TerminalError> {
+    fn from_request(
+        request: &TerminalRasterSubscribeRequest,
+        gpu_registry: &GpuRendererRegistry,
+        server_sequence: i64,
+    ) -> Result<Self, TerminalError> {
         Ok(Self {
-            renderer: RasterRenderer::from_request(&request.requested_renderer_id)?,
+            renderer: RasterRenderer::from_request(
+                &request.requested_renderer_id,
+                gpu_registry,
+                server_sequence,
+            )?,
             transport: RasterTransport::from_request(request)?,
         })
     }
@@ -1207,6 +1570,7 @@ impl VoxTerminalService {
             sessions: Arc::new(Mutex::new(BTreeMap::new())),
             connection_epoch: next_connection_epoch(&process_epoch),
             process_epoch,
+            gpu_registry: process_gpu_registry(),
             latest_snapshot_timing: Arc::new(Mutex::new(None)),
         }
     }
@@ -1216,6 +1580,7 @@ impl VoxTerminalService {
             sessions: Arc::clone(&self.sessions),
             process_epoch: Arc::clone(&self.process_epoch),
             connection_epoch: next_connection_epoch(&self.process_epoch),
+            gpu_registry: Arc::clone(&self.gpu_registry),
             latest_snapshot_timing: Arc::clone(&self.latest_snapshot_timing),
         }
     }
@@ -1296,29 +1661,62 @@ impl VoxTerminalService {
         }
     }
 
-    fn presentation_modes() -> Vec<TerminalPresentationMode> {
+    fn presentation_modes(&self) -> Vec<TerminalPresentationMode> {
+        let mut renderers = vec![RasterRenderer::CpuFontdue];
+        if self.gpu_registry.is_available() {
+            renderers.push(RasterRenderer::GpuSlug);
+        }
+        let transports = [
+            RasterTransport::FullPng,
+            RasterTransport::FullRawRgba,
+            RasterTransport::DirtyRawRgba,
+        ];
+        renderers
+            .into_iter()
+            .flat_map(|renderer| {
+                transports
+                    .into_iter()
+                    .map(move |transport| TerminalPresentationMode {
+                        renderer_id: renderer.renderer_id().to_string(),
+                        rasterization_owner: TerminalRasterizationOwner::Server,
+                        damage_mode_id: transport.damage_mode_id().to_string(),
+                        transport_id: transport.transport_id().to_string(),
+                        transport_version: RASTER_TRANSPORT_VERSION,
+                        encoding: transport.encoding(),
+                        steady_frame_kind: transport.steady_frame_kind(),
+                        frame_contract_version: RASTER_FRAME_CONTRACT_VERSION,
+                        origin: TerminalFrameOrigin::TopLeft,
+                        alpha_mode: TerminalAlphaMode::Straight,
+                        color_space: TerminalColorSpace::Srgb,
+                        max_pixel_width: MAX_PIXEL_WIDTH,
+                        max_pixel_height: MAX_PIXEL_HEIGHT,
+                        max_frame_bytes: MAX_FRAME_BYTES,
+                        max_regions: MAX_DIRTY_REGIONS as u16,
+                    })
+            })
+            .collect()
+    }
+
+    fn unavailable_presentations(
+        &self,
+        server_sequence: i64,
+    ) -> Vec<TerminalPresentationUnavailable> {
+        let Some(error) = self.gpu_registry.unavailable_error(server_sequence) else {
+            return Vec::new();
+        };
         [
             RasterTransport::FullPng,
             RasterTransport::FullRawRgba,
             RasterTransport::DirtyRawRgba,
         ]
         .into_iter()
-        .map(|transport| TerminalPresentationMode {
-            renderer_id: RasterRenderer::CpuFontdue.renderer_id().to_string(),
+        .map(|transport| TerminalPresentationUnavailable {
+            renderer_id: GPU_RENDERER_ID.to_string(),
             rasterization_owner: TerminalRasterizationOwner::Server,
             damage_mode_id: transport.damage_mode_id().to_string(),
             transport_id: transport.transport_id().to_string(),
             transport_version: RASTER_TRANSPORT_VERSION,
-            encoding: transport.encoding(),
-            steady_frame_kind: transport.steady_frame_kind(),
-            frame_contract_version: RASTER_FRAME_CONTRACT_VERSION,
-            origin: TerminalFrameOrigin::TopLeft,
-            alpha_mode: TerminalAlphaMode::Straight,
-            color_space: TerminalColorSpace::Srgb,
-            max_pixel_width: MAX_PIXEL_WIDTH,
-            max_pixel_height: MAX_PIXEL_HEIGHT,
-            max_frame_bytes: MAX_FRAME_BYTES,
-            max_regions: MAX_DIRTY_REGIONS as u16,
+            error: error.clone(),
         })
         .collect()
     }
@@ -1788,8 +2186,10 @@ impl Terminal for VoxTerminalService {
         let (actor_sender, actor_receiver) = mpsc::sync_channel(SESSION_ACTOR_CAPACITY);
         let runtime = Arc::new(TerminalSessionRuntime {
             session_id: session_id.clone(),
+            session_sequence: epoch_sequence,
             connection_epoch: Arc::clone(&self.connection_epoch),
             session_epoch,
+            gpu_registry: Arc::clone(&self.gpu_registry),
             state: Mutex::new(state),
             publication: PublicationHub::new(),
             explicit_render_resources: Mutex::new(Some(TerminalRenderResources::default())),
@@ -1847,7 +2247,8 @@ impl Terminal for VoxTerminalService {
             session_id: request.session_id,
             default_renderer_id: CPU_RENDERER_ID.to_string(),
             default_transport_id: TRANSPORT_FULL_PNG.to_string(),
-            modes: Self::presentation_modes(),
+            modes: self.presentation_modes(),
+            unavailable_presentations: self.unavailable_presentations(session.sequence),
             server_sequence: session.sequence,
         })
     }
@@ -2445,9 +2846,10 @@ impl Terminal for VoxTerminalService {
                 0,
             ));
         }
-        let presentation = RasterPresentation::from_request(&request)?;
-        let transport = presentation.transport;
         let runtime = self.session(&request.session_id)?;
+        let presentation =
+            RasterPresentation::from_request(&request, &self.gpu_registry, runtime.sequence())?;
+        let transport = presentation.transport;
         if runtime.closed.load(Ordering::Acquire) {
             return Err(Self::error(
                 TerminalErrorCode::Disconnected,
@@ -2516,6 +2918,13 @@ impl Terminal for VoxTerminalService {
             };
             let panel_width = capture.surface.panel_width;
             let panel_height = capture.surface.panel_height;
+            let gpu_identity = GpuSlugRenderIdentity {
+                session_sequence: runtime.session_sequence,
+                terminal_sequence: u64::try_from(capture.terminal_sequence).unwrap_or(u64::MAX),
+                frame_sequence: u64::try_from(next_frame_sequence).unwrap_or(u64::MAX),
+                presentation_generation: request.presentation_generation.clone(),
+                correlation_id: request.correlation_id.clone(),
+            };
             let render_started = Instant::now();
             let mut resources = resource_lease.take();
             let render = tokio::task::spawn_blocking(move || {
@@ -2523,12 +2932,13 @@ impl Terminal for VoxTerminalService {
                     &capture.snapshot,
                     panel_width,
                     panel_height,
-                    transport,
+                    presentation,
                     previous_snapshot.as_ref(),
                     u64::try_from(next_frame_sequence).unwrap_or(u64::MAX),
                     u64::try_from(base_frame_sequence).unwrap_or(0),
                     force_full,
                     max_regions,
+                    gpu_identity,
                 );
                 (resources, capture, result)
             })
@@ -2542,6 +2952,9 @@ impl Terminal for VoxTerminalService {
             })?;
             resource_lease.replace(render.0);
             let capture = render.1;
+            if let Err(error) = &render.2 {
+                self.gpu_registry.retire_on_device_loss(error);
+            }
             let Some(rendered) = render.2.map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
@@ -2870,6 +3283,28 @@ mod tests {
         }
     }
 
+    fn test_gpu_identity(frame_sequence: u64) -> GpuSlugRenderIdentity {
+        GpuSlugRenderIdentity {
+            session_sequence: 7,
+            terminal_sequence: frame_sequence,
+            frame_sequence,
+            presentation_generation: "gpu-test-generation".to_string(),
+            correlation_id: format!("gpu-test-{frame_sequence}"),
+        }
+    }
+
+    fn service_with_unavailable_gpu(message: &str) -> VoxTerminalService {
+        let mut service = VoxTerminalService::new();
+        service.gpu_registry = Arc::new(GpuRendererRegistry {
+            state: Mutex::new(GpuRendererState::Unavailable(CachedGpuError {
+                code: TerminalErrorCode::UnsupportedCapability,
+                message: message.to_string(),
+                retryable: false,
+            })),
+        });
+        service
+    }
+
     #[test]
     fn normalize_listen_address_accepts_loopback_shorthand() {
         assert_eq!(
@@ -2888,7 +3323,9 @@ mod tests {
 
     #[test]
     fn raster_capabilities_and_requests_use_stable_exact_combinations() {
-        let modes = VoxTerminalService::presentation_modes();
+        let unavailable_message = "rust-gpu-slug unavailable in deterministic test fixture";
+        let service = service_with_unavailable_gpu(unavailable_message);
+        let modes = service.presentation_modes();
         assert_eq!(modes.len(), 3);
         assert_eq!(modes[0].transport_id, TRANSPORT_FULL_PNG);
         assert_eq!(modes[1].transport_id, TRANSPORT_FULL_RAW_RGBA);
@@ -2904,7 +3341,11 @@ mod tests {
             RasterTransport::DirtyRawRgba,
         ] {
             assert_eq!(
-                RasterPresentation::from_request(&test_raster_request(transport)),
+                RasterPresentation::from_request(
+                    &test_raster_request(transport),
+                    &service.gpu_registry,
+                    17,
+                ),
                 Ok(RasterPresentation {
                     renderer: RasterRenderer::CpuFontdue,
                     transport,
@@ -2914,17 +3355,203 @@ mod tests {
         let mut unsupported = test_raster_request(RasterTransport::FullPng);
         unsupported.requested_damage_mode_id = DAMAGE_DIRTY.to_string();
         assert_eq!(
-            RasterPresentation::from_request(&unsupported)
+            RasterPresentation::from_request(&unsupported, &service.gpu_registry, 17)
                 .expect_err("a mismatched damage mode must not silently fall back")
                 .code,
             TerminalErrorCode::UnsupportedCapability
         );
         unsupported = test_raster_request(RasterTransport::FullPng);
         unsupported.requested_renderer_id = GPU_RENDERER_ID.to_string();
-        let error = RasterPresentation::from_request(&unsupported)
-            .expect_err("an uninitialized GPU renderer must not silently fall back to CPU");
+        let error = RasterPresentation::from_request(&unsupported, &service.gpu_registry, 17)
+            .expect_err("an unavailable GPU renderer must not silently fall back to CPU");
         assert_eq!(error.code, TerminalErrorCode::UnsupportedCapability);
-        assert!(error.message.contains(GPU_RENDERER_ID));
+        assert_eq!(error.message, unavailable_message);
+        assert_eq!(error.server_sequence, 17);
+
+        let unavailable = service.unavailable_presentations(17);
+        assert_eq!(unavailable.len(), 3);
+        assert!(unavailable.iter().all(|mode| {
+            mode.renderer_id == GPU_RENDERER_ID
+                && mode.rasterization_owner == TerminalRasterizationOwner::Server
+                && mode.error.code == TerminalErrorCode::UnsupportedCapability
+                && mode.error.message == unavailable_message
+                && mode.error.server_sequence == 17
+        }));
+    }
+
+    #[test]
+    fn process_gpu_capability_is_six_valid_modes_or_three_exact_negatives() {
+        let service = VoxTerminalService::new();
+        let modes = service.presentation_modes();
+        let cpu_modes = modes
+            .iter()
+            .filter(|mode| mode.renderer_id == CPU_RENDERER_ID)
+            .count();
+        let gpu_modes = modes
+            .iter()
+            .filter(|mode| mode.renderer_id == GPU_RENDERER_ID)
+            .count();
+        assert_eq!(cpu_modes, 3);
+
+        if service.gpu_registry.is_available() {
+            assert_eq!(modes.len(), 6);
+            assert_eq!(gpu_modes, 3);
+            assert!(service.unavailable_presentations(23).is_empty());
+        } else {
+            assert_eq!(modes.len(), 3);
+            assert_eq!(gpu_modes, 0);
+            let unavailable = service.unavailable_presentations(23);
+            assert_eq!(unavailable.len(), 3);
+            assert!(unavailable.iter().all(|mode| {
+                mode.renderer_id == GPU_RENDERER_ID
+                    && mode.rasterization_owner == TerminalRasterizationOwner::Server
+                    && mode.error.code == TerminalErrorCode::UnsupportedCapability
+                    && mode.error.server_sequence == 23
+            }));
+        }
+    }
+
+    #[test]
+    fn gpu_slug_bridge_emits_all_transports_and_exact_dirty_composition_when_available() {
+        let service = VoxTerminalService::new();
+        let Ok(runtime) = service.gpu_registry.runtime(31) else {
+            assert_eq!(service.unavailable_presentations(31).len(), 3);
+            return;
+        };
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 3);
+        terminal.process_bytes(b"\x1b[?25l\x1b[1;36mhello\x1b[0m");
+        let initial_snapshot = terminal.snapshot();
+
+        for (frame_sequence, transport) in [
+            RasterTransport::FullPng,
+            RasterTransport::FullRawRgba,
+            RasterTransport::DirtyRawRgba,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let frame_sequence = u64::try_from(frame_sequence + 1).expect("small test sequence");
+            let mut resources = TerminalRenderResources::with_gpu_runtime(Some(runtime.clone()));
+            let rendered = resources
+                .render_raster_update(
+                    &initial_snapshot,
+                    0,
+                    0,
+                    RasterPresentation {
+                        renderer: RasterRenderer::GpuSlug,
+                        transport,
+                    },
+                    None,
+                    frame_sequence,
+                    0,
+                    true,
+                    MAX_DIRTY_REGIONS as u16,
+                    test_gpu_identity(frame_sequence),
+                )
+                .expect("GPU presentation should render")
+                .expect("forced GPU presentation should emit a frame");
+            rendered
+                .update
+                .validate()
+                .expect("valid GPU frame contract");
+            assert!(rendered.cell_width > 0);
+            assert!(rendered.cell_height > 0);
+            assert!(rendered.font_pixel_size > 0);
+            assert_eq!(rendered.update.descriptor.kind, RasterUpdateKind::Full);
+            match transport {
+                RasterTransport::FullPng => {
+                    assert_eq!(
+                        rendered.update.descriptor.compression,
+                        FrameCompression::Png
+                    );
+                    assert!(rendered.update.bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+                }
+                RasterTransport::FullRawRgba | RasterTransport::DirtyRawRgba => {
+                    assert_eq!(
+                        rendered.update.descriptor.compression,
+                        FrameCompression::Raw
+                    );
+                    assert_eq!(
+                        rendered.update.bytes.len(),
+                        usize::try_from(
+                            rendered
+                                .update
+                                .descriptor
+                                .width
+                                .saturating_mul(rendered.update.descriptor.height)
+                                .saturating_mul(4)
+                        )
+                        .expect("small test frame length")
+                    );
+                }
+            }
+        }
+
+        let mut resources = TerminalRenderResources::with_gpu_runtime(Some(runtime));
+        let dirty_presentation = RasterPresentation {
+            renderer: RasterRenderer::GpuSlug,
+            transport: RasterTransport::DirtyRawRgba,
+        };
+        let initial = resources
+            .render_raster_update(
+                &initial_snapshot,
+                0,
+                0,
+                dirty_presentation,
+                None,
+                40,
+                0,
+                true,
+                MAX_DIRTY_REGIONS as u16,
+                test_gpu_identity(40),
+            )
+            .expect("initial GPU dirty-mode render")
+            .expect("initial GPU dirty-mode render is a full resync");
+        let mut composed =
+            ComposedRasterFrame::from_full(&initial.update).expect("compose GPU full frame");
+
+        terminal.process_bytes(b"\x1b[1;1HZ\x1b[3;12H!");
+        let current_snapshot = terminal.snapshot();
+        let dirty = resources
+            .render_raster_update(
+                &current_snapshot,
+                0,
+                0,
+                dirty_presentation,
+                Some(&initial_snapshot),
+                41,
+                40,
+                false,
+                MAX_DIRTY_REGIONS as u16,
+                test_gpu_identity(41),
+            )
+            .expect("incremental GPU render")
+            .expect("visible GPU mutation emits dirty regions");
+        assert_eq!(dirty.update.descriptor.kind, RasterUpdateKind::DirtyRegions);
+        assert!(!dirty.update.regions.is_empty());
+        composed
+            .apply(&dirty.update)
+            .expect("compose packed GPU dirty regions");
+
+        let expected = resources
+            .render_raster_update(
+                &current_snapshot,
+                0,
+                0,
+                RasterPresentation {
+                    renderer: RasterRenderer::GpuSlug,
+                    transport: RasterTransport::FullRawRgba,
+                },
+                Some(&initial_snapshot),
+                42,
+                41,
+                true,
+                MAX_DIRTY_REGIONS as u16,
+                test_gpu_identity(42),
+            )
+            .expect("GPU full-frame comparison render")
+            .expect("forced GPU comparison frame");
+        assert_eq!(composed.pixels, expected.update.bytes);
     }
 
     #[test]
@@ -2934,7 +3561,7 @@ mod tests {
         let previous = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
         let full = resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &previous,
                 0,
                 0,
@@ -2955,7 +3582,7 @@ mod tests {
         terminal.process_bytes(b"\x1b[2D!\x1b[4m?\x1b[0m");
         let current = terminal.snapshot();
         let dirty = resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &current,
                 0,
                 0,
@@ -2982,7 +3609,7 @@ mod tests {
         let previous = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
         resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &previous,
                 0,
                 0,
@@ -3006,7 +3633,7 @@ mod tests {
         );
 
         let fallback = resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &current,
                 0,
                 0,
@@ -3036,7 +3663,7 @@ mod tests {
         let first_snapshot = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
         let first = resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &first_snapshot,
                 0,
                 0,
@@ -3054,7 +3681,7 @@ mod tests {
         terminal.process_bytes(b"B");
         let second_snapshot = terminal.snapshot();
         let second = resources
-            .render_raster_update(
+            .render_cpu_raster_update(
                 &second_snapshot,
                 0,
                 0,
@@ -3112,7 +3739,7 @@ mod tests {
             .await
             .expect("V3 capabilities should be available for the session");
         assert_eq!(capabilities.default_transport_id, TRANSPORT_FULL_PNG);
-        assert_eq!(capabilities.modes, VoxTerminalService::presentation_modes());
+        assert_eq!(capabilities.modes, service.presentation_modes());
 
         let mut request = test_raster_request(RasterTransport::FullPng);
         request.session_id = connected.session_id.clone();
