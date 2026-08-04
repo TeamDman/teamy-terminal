@@ -45,8 +45,9 @@ pub const RUST_GPU_SLUG_RENDERER_ID: &str = "rust-gpu-slug";
 pub const GPU_SLUG_SHADER_SOURCE_IDENTITY: u64 = GPU_SLUG_SHADER_SOURCE_FNV1A64;
 /// Default em size shared with the CPU reference sizing policy.
 pub const GPU_SLUG_DEFAULT_PIXEL_SIZE: f32 = teamy_terminal_font::DEFAULT_PIXEL_SIZE;
-/// Minimum effective em size accepted by the current bridge sizing policy.
-pub const GPU_SLUG_MIN_PIXEL_SIZE: f32 = 8.0;
+/// Lower fitting bound for remote panel targets. The standalone interactive
+/// zoom control keeps its own larger usability floor.
+pub const GPU_SLUG_MIN_PIXEL_SIZE: f32 = 1.0;
 /// Maximum effective em size accepted by the current bridge sizing policy.
 pub const GPU_SLUG_MAX_PIXEL_SIZE: f32 = 64.0;
 
@@ -556,16 +557,41 @@ impl GpuSlugRuntime {
         };
         let width_scale = f64::from(target_width) / f64::from(default_width);
         let height_scale = f64::from(target_height) / f64::from(default_height);
-        let pixel_size = (f64::from(GPU_SLUG_DEFAULT_PIXEL_SIZE) * width_scale.min(height_scale))
-            .clamp(
-                f64::from(GPU_SLUG_MIN_PIXEL_SIZE),
-                f64::from(GPU_SLUG_MAX_PIXEL_SIZE),
-            )
-            .to_f32()
-            .ok_or_else(|| GpuSlugRendererError::InvalidRequest {
-                detail: "fitted font pixel size is not representable as f32".to_owned(),
-            })?;
-        self.surface_metrics(pixel_size)
+        let mut pixel_size = (f64::from(GPU_SLUG_DEFAULT_PIXEL_SIZE)
+            * width_scale.min(height_scale))
+        .clamp(
+            f64::from(GPU_SLUG_MIN_PIXEL_SIZE),
+            f64::from(GPU_SLUG_MAX_PIXEL_SIZE),
+        )
+        .to_f32()
+        .ok_or_else(|| GpuSlugRendererError::InvalidRequest {
+            detail: "fitted font pixel size is not representable as f32".to_owned(),
+        })?;
+        for _ in 0..8 {
+            let fitted = self.surface_metrics(pixel_size)?;
+            let width = fitted.native_width(columns);
+            let height = fitted.native_height(rows);
+            if width <= target_width && height <= target_height {
+                return Ok(fitted);
+            }
+            let shrink = (f64::from(target_width) / f64::from(width.max(1)))
+                .min(f64::from(target_height) / f64::from(height.max(1)));
+            let next = (f64::from(pixel_size) * shrink * 0.999)
+                .max(f64::from(GPU_SLUG_MIN_PIXEL_SIZE))
+                .to_f32()
+                .ok_or_else(|| GpuSlugRendererError::InvalidRequest {
+                    detail: "fitted font pixel size is not representable as f32".to_owned(),
+                })?;
+            if next >= pixel_size || (pixel_size - next) < f32::EPSILON {
+                break;
+            }
+            pixel_size = next;
+        }
+        Err(GpuSlugRendererError::InvalidRequest {
+            detail: format!(
+                "logical terminal grid {columns}x{rows} cannot fit panel {target_width}x{target_height}"
+            ),
+        })
     }
 }
 
@@ -2409,6 +2435,11 @@ mod tests {
         assert!(defaults.native_height(24) > 0);
         assert!(fitted.native_width(80) <= 1_280);
         assert!(fitted.native_height(24) <= 720);
+        let sfm_panel = runtime
+            .fit_surface_metrics(70, 21, 425, 238)
+            .expect("normal-scale SFM panel metrics");
+        assert!(sfm_panel.native_width(70) <= 425);
+        assert!(sfm_panel.native_height(21) <= 238);
         let mut first = runtime.create_renderer().expect("first session renderer");
         let mut second = runtime.create_renderer().expect("second session renderer");
         assert!(Arc::ptr_eq(&first.state.shared, &second.state.shared));

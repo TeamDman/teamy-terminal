@@ -54,7 +54,11 @@ const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 const MAX_CONTENT_CHARS: u32 = 256 * 1024;
 const MAX_PIXEL_WIDTH: u16 = 4096;
 const MAX_PIXEL_HEIGHT: u16 = 4096;
-const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
+// The Vox bridge must preserve the requested logical grid even when a panel is
+// slightly shorter than the minimum interactive-window font would allow.  A
+// bridge renderer therefore has a lower fitting floor than the user-facing
+// standalone zoom control; impossible sub-cell targets are still rejected.
+const MIN_FONT_PIXEL_SIZE: f32 = 1.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
 const SESSION_ACTOR_CAPACITY: usize = 64;
@@ -855,6 +859,57 @@ impl TerminalRenderResources {
         Ok(self.fonts.len() - 1)
     }
 
+    fn fit_font(
+        &mut self,
+        columns: u16,
+        rows: u16,
+        requested_pixel_width: u16,
+        requested_pixel_height: u16,
+    ) -> Result<(usize, f32)> {
+        let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
+        let default_font = &self.fonts[default_font_index].font;
+        let default_width = u32::from(columns).saturating_mul(default_font.cell_width());
+        let default_height = u32::from(rows).saturating_mul(default_font.cell_height());
+        let target_width = if requested_pixel_width == 0 {
+            default_width
+        } else {
+            u32::from(requested_pixel_width)
+        };
+        let target_height = if requested_pixel_height == 0 {
+            default_height
+        } else {
+            u32::from(requested_pixel_height)
+        };
+        let width_scale = target_width as f32 / default_width.max(1) as f32;
+        let height_scale = target_height as f32 / default_height.max(1) as f32;
+        let mut pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
+            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
+
+        // Cell metrics round upward.  The continuous first estimate can
+        // therefore exceed the panel by one row or column.  Re-measure and
+        // shrink against the discrete result until the complete grid fits.
+        for _ in 0..8 {
+            let font_index = self.ensure_font(pixel_size)?;
+            let font = &self.fonts[font_index].font;
+            let width = u32::from(columns).saturating_mul(font.cell_width());
+            let height = u32::from(rows).saturating_mul(font.cell_height());
+            if width <= target_width && height <= target_height {
+                return Ok((font_index, pixel_size));
+            }
+            let shrink = (target_width as f32 / width.max(1) as f32)
+                .min(target_height as f32 / height.max(1) as f32);
+            let next = (pixel_size * shrink * 0.999).max(MIN_FONT_PIXEL_SIZE);
+            if next >= pixel_size || (pixel_size - next) < f32::EPSILON {
+                break;
+            }
+            pixel_size = next;
+        }
+
+        Err(eyre::eyre!(
+            "logical terminal grid {columns}x{rows} cannot fit panel {target_width}x{target_height}"
+        ))
+    }
+
     fn snapshot_stats(&self) -> TerminalRenderResourceStats {
         let (
             glyph_cache_hits,
@@ -903,25 +958,12 @@ impl TerminalRenderResources {
     ) -> Result<EncodedPng> {
         let font_started = Instant::now();
         let constructions_before = self.stats.font_renderer_constructions;
-        let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
-        let default_font = &self.fonts[default_font_index].font;
-        let default_width = u32::from(snapshot.columns).saturating_mul(default_font.cell_width());
-        let default_height = u32::from(snapshot.rows).saturating_mul(default_font.cell_height());
-        let target_width = if requested_pixel_width == 0 {
-            default_width
-        } else {
-            u32::from(requested_pixel_width)
-        };
-        let target_height = if requested_pixel_height == 0 {
-            default_height
-        } else {
-            u32::from(requested_pixel_height)
-        };
-        let width_scale = target_width as f32 / default_width.max(1) as f32;
-        let height_scale = target_height as f32 / default_height.max(1) as f32;
-        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
-            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
-        let font_index = self.ensure_font(font_pixel_size)?;
+        let (font_index, font_pixel_size) = self.fit_font(
+            snapshot.columns,
+            snapshot.rows,
+            requested_pixel_width,
+            requested_pixel_height,
+        )?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
             font_started.elapsed().as_micros() as u64
         } else {
@@ -1040,25 +1082,12 @@ impl TerminalRenderResources {
     ) -> Result<Option<RenderedRasterUpdate>> {
         let font_started = Instant::now();
         let constructions_before = self.stats.font_renderer_constructions;
-        let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
-        let default_font = &self.fonts[default_font_index].font;
-        let default_width = u32::from(snapshot.columns).saturating_mul(default_font.cell_width());
-        let default_height = u32::from(snapshot.rows).saturating_mul(default_font.cell_height());
-        let target_width = if requested_pixel_width == 0 {
-            default_width
-        } else {
-            u32::from(requested_pixel_width)
-        };
-        let target_height = if requested_pixel_height == 0 {
-            default_height
-        } else {
-            u32::from(requested_pixel_height)
-        };
-        let width_scale = target_width as f32 / default_width.max(1) as f32;
-        let height_scale = target_height as f32 / default_height.max(1) as f32;
-        let font_pixel_size = (DEFAULT_PIXEL_SIZE * width_scale.min(height_scale))
-            .clamp(MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE);
-        let font_index = self.ensure_font(font_pixel_size)?;
+        let (font_index, font_pixel_size) = self.fit_font(
+            snapshot.columns,
+            snapshot.rows,
+            requested_pixel_width,
+            requested_pixel_height,
+        )?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
             font_started.elapsed().as_micros() as u64
         } else {
@@ -4610,6 +4639,28 @@ mod tests {
         assert!(third_stats.frame_buffer_reuses >= 1);
         assert!(third_stats.png_buffer_reuses >= 1);
         assert_eq!(third.payload, first.payload);
+    }
+
+    #[test]
+    fn cpu_bridge_fits_discrete_grid_metrics_within_panel_target() {
+        let terminal = TerminalSession::new(TerminalLimits::default(), 70, 21);
+        let snapshot = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+
+        let rendered = resources
+            .encode_png(&snapshot, 425, 238)
+            .expect("normal-scale SFM panel should fit without clipping");
+
+        assert_eq!(
+            u32::from(rendered.width),
+            70 * u32::from(rendered.cell_width)
+        );
+        assert_eq!(
+            u32::from(rendered.height),
+            21 * u32::from(rendered.cell_height)
+        );
+        assert!(rendered.width <= 425);
+        assert!(rendered.height <= 238);
     }
 
     #[test]
