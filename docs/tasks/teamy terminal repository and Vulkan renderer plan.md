@@ -2011,7 +2011,7 @@ sizing without Java upscale, and correlated renderer/device/font/shader
 telemetry. The repository quality gate and focused core/font/frame/renderer/
 CLI/Vox suites pass; this closes 3.6.4 without selecting a new default.
 
-#### [ ] 3.6.4f Make selection and paste collaborative client/server state
+#### [x] 3.6.4f Make selection and paste collaborative client/server state
 
 **Verified foundation:** `TerminalSession` already owns bounded visible-grid
 selection and selected-text extraction; the native winit adapter already
@@ -2089,6 +2089,28 @@ click have the specified branches; multiline paste cannot reach the PTY before
 approval; and SFM V-4.2e can consume one immutable Facet/Teamy boundary. Do not
 start 3.6.5, change the default renderer, modify Teamy Studio or Cloud
 Terrastodon, or publish SFM/release artifacts in this item.
+
+**Completion notes — 2026-08-05:** Facet commit
+`f2afdece6c79e64085d2f8c047e22fe16b2c8c54` is pushed on
+`teamy/terminal-selection-paste`; its V8 generated Rust/Java contract and Java
+package gates pass. Teamy commits `bb2d1c8`, `8b945bf`, and `fb9592e` provide
+the shared guarded-paste engine, typed Vox selection/copy/paste operations,
+native warning/copy/paste behavior, and native child mouse press/release/drag/
+wheel forwarding whenever terminal mouse reporting is active. `check-all.ps1`
+passes format, strict Clippy, the all-feature workspace build, and all test
+binaries (one existing ignored test).
+
+SFM commit `5d9b4cd41` consumes the immutable contract. Live runs
+`sfm-title_screen-20260805-162634-248` and
+`sfm-title_screen-20260805-163350-709` prove normal scale and GUI scale 7 over
+all six CPU/GPU × PNG/full-raw/dirty-raw tuples. Their machine-readable
+selection artifacts show interaction sequence advancement with zero raster,
+readback, encoding/payload-copy, Java decode, or Java upload deltas; companion
+artifacts prove exact copy-and-clear, guarded `99\n100` cancel/approve,
+single-line Ctrl+V/right-click paste, no-selection Ctrl+C interruption, and
+child-TUI `Drag(Left)` forwarding. No 3.6.5 work, default-renderer change,
+Teamy Studio/Cloud Terrastodon change, propagation, or release publication was
+performed.
 
 ### [ ] 3.6.5 Produce visual comparisons across every renderer/font pair
 
