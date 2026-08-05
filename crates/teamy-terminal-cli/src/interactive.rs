@@ -18,10 +18,21 @@ use teamy_terminal_control::ControlPhysicalKey;
 use teamy_terminal_control::ControlResponse;
 use teamy_terminal_control::ControlServer;
 use teamy_terminal_control::InstanceInfo;
+use teamy_terminal_core::ApprovedPaste;
+use teamy_terminal_core::Cell;
 use teamy_terminal_core::CursorPosition;
+use teamy_terminal_core::CursorShape;
+use teamy_terminal_core::MULTILINE_PASTE_APPROVE_LABEL;
+use teamy_terminal_core::MULTILINE_PASTE_CANCEL_LABEL;
+use teamy_terminal_core::MULTILINE_PASTE_PREVIEW_LABEL;
+use teamy_terminal_core::MULTILINE_PASTE_WARNING;
+use teamy_terminal_core::MULTILINE_PASTE_WARNING_TITLE;
+use teamy_terminal_core::PasteConfirmation;
+use teamy_terminal_core::PasteGuard;
+use teamy_terminal_core::PasteRequest;
+use teamy_terminal_core::PromptMetadata;
 use teamy_terminal_core::TerminalLimits;
 use teamy_terminal_core::TerminalSession;
-#[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
 use teamy_terminal_core::TerminalSnapshot;
 #[cfg(all(test, feature = "dirty_rendering"))]
 use teamy_terminal_font::CellRect;
@@ -70,6 +81,108 @@ const MAX_PTY_DRAIN_BYTES_PER_TURN: usize = 512 * 1024;
 static EVENT_LOOP_LOGGED: Once = Once::new();
 static PTY_DRAIN_LOGGED: Once = Once::new();
 static CONTROL_DRAIN_LOGGED: Once = Once::new();
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum PasteDialogChoice {
+    PasteAnyway,
+    Cancel,
+}
+
+impl PasteDialogChoice {
+    const fn toggled(self) -> Self {
+        match self {
+            Self::PasteAnyway => Self::Cancel,
+            Self::Cancel => Self::PasteAnyway,
+        }
+    }
+}
+
+#[derive(Debug)]
+struct PasteDialog {
+    confirmation: PasteConfirmation,
+    choice: PasteDialogChoice,
+}
+
+impl PasteDialog {
+    const fn new(confirmation: PasteConfirmation) -> Self {
+        Self {
+            confirmation,
+            choice: PasteDialogChoice::Cancel,
+        }
+    }
+
+    fn handle_key(&mut self, key: &Key) -> Option<PasteDialogChoice> {
+        match key {
+            Key::Named(NamedKey::Enter) => Some(self.choice),
+            Key::Named(NamedKey::Escape) => Some(PasteDialogChoice::Cancel),
+            Key::Named(
+                NamedKey::Tab
+                | NamedKey::ArrowLeft
+                | NamedKey::ArrowRight
+                | NamedKey::ArrowUp
+                | NamedKey::ArrowDown,
+            ) => {
+                self.choice = self.choice.toggled();
+                None
+            }
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct PasteDialogLayout {
+    button_row: u16,
+    paste_start: u16,
+    paste_end: u16,
+    cancel_start: u16,
+    cancel_end: u16,
+}
+
+impl PasteDialogLayout {
+    fn for_grid(columns: u16, rows: u16) -> Self {
+        let paste_width = u16::try_from(MULTILINE_PASTE_APPROVE_LABEL.len() + 4)
+            .unwrap_or(u16::MAX)
+            .min(columns);
+        let cancel_width =
+            u16::try_from(MULTILINE_PASTE_CANCEL_LABEL.len() + 4).unwrap_or(u16::MAX);
+        let cancel_start = paste_width.saturating_add(2).min(columns);
+        Self {
+            button_row: rows.saturating_sub(1),
+            paste_start: 0,
+            paste_end: paste_width,
+            cancel_start,
+            cancel_end: cancel_start.saturating_add(cancel_width).min(columns),
+        }
+    }
+
+    const fn choice_at(self, position: CursorPosition) -> Option<PasteDialogChoice> {
+        if position.row != self.button_row {
+            return None;
+        }
+        if position.column >= self.paste_start && position.column < self.paste_end {
+            Some(PasteDialogChoice::PasteAnyway)
+        } else if position.column >= self.cancel_start && position.column < self.cancel_end {
+            Some(PasteDialogChoice::Cancel)
+        } else {
+            None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SecondaryClickAction {
+    CopySelection,
+    GuardedPaste,
+}
+
+const fn secondary_click_action(has_selection: bool) -> SecondaryClickAction {
+    if has_selection {
+        SecondaryClickAction::CopySelection
+    } else {
+        SecondaryClickAction::GuardedPaste
+    }
+}
 
 /// Run the standalone interactive Vulkan terminal.
 pub fn run(cancellation_token: &CancellationToken, initially_hidden: bool) -> Result<()> {
@@ -127,6 +240,9 @@ struct InteractiveApplication {
     modifiers: ModifiersState,
     selecting: bool,
     last_cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
+    paste_guard: PasteGuard,
+    paste_dialog: Option<PasteDialog>,
+    suppress_dialog_key_until_release: bool,
     dirty: bool,
     resize_pending: bool,
     #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
@@ -155,6 +271,9 @@ impl InteractiveApplication {
             modifiers: ModifiersState::default(),
             selecting: false,
             last_cursor_position: None,
+            paste_guard: PasteGuard::default(),
+            paste_dialog: None,
+            suppress_dialog_key_until_release: false,
             dirty: true,
             resize_pending: false,
             #[cfg(any(feature = "extended_observability", feature = "dirty_rendering"))]
@@ -525,7 +644,7 @@ impl InteractiveApplication {
             .as_ref()
             .ok_or_else(|| eyre::eyre!("terminal renderer is not initialized"))?
             .extent();
-        let snapshot = self.terminal.snapshot();
+        let snapshot = self.presentation_snapshot();
         let frame = self.font.render(&snapshot, extent.width, extent.height);
         let file = File::create(path)
             .wrap_err_with(|| format!("failed to create screenshot at {}", path.display()))?;
@@ -561,6 +680,126 @@ impl InteractiveApplication {
         Ok(())
     }
 
+    fn presentation_snapshot(&self) -> TerminalSnapshot {
+        self.paste_dialog.as_ref().map_or_else(
+            || self.terminal.snapshot(),
+            |dialog| {
+                paste_dialog_snapshot(
+                    self.terminal.columns(),
+                    self.terminal.rows(),
+                    &dialog.confirmation,
+                    dialog.choice,
+                )
+            },
+        )
+    }
+
+    fn request_native_clipboard_paste(&mut self) -> Result<()> {
+        let mut clipboard =
+            Clipboard::new().wrap_err("failed to open the system clipboard for paste")?;
+        let text = clipboard
+            .get_text()
+            .wrap_err("failed to read text from the system clipboard")?;
+        match self.paste_guard.request(text)? {
+            PasteRequest::Ready(approved) => self.write_approved_paste(&approved),
+            PasteRequest::ConfirmationRequired(confirmation) => {
+                self.paste_dialog = Some(PasteDialog::new(confirmation));
+                self.dirty = true;
+                Ok(())
+            }
+        }
+    }
+
+    fn write_approved_paste(&self, approved: &ApprovedPaste) -> Result<()> {
+        let session = self
+            .session
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))?;
+        session.write_input(approved.text().as_bytes())
+    }
+
+    fn finish_paste_dialog(&mut self, choice: PasteDialogChoice) -> Result<()> {
+        let id = self
+            .paste_dialog
+            .as_ref()
+            .ok_or_else(|| eyre::eyre!("no paste confirmation is open"))?
+            .confirmation
+            .id();
+        let approved = match choice {
+            PasteDialogChoice::PasteAnyway => Some(self.paste_guard.approve(id)?),
+            PasteDialogChoice::Cancel => {
+                self.paste_guard.cancel(id)?;
+                None
+            }
+        };
+        self.paste_dialog = None;
+        self.restore_terminal_focus();
+        if let Some(approved) = approved.as_ref() {
+            self.write_approved_paste(approved)?;
+        }
+        Ok(())
+    }
+
+    fn restore_terminal_focus(&mut self) {
+        if let Some(window) = self.window.as_ref() {
+            window.focus_window();
+        }
+        self.dirty = true;
+    }
+
+    fn handle_paste_dialog_key(&mut self, event: &KeyEvent) -> Result<bool> {
+        if self.paste_dialog.is_none() {
+            return Ok(false);
+        }
+        if event.state != ElementState::Pressed || event.repeat {
+            return Ok(true);
+        }
+        let choice = self
+            .paste_dialog
+            .as_mut()
+            .expect("paste dialog remains present while handling its key")
+            .handle_key(&event.logical_key);
+        self.dirty = true;
+        if let Some(choice) = choice {
+            self.suppress_dialog_key_until_release = true;
+            self.finish_paste_dialog(choice)?;
+        }
+        Ok(true)
+    }
+
+    fn handle_paste_dialog_click(&mut self) -> Result<bool> {
+        if self.paste_dialog.is_none() {
+            return Ok(false);
+        }
+        let Some(position) = self.last_cursor_position else {
+            return Ok(true);
+        };
+        let Some(cell) = self.terminal_cell_at(position) else {
+            return Ok(true);
+        };
+        let layout = PasteDialogLayout::for_grid(self.terminal.columns(), self.terminal.rows());
+        let Some(choice) = layout.choice_at(cell) else {
+            return Ok(true);
+        };
+        self.paste_dialog
+            .as_mut()
+            .expect("paste dialog remains present after hit testing")
+            .choice = choice;
+        self.finish_paste_dialog(choice)?;
+        Ok(true)
+    }
+
+    fn handle_secondary_click(&mut self) -> Result<()> {
+        match secondary_click_action(self.terminal.selection().is_some()) {
+            SecondaryClickAction::CopySelection => {
+                let copied = self.copy_selection()?;
+                debug_assert!(copied, "an active selection should have copyable text");
+                Ok(())
+            }
+            SecondaryClickAction::GuardedPaste => self.request_native_clipboard_paste(),
+        }
+    }
+
     #[expect(
         clippy::too_many_lines,
         reason = "one event-loop render transaction keeps failure handling and frame-cache commits atomic"
@@ -588,11 +827,11 @@ impl InteractiveApplication {
                 return;
             }
         }
+        let snapshot = self.presentation_snapshot();
         let Some(renderer) = self.renderer.as_mut() else {
             return;
         };
         let extent = renderer.extent();
-        let snapshot = self.terminal.snapshot();
         #[cfg(feature = "extended_observability")]
         let frame_stats = frame_stats(self.last_rendered_snapshot.as_ref(), &snapshot);
         #[cfg(feature = "dirty_rendering")]
@@ -711,7 +950,33 @@ impl InteractiveApplication {
     }
 
     fn input(&mut self, event: &KeyEvent, event_loop: &ActiveEventLoop) {
+        if self.suppress_dialog_key_until_release {
+            if event.state == ElementState::Released {
+                self.suppress_dialog_key_until_release = false;
+            }
+            return;
+        }
+        match self.handle_paste_dialog_key(event) {
+            Ok(true) => return,
+            Ok(false) => {}
+            Err(error) => {
+                self.fail(error, event_loop);
+                return;
+            }
+        }
         if event.state != ElementState::Pressed {
+            return;
+        }
+        let is_v = match &event.logical_key {
+            Key::Character(character) => character.as_str().eq_ignore_ascii_case("v"),
+            _ => false,
+        };
+        if self.modifiers.control_key() && is_v {
+            if !event.repeat
+                && let Err(error) = self.request_native_clipboard_paste()
+            {
+                self.fail(error, event_loop);
+            }
             return;
         }
         let is_c = match &event.logical_key {
@@ -839,6 +1104,18 @@ impl ApplicationHandler for InteractiveApplication {
                 state,
                 button: MouseButton::Left,
                 ..
+            } if self.paste_dialog.is_some() => {
+                if state == ElementState::Pressed
+                    && let Err(error) = self.handle_paste_dialog_click()
+                {
+                    self.fail(error, event_loop);
+                }
+            }
+            WindowEvent::MouseInput { .. } if self.paste_dialog.is_some() => {}
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
             } => match state {
                 ElementState::Pressed => {
                     if let Some(position) = self.last_cursor_position
@@ -866,6 +1143,15 @@ impl ApplicationHandler for InteractiveApplication {
                     }
                 }
             },
+            WindowEvent::MouseInput {
+                state: ElementState::Pressed,
+                button: MouseButton::Right,
+                ..
+            } => {
+                if let Err(error) = self.handle_secondary_click() {
+                    self.fail(error, event_loop);
+                }
+            }
             WindowEvent::MouseWheel { delta, .. } if self.modifiers.control_key() => {
                 if let Some(direction) = wheel_zoom_direction(&delta)
                     && let Err(error) = self.adjust_font_size(direction)
@@ -1417,6 +1703,10 @@ fn single_character(text: &str) -> Option<char> {
     characters.next().is_none().then_some(character)
 }
 
+#[expect(
+    clippy::unnecessary_wraps,
+    reason = "legacy and Win32 input encoders share one fallible adapter contract"
+)]
 fn terminal_input_key(
     key: &Key,
     text: Option<&str>,
@@ -1440,14 +1730,9 @@ fn terminal_input_key(
             "d" => return Ok(Some(vec![0x04])),
             "z" => return Ok(Some(vec![0x1a])),
             "l" => return Ok(Some(vec![0x0c])),
-            "v" => {
-                let mut clipboard =
-                    Clipboard::new().wrap_err("failed to open the system clipboard for paste")?;
-                let text = clipboard
-                    .get_text()
-                    .wrap_err("failed to read text from the system clipboard")?;
-                return Ok(Some(text.into_bytes()));
-            }
+            // Ctrl+V is owned by the native adapter so every input mode uses
+            // the same bounded multiline confirmation path.
+            "v" => return Ok(None),
             _ => {
                 if let Some(byte) = control_character_byte(character) {
                     return Ok(Some(vec![byte]));
@@ -1596,6 +1881,165 @@ fn control_key_bytes(key: &ControlKey) -> Result<Vec<u8>> {
     Ok(bytes)
 }
 
+fn paste_dialog_snapshot(
+    columns: u16,
+    rows: u16,
+    confirmation: &PasteConfirmation,
+    choice: PasteDialogChoice,
+) -> TerminalSnapshot {
+    let mut snapshot = TerminalSnapshot {
+        columns,
+        rows,
+        cursor: CursorPosition::default(),
+        cursor_visible: false,
+        cursor_shape: CursorShape::SteadyBlock,
+        cells: vec![Cell::default(); usize::from(columns) * usize::from(rows)],
+        scrollback_rows: 0,
+        selection: None,
+        prompt: PromptMetadata::default(),
+    };
+    if columns == 0 || rows == 0 {
+        return snapshot;
+    }
+
+    let layout = PasteDialogLayout::for_grid(columns, rows);
+    let content_end = layout.button_row;
+    let mut row = 0;
+    row = write_dialog_text(
+        &mut snapshot,
+        row,
+        content_end,
+        MULTILINE_PASTE_WARNING_TITLE,
+        true,
+        false,
+    )
+    .saturating_add(1);
+    row = write_dialog_text(
+        &mut snapshot,
+        row,
+        content_end,
+        MULTILINE_PASTE_WARNING,
+        false,
+        false,
+    )
+    .saturating_add(1);
+    row = write_dialog_text(
+        &mut snapshot,
+        row,
+        content_end,
+        MULTILINE_PASTE_PREVIEW_LABEL,
+        true,
+        false,
+    );
+    let preview = display_safe_preview(confirmation.preview());
+    let _ = write_dialog_text(&mut snapshot, row, content_end, &preview, false, false);
+
+    let paste_button = format!("[ {MULTILINE_PASTE_APPROVE_LABEL} ]");
+    write_dialog_line(
+        &mut snapshot,
+        layout.paste_start,
+        layout.button_row,
+        &paste_button,
+        choice == PasteDialogChoice::PasteAnyway,
+    );
+    let cancel_button = format!("[ {MULTILINE_PASTE_CANCEL_LABEL} ]");
+    write_dialog_line(
+        &mut snapshot,
+        layout.cancel_start,
+        layout.button_row,
+        &cancel_button,
+        choice == PasteDialogChoice::Cancel,
+    );
+    snapshot
+}
+
+fn display_safe_preview(preview: &str) -> String {
+    let mut display = String::with_capacity(preview.len());
+    let mut characters = preview.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '\r' => {
+                if characters.peek() == Some(&'\n') {
+                    let _ = characters.next();
+                }
+                display.push('\n');
+            }
+            '\n' => display.push('\n'),
+            '\t' => display.push_str("    "),
+            character if character.is_control() => display.push('\u{fffd}'),
+            character => display.push(character),
+        }
+    }
+    display
+}
+
+fn write_dialog_text(
+    snapshot: &mut TerminalSnapshot,
+    start_row: u16,
+    end_row: u16,
+    text: &str,
+    bold: bool,
+    inverse: bool,
+) -> u16 {
+    if snapshot.columns == 0 || start_row >= end_row {
+        return start_row;
+    }
+    let mut column = 0;
+    let mut row = start_row;
+    for character in text.chars() {
+        if row >= end_row {
+            break;
+        }
+        if character == '\n' {
+            column = 0;
+            row = row.saturating_add(1);
+            continue;
+        }
+        if column >= snapshot.columns {
+            column = 0;
+            row = row.saturating_add(1);
+            if row >= end_row {
+                break;
+            }
+        }
+        let index = usize::from(row) * usize::from(snapshot.columns) + usize::from(column);
+        if let Some(cell) = snapshot.cells.get_mut(index) {
+            cell.character = character;
+            cell.bold = bold;
+            cell.inverse = inverse;
+        }
+        column = column.saturating_add(1);
+    }
+    row.saturating_add(1)
+}
+
+fn write_dialog_line(
+    snapshot: &mut TerminalSnapshot,
+    start_column: u16,
+    row: u16,
+    text: &str,
+    inverse: bool,
+) {
+    if row >= snapshot.rows {
+        return;
+    }
+    for (offset, character) in text.chars().enumerate() {
+        let Ok(offset) = u16::try_from(offset) else {
+            break;
+        };
+        let column = start_column.saturating_add(offset);
+        if column >= snapshot.columns {
+            break;
+        }
+        let index = usize::from(row) * usize::from(snapshot.columns) + usize::from(column);
+        if let Some(cell) = snapshot.cells.get_mut(index) {
+            cell.character = character;
+            cell.bold = true;
+            cell.inverse = inverse;
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1664,6 +2108,123 @@ mod tests {
             terminal_input_key(&character("v"), None, ModifiersState::SHIFT)
                 .expect("ordinary text mapping should not fail"),
             Some(b"v".to_vec())
+        );
+        assert_eq!(
+            terminal_input_key(&character("v"), None, ModifiersState::CONTROL)
+                .expect("Ctrl+V ownership should not fail"),
+            None,
+            "Ctrl+V must be owned by the guarded native clipboard adapter"
+        );
+    }
+
+    #[test]
+    fn native_warning_renders_exact_copy_and_canonical_preview() {
+        assert_eq!(MULTILINE_PASTE_WARNING_TITLE, "Warning");
+        assert_eq!(
+            MULTILINE_PASTE_WARNING,
+            "You are about to paste text that contains multiple lines. If you paste this text into your shell, it may result in the unexpected execution of commands. Do you wish to continue?"
+        );
+        assert_eq!(
+            MULTILINE_PASTE_PREVIEW_LABEL,
+            "Clipboard contents (preview):"
+        );
+        assert_eq!(MULTILINE_PASTE_APPROVE_LABEL, "Paste anyway");
+        assert_eq!(MULTILINE_PASTE_CANCEL_LABEL, "Cancel");
+
+        let mut guard = PasteGuard::default();
+        let PasteRequest::ConfirmationRequired(confirmation) = guard
+            .request("99\n100".to_owned())
+            .expect("canonical multiline clipboard should be accepted")
+        else {
+            panic!("canonical multiline clipboard should require confirmation");
+        };
+        let snapshot = paste_dialog_snapshot(120, 36, &confirmation, PasteDialogChoice::Cancel);
+        let text = snapshot.visible_text();
+        assert!(text.contains(MULTILINE_PASTE_WARNING_TITLE));
+        assert!(text.contains("You are about to paste text that contains multiple lines."));
+        assert!(text.contains("Do you wish to continue?"));
+        assert!(text.contains(MULTILINE_PASTE_PREVIEW_LABEL));
+        assert!(text.contains("99\n100"));
+        assert!(text.contains(MULTILINE_PASTE_APPROVE_LABEL));
+        assert!(text.contains(MULTILINE_PASTE_CANCEL_LABEL));
+    }
+
+    #[test]
+    fn native_dialog_defaults_to_cancel_and_requires_explicit_approval_choice() {
+        let mut guard = PasteGuard::default();
+        let PasteRequest::ConfirmationRequired(confirmation) = guard
+            .request("one\ntwo".to_owned())
+            .expect("multiline clipboard should be accepted")
+        else {
+            panic!("multiline clipboard should require confirmation");
+        };
+        let mut dialog = PasteDialog::new(confirmation);
+        assert_eq!(
+            dialog.handle_key(&Key::Named(NamedKey::Enter)),
+            Some(PasteDialogChoice::Cancel)
+        );
+        assert_eq!(dialog.handle_key(&Key::Named(NamedKey::Tab)), None);
+        assert_eq!(dialog.choice, PasteDialogChoice::PasteAnyway);
+        assert_eq!(
+            dialog.handle_key(&Key::Named(NamedKey::Enter)),
+            Some(PasteDialogChoice::PasteAnyway)
+        );
+        assert_eq!(
+            dialog.handle_key(&Key::Named(NamedKey::Escape)),
+            Some(PasteDialogChoice::Cancel)
+        );
+    }
+
+    #[test]
+    fn native_dialog_buttons_have_bounded_hit_regions() {
+        let layout = PasteDialogLayout::for_grid(120, 36);
+        assert_eq!(
+            layout.choice_at(CursorPosition {
+                column: layout.paste_start,
+                row: layout.button_row
+            }),
+            Some(PasteDialogChoice::PasteAnyway)
+        );
+        assert_eq!(
+            layout.choice_at(CursorPosition {
+                column: layout.cancel_start,
+                row: layout.button_row
+            }),
+            Some(PasteDialogChoice::Cancel)
+        );
+        assert_eq!(
+            layout.choice_at(CursorPosition {
+                column: layout.cancel_end,
+                row: layout.button_row
+            }),
+            None
+        );
+        assert_eq!(
+            layout.choice_at(CursorPosition {
+                column: layout.paste_start,
+                row: layout.button_row - 1
+            }),
+            None
+        );
+    }
+
+    #[test]
+    fn right_click_branch_is_selection_aware() {
+        assert_eq!(
+            secondary_click_action(true),
+            SecondaryClickAction::CopySelection
+        );
+        assert_eq!(
+            secondary_click_action(false),
+            SecondaryClickAction::GuardedPaste
+        );
+    }
+
+    #[test]
+    fn clipboard_preview_cannot_inject_terminal_controls() {
+        assert_eq!(
+            display_safe_preview("99\r\n100\t\u{1b}[31m"),
+            "99\n100    �[31m"
         );
     }
 

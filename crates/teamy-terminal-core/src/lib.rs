@@ -10,6 +10,23 @@ use vte::Params;
 use vte::Parser;
 use vte::Perform;
 
+mod paste;
+
+pub use paste::ApprovedPaste;
+pub use paste::MAX_PASTE_BYTES;
+pub use paste::MAX_PASTE_PREVIEW_BYTES;
+pub use paste::MULTILINE_PASTE_APPROVE_LABEL;
+pub use paste::MULTILINE_PASTE_CANCEL_LABEL;
+pub use paste::MULTILINE_PASTE_PREVIEW_LABEL;
+pub use paste::MULTILINE_PASTE_WARNING;
+pub use paste::MULTILINE_PASTE_WARNING_TITLE;
+pub use paste::PasteConfirmation;
+pub use paste::PasteConfirmationError;
+pub use paste::PasteConfirmationId;
+pub use paste::PasteGuard;
+pub use paste::PasteRejection;
+pub use paste::PasteRequest;
+
 /// Conservative limits used by the terminal session.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct TerminalLimits {
