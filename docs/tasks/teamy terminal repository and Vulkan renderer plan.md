@@ -4,7 +4,7 @@
 **Primary implementation root:** G:\Programming\Repos\teamy-terminal (main)
 **Plan authority:** This file on teamy-terminal/main
 **SFM pointer:** D:\Repos\Minecraft\SFM\repos2\1.19.2 (1.19.2)
-**Last updated:** 2026-08-04
+**Last updated:** 2026-08-05
 
 ## How to update this plan
 
@@ -21,8 +21,29 @@ the exact blocker, evidence, and condition that unblocks it. This file is the
 single authoritative plan. Update it in teamy-terminal/main; the SFM document
 is only a pointer and must not duplicate plan content.
 
+## Authoritative selection and paste guidance ledger — 2026-08-05
+
+| ID | Active guidance | Required consequence | Superseded by |
+| --- | --- | --- | --- |
+| TT-SP-1 | SFM mouse drag must mutate Rust-authoritative selection and Java must visibly present it as separate state using its existing highlight behavior. | 3.6.4f activates the existing selection metadata, returns selection state from interactions, and keeps remote base rasters selection-free while native pixels retain their selection styling. | — |
+| TT-SP-2 | Ctrl+C copies/clears an active selection and remains PTY interrupt without one; right click copies/clears or guarded-pastes according to authoritative selection state. | 3.6.4f adds typed copy/no-selection and shared native/Vox interaction behavior. | — |
+| TT-SP-3 | Multiline paste stops before PTY mutation and returns a confirmation-required result suitable for the exact warning/preview/approve/cancel UI. | 3.6.4f adds one bounded guard engine and exact-once bypass semantics. | — |
+| TT-SP-4 | Paste supports supplied versus automatic clipboard bodies while Teamy native and SFM Java retain their own clipboard adapters. | `Auto` is resolved by the invoking UI adapter; headless Vox accepts supplied caller text and never guesses a remote clipboard. | — |
+
+**Intent audit:** Passed 2026-08-05 against the complete selection/copy/paste user-testing message and current core, interactive, raster, Vox, and Facet terminal-contract sources.
+
+### Intent audit evidence
+
+- **Pass 1 — extraction:** Recorded separate selection state, Java highlighting, Ctrl+C branching, right-click branching, exact multiline guard, preview, approval/cancel, supplied/automatic bodies, and separate clipboard owners.
+- **Pass 2 — traceability:** Mapped every entry to 3.6.4f's public contract, core/native service work, Facet/Java generation, tests, and the SFM V-4.2e integration gate.
+- **Pass 3 — adversarial omission:** Verified that remote selection does not require selected pixels or a raster per drag cell, native Teamy keeps visible selection, no-selection Ctrl+C still reaches the shell, and guarded paste performs no write before explicit bypass.
+- **Known source limitation:** None for this follow-up message.
+
 **Next goal-sized vertical slice:** the 3.6.2c and 3.6.4a–3.6.4e Teamy work
-plus SFM V-4.2c is complete. The next candidate is the paired Teamy 3.6.5 and
+plus SFM V-4.2c/V-4.2d is complete. User testing makes Teamy 3.6.4f plus SFM
+V-4.2e the next correctness slice. It restores remote drag selection,
+selection-aware copy/right-click behavior, and collaborative guarded paste
+before comparison work. The following candidate is the paired Teamy 3.6.5 and
 SFM V-4.3/V-4.5 comparison slice: import the Java semantic and raster
 artifacts, compare the Rust CPU, Rust GPU, Java vanilla-font, and Java Nerd
 Font paths at fixed grids and native pixel extents, and produce a durable
@@ -38,8 +59,9 @@ PNG/readback/encoding, Vox transfer, Java PNG decode, Minecraft texture
 allocation/upload, render-thread scheduling, and final presentation must be
 independently observable. The code-level input mapping,
 PTY/Vulkan startup, resize/reflow, large-output responsiveness, profiling
-contract, portable frame encoding, visible-grid selection, and mouse selection
-are complete. The elevated live control-plane gate now
+contract, portable frame encoding, and standalone-window visible-grid/mouse
+selection are complete. Remote Vox selection remains the explicit 3.6.4f
+correction. The elevated live control-plane gate now
 covers prompt/command input, ANSI output, deterministic paste, resize, Ctrl+C
 interruption, Ctrl+A, Ctrl+Backspace, Ctrl+Arrow, Ctrl+Shift navigation,
 alternate-screen restoration, and clean shell close. Selection, copy, zoom,
@@ -1989,6 +2011,85 @@ sizing without Java upscale, and correlated renderer/device/font/shader
 telemetry. The repository quality gate and focused core/font/frame/renderer/
 CLI/Vox suites pass; this closes 3.6.4 without selecting a new default.
 
+#### [ ] 3.6.4f Make selection and paste collaborative client/server state
+
+**Verified foundation:** `TerminalSession` already owns bounded visible-grid
+selection and selected-text extraction; the native winit adapter already
+implements left-drag plus selection-aware Ctrl+C; CPU fontdue and GPU Slug can
+render selection; and Facet's `TerminalSnapshot`/`TerminalRasterFrame` already
+carry `selection_present` and `TerminalSelection`. The bridge defect is that
+Vox `send_mouse` only attempts xterm mouse bytes, advertises selection as
+unsupported, hard-codes every selection field absent, and performs no local
+selection mutation when an ordinary shell has mouse reporting disabled.
+
+**Work — interaction state:** Preserve application mouse reporting when the
+child has enabled it. Otherwise make left press/motion/release use the same
+bounded begin/update/finalize/collapsed-clear semantics as native Teamy and
+return the current Rust-clamped selection plus a typed disposition. Populate
+the existing selection fields in full state for resynchronization. For remote
+pixel presentations, pass a selection-free snapshot into CPU/GPU rasterization
+and retain selection as separate interaction metadata; native Teamy keeps its
+existing blue-background/white-text pixels. A selection-only update must not
+invalidate glyphs, enqueue CPU/GPU raster work, PNG encode, readback, Vox raster
+payload, or Java texture upload. Interaction and raster sequences must let the
+client reject stale state without treating one clock as synchronized.
+
+**Work — copy/paste contract:** Add atomic typed copy with `Copied(text)` and
+`NoSelection`; successful copy clears selection. Add a Java-generator-friendly
+wire equivalent of `Paste{WithGuard(PasteBody),WithoutGuard(PasteBody)}` and
+`PasteBody{Supplied(String),Auto}`. The concrete fields may be
+`GuardMultiline|BypassGuard`, `Supplied|AutomaticCallerClipboard`, and
+`supplied_text`, but the two independent axes must remain visible. `Auto` is
+resolved by the invoking adapter: native Teamy reads its desktop clipboard and
+retains the resolved text while confirmation is pending; SFM/Java supplies its
+own clipboard text. A no-window/headless server never reads a process-global
+clipboard on behalf of a remote caller.
+
+The guard triggers on any CR or LF under the existing 16-KiB input bound,
+returns `ConfirmationRequired` plus a separately bounded preview and content
+identity, and writes no PTY bytes. Bypass writes exactly the previously
+approved body once. Clipboard text is private transient state: never log it or
+put it in ordinary evidence artifacts. Share mutation/extraction/guard logic
+between native and Vox adapters rather than reimplementing policy twice.
+
+**Work — native behavior:** Add secondary-click handling. With selection,
+copy/clear; without selection, resolve the native clipboard and guard paste.
+Ctrl+V uses the same path. Render an in-window confirmation surface containing
+the exact warning copy, bounded preview, `Paste anyway`, and `Cancel`; either
+choice restores terminal input focus. Ctrl+C preserves the current copy when
+selected / PTY interrupt when empty behavior.
+
+**Validation:** Add core tests for reverse/clamped/collapsed selection, exact
+selected text, clear, CR/LF/CRLF guard, no-write confirmation, exact-once
+bypass, size/preview bounds, and privacy-safe diagnostics. Add interactive
+tests for Ctrl+C, right click, Ctrl+V, the canonical `99\n100` warning preview,
+focus/cancel/approve, and automatic clipboard capture. Add Vox tests for ordinary-shell selection,
+mouse-report forwarding, selection response/full-state agreement, copy/no-
+selection, supplied paste, selection-only zero-raster counters, and every
+CPU/GPU × PNG/full-raw/dirty-raw mode. In Facet, update round trips/generated
+Java and run:
+
+```powershell
+cargo run -p vox-xtask -- test-java
+cargo run -p vox-xtask -- package-java
+```
+
+Then update both Teamy lockfiles to the immutable published Facet revision and
+run focused tests plus:
+
+```powershell
+.\check-all.ps1
+```
+
+**Completion criteria:** Native Teamy and the Vox service share one bounded
+selection/copy/paste semantic engine; ordinary remote drag returns immediate
+authoritative selection without rerasterizing unchanged terminal pixels;
+mouse-aware child applications still receive their reports; Ctrl+C and right
+click have the specified branches; multiline paste cannot reach the PTY before
+approval; and SFM V-4.2e can consume one immutable Facet/Teamy boundary. Do not
+start 3.6.5, change the default renderer, modify Teamy Studio or Cloud
+Terrastodon, or publish SFM/release artifacts in this item.
+
 ### [ ] 3.6.5 Produce visual comparisons across every renderer/font pair
 
 **Work:** Build a deterministic comparison command that consumes one fixture
@@ -2290,7 +2391,7 @@ overwritten by baseline code.
 | Windows without Vulkan/GPU | Supported for core/CLI; interactive renderer fails clearly | core/CLI pass; actionable renderer-construction error; no fallback | Invalid Vulkan ICD diagnostic passes; no fallback |
 | Linux/macOS renderer | Not in first support slice | Do not claim support; later portability gate | Pending future phase |
 | SFM Java-local terminal | Required independently of this repo | SFM Java tests and puppet | Tracked in Vox plan |
-| SFM optional Rust/Vox mode | Optional development tooling; CPU/GPU full-PNG/raw/dirty correctness, native sizing, retained resources, push delivery, panel-local selection, and correlated telemetry proven | Phase 3.6.2c/3.6.4 plus SFM V-4.2c renderer matrix | All six Rust pixel tuples and normal/GUI-scale-7 puppets pass; next proof is the Teamy 3.6.5/SFM V-4.3/V-4.5 semantic and visual comparison matrix |
+| SFM optional Rust/Vox mode | Optional development tooling; CPU/GPU full-PNG/raw/dirty correctness, native sizing, retained resources, push delivery, and correlated telemetry proven; remote drag/copy/paste correctness is the open 3.6.4f correction | Phase 3.6.2c/3.6.4 plus SFM V-4.2c renderer matrix, then 3.6.4f/V-4.2e interaction proof | All six Rust pixel tuples and normal/GUI-scale-7 raster puppets pass; remote selection currently remains absent because the server hard-codes it false. Complete 3.6.4f/V-4.2e before the Teamy 3.6.5/SFM V-4.3/V-4.5 comparison matrix. |
 
 ## Overall completion criteria
 
@@ -2305,7 +2406,9 @@ boundaries are complete, while Phase 3.6, the remaining Phase 4 bridge work, and
 5 remain open. The current performance work is audited against the
 multi-second SFM lag witness and cross-renderer matrix, not retroactively folded
 into the already-complete standalone MVP. The live keyboard/control boundary
-and app-owned selection/copy/zoom/visibility boundary are green.
+and standalone app-owned selection/copy/zoom/visibility boundary are green;
+the remote selection/copy/paste boundary is not green until 3.6.4f and SFM
+V-4.2e pass.
 
 - [ ] All phase work items are [x] with local evidence.
 - [ ] A fresh clone passes the workspace quality gate and exposes help/version.
@@ -2347,6 +2450,8 @@ and app-owned selection/copy/zoom/visibility boundary are green.
 | GPU glyph work looks fast internally but readback/encoding erases the gain | Measure GPU execution, readback, encode, transfer, Java upload, and end-to-end presentation separately | Phase 3.6.4–3.6.6 |
 | Cross-font pixel differences create false failures or hide real terminal errors | Pair semantic cell assertions with geometry/color/occupancy and perceptual reports; use exact pixels only where valid | Phase 3.6.5 |
 | Rust and Java monotonic clocks are treated as synchronized | Correlate ids/sequences, transmit local stage durations, and let Java measure its own end-to-end interval | Phase 3.6.1 |
+| Selection-only mouse motion rerasterizes and retransmits multi-megabyte CPU/GPU frames | Keep remote base pixels selection-free; return/push bounded selection state separately; assert unchanged raster/readback/encode/send/upload counters during drag | Phase 3.6.4f / SFM V-4.2e |
+| Clipboard ownership leaks private text or pastes changed/unconfirmed content | Resolve automatic clipboard only in the invoking UI adapter, bound input/preview, never log body/preview, bind bypass to the approved body identity, and prove zero PTY writes before confirmation | Phase 3.6.4f / SFM V-4.2e |
 | Review mistakes a smoke test for runtime wiring | Pair unit/fixture checks with CLI, renderer, and SFM puppet evidence at each boundary | All phases |
 
 The colour-picker bridge remains deferred. The five-crate workspace, PTY smoke,
