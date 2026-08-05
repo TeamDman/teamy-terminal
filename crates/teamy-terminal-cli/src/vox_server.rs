@@ -371,7 +371,7 @@ fn control_physical_key(key_code: u32, modifiers: u32) -> Option<ControlPhysical
     clippy::too_many_arguments,
     reason = "the arguments mirror the stable terminal mouse-input protocol fields"
 )]
-fn mouse_input_bytes(
+pub(crate) fn mouse_input_bytes(
     terminal: &TerminalSession,
     x: u16,
     y: u16,
@@ -3282,6 +3282,86 @@ impl Default for VoxTerminalService {
     }
 }
 
+fn paste_with_guard(
+    session: &mut TerminalSessionState,
+    supplied_text: String,
+) -> Result<(TerminalPasteDisposition, String, String), TerminalError> {
+    match session.paste_guard.request(supplied_text) {
+        Ok(PasteRequest::Ready(approved)) => {
+            session
+                .pty
+                .write_input(approved.text().as_bytes())
+                .map_err(|error| {
+                    VoxTerminalService::error(
+                        TerminalErrorCode::Internal,
+                        error.to_string(),
+                        session.sequence,
+                    )
+                })?;
+            Ok((
+                TerminalPasteDisposition::Pasted,
+                String::new(),
+                String::new(),
+            ))
+        }
+        Ok(PasteRequest::ConfirmationRequired(confirmation)) => Ok((
+            TerminalPasteDisposition::ConfirmationRequired,
+            confirmation.preview().to_string(),
+            confirmation.id().get().to_string(),
+        )),
+        Err(error) => Err(VoxTerminalService::error(
+            TerminalErrorCode::CapacityExceeded,
+            error.to_string(),
+            session.sequence,
+        )),
+    }
+}
+
+fn paste_with_approval(
+    session: &mut TerminalSessionState,
+    supplied_text: &str,
+    approved_content_id: &str,
+) -> Result<(), TerminalError> {
+    let confirmation_id = approved_content_id
+        .parse::<u64>()
+        .ok()
+        .and_then(PasteConfirmationId::from_raw)
+        .ok_or_else(|| {
+            VoxTerminalService::error(
+                TerminalErrorCode::InvalidRequest,
+                "paste bypass requires a valid approved content identity",
+                session.sequence,
+            )
+        })?;
+    let approved = session
+        .paste_guard
+        .approve(confirmation_id)
+        .map_err(|error| {
+            VoxTerminalService::error(
+                TerminalErrorCode::InvalidRequest,
+                error.to_string(),
+                session.sequence,
+            )
+        })?;
+    if approved.text() != supplied_text {
+        return Err(VoxTerminalService::error(
+            TerminalErrorCode::InvalidRequest,
+            "approved paste body changed before confirmation",
+            session.sequence,
+        ));
+    }
+    session
+        .pty
+        .write_input(approved.text().as_bytes())
+        .map_err(|error| {
+            VoxTerminalService::error(
+                TerminalErrorCode::Internal,
+                error.to_string(),
+                session.sequence,
+            )
+        })
+}
+
 impl Terminal for VoxTerminalService {
     async fn connect(
         &self,
@@ -3655,78 +3735,14 @@ impl Terminal for VoxTerminalService {
 
         let (disposition, preview, content_id) = match request.policy {
             TerminalPastePolicy::GuardMultiline => {
-                match session.paste_guard.request(request.supplied_text) {
-                    Ok(PasteRequest::Ready(approved)) => {
-                        session
-                            .pty
-                            .write_input(approved.text().as_bytes())
-                            .map_err(|error| {
-                                Self::error(
-                                    TerminalErrorCode::Internal,
-                                    error.to_string(),
-                                    session.sequence,
-                                )
-                            })?;
-                        (
-                            TerminalPasteDisposition::Pasted,
-                            String::new(),
-                            String::new(),
-                        )
-                    }
-                    Ok(PasteRequest::ConfirmationRequired(confirmation)) => (
-                        TerminalPasteDisposition::ConfirmationRequired,
-                        confirmation.preview().to_string(),
-                        confirmation.id().get().to_string(),
-                    ),
-                    Err(error) => {
-                        return Err(Self::error(
-                            TerminalErrorCode::CapacityExceeded,
-                            error.to_string(),
-                            session.sequence,
-                        ));
-                    }
-                }
+                paste_with_guard(&mut session, request.supplied_text)?
             }
             TerminalPastePolicy::BypassGuard => {
-                let confirmation_id = request
-                    .approved_content_id
-                    .parse::<u64>()
-                    .ok()
-                    .and_then(PasteConfirmationId::from_raw)
-                    .ok_or_else(|| {
-                        Self::error(
-                            TerminalErrorCode::InvalidRequest,
-                            "paste bypass requires a valid approved content identity",
-                            session.sequence,
-                        )
-                    })?;
-                let approved = session
-                    .paste_guard
-                    .approve(confirmation_id)
-                    .map_err(|error| {
-                        Self::error(
-                            TerminalErrorCode::InvalidRequest,
-                            error.to_string(),
-                            session.sequence,
-                        )
-                    })?;
-                if approved.text() != request.supplied_text {
-                    return Err(Self::error(
-                        TerminalErrorCode::InvalidRequest,
-                        "approved paste body changed before confirmation",
-                        session.sequence,
-                    ));
-                }
-                session
-                    .pty
-                    .write_input(approved.text().as_bytes())
-                    .map_err(|error| {
-                        Self::error(
-                            TerminalErrorCode::Internal,
-                            error.to_string(),
-                            session.sequence,
-                        )
-                    })?;
+                paste_with_approval(
+                    &mut session,
+                    &request.supplied_text,
+                    &request.approved_content_id,
+                )?;
                 (
                     TerminalPasteDisposition::Pasted,
                     String::new(),
@@ -4804,6 +4820,24 @@ mod tests {
 
     fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
         test_connect_request_for_surface(endpoint, client_sequence, 80, 24, 800, 480)
+    }
+
+    fn process_terminal_bytes(runtime: &TerminalSessionRuntime, bytes: &[u8]) {
+        runtime
+            .state
+            .lock()
+            .expect("terminal session lock")
+            .terminal
+            .process_bytes(bytes);
+    }
+
+    fn clear_debug_output(runtime: &TerminalSessionRuntime) {
+        runtime
+            .state
+            .lock()
+            .expect("terminal session lock")
+            .debug_output
+            .clear();
     }
 
     fn test_resize_request(
@@ -6707,6 +6741,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test records the complete remote selection and copy transaction"
+    )]
     async fn remote_selection_copy_is_authoritative_without_raster_publication() {
         let service = VoxTerminalService::new();
         let connected = service
@@ -6723,10 +6761,7 @@ mod tests {
         let runtime = service
             .session(&connected.session_id)
             .expect("connected session should be registered");
-        {
-            let mut state = runtime.state.lock().expect("terminal session lock");
-            state.terminal.process_bytes(b"alpha beta");
-        }
+        process_terminal_bytes(&runtime, b"alpha beta");
         let raster_mutations_before = runtime.publication.mutations.load(Ordering::Acquire);
 
         let pressed = service
@@ -6823,6 +6858,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "the test records the complete guarded-paste identity lifecycle"
+    )]
     async fn remote_guarded_paste_requires_exact_single_use_confirmation() {
         let service = VoxTerminalService::new();
         let connected = service
@@ -6867,10 +6906,7 @@ mod tests {
             saw_startup_prompt,
             "PowerShell should emit its startup prompt before paste measurement"
         );
-        {
-            let mut state = runtime.state.lock().expect("terminal session lock");
-            state.debug_output.clear();
-        }
+        clear_debug_output(&runtime);
         let raster_mutations_before = runtime.publication.mutations.load(Ordering::Acquire);
 
         let confirmation = service
@@ -7013,17 +7049,15 @@ mod tests {
             ))
             .await
             .expect("terminal session should connect");
-        {
-            let runtime = service
-                .session(&connected.session_id)
-                .expect("connected session should be registered");
-            runtime
-                .state
-                .lock()
-                .expect("terminal session lock")
-                .terminal
-                .process_bytes(b"\x1b[?1000;1006h");
-        }
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should be registered");
+        runtime
+            .state
+            .lock()
+            .expect("terminal session lock")
+            .terminal
+            .process_bytes(b"\x1b[?1000;1006h");
 
         let forwarded = service
             .send_mouse(TerminalMouseInput {
@@ -7074,6 +7108,18 @@ mod tests {
         assert_eq!(
             mouse_input_bytes(&terminal, 4, 5, 2, 0, true, true, 0, 0),
             b"\x1b[<33;5;6M".to_vec()
+        );
+        assert_eq!(
+            mouse_input_bytes(&terminal, 2, 3, 4, 2, true, false, 0, 0),
+            b"\x1b[<2;3;4M".to_vec()
+        );
+        assert_eq!(
+            mouse_input_bytes(&terminal, 2, 3, 0, 2, false, false, 0, 0),
+            b"\x1b[<3;3;4m".to_vec()
+        );
+        assert_eq!(
+            mouse_input_bytes(&terminal, 2, 3, 0, 0, true, false, 1, 0),
+            b"\x1b[<66;3;4M".to_vec()
         );
     }
 }

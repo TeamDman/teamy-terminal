@@ -1,3 +1,4 @@
+use crate::vox_server::mouse_input_bytes;
 use arboard::Clipboard;
 use eyre::Context;
 use eyre::Result;
@@ -239,6 +240,7 @@ struct InteractiveApplication {
     renderer: Option<VulkanRenderer>,
     modifiers: ModifiersState,
     selecting: bool,
+    pressed_mouse_buttons: u8,
     last_cursor_position: Option<winit::dpi::PhysicalPosition<f64>>,
     paste_guard: PasteGuard,
     paste_dialog: Option<PasteDialog>,
@@ -270,6 +272,7 @@ impl InteractiveApplication {
             renderer: None,
             modifiers: ModifiersState::default(),
             selecting: false,
+            pressed_mouse_buttons: 0,
             last_cursor_position: None,
             paste_guard: PasteGuard::default(),
             paste_dialog: None,
@@ -718,6 +721,62 @@ impl InteractiveApplication {
         session.write_input(approved.text().as_bytes())
     }
 
+    fn forward_child_mouse(
+        &self,
+        button: u8,
+        pressed: bool,
+        motion: bool,
+        wheel_x: i32,
+        wheel_y: i32,
+    ) -> Result<bool> {
+        if !self.terminal.mouse_reporting_enabled() {
+            return Ok(false);
+        }
+        let Some(position) = self.last_cursor_position else {
+            return Ok(true);
+        };
+        let Some(cell) = self.terminal_cell_at(position) else {
+            return Ok(true);
+        };
+        let bytes = mouse_input_bytes(
+            &self.terminal,
+            cell.column,
+            cell.row,
+            self.pressed_mouse_buttons,
+            button,
+            pressed,
+            motion,
+            wheel_x,
+            wheel_y,
+        );
+        if !bytes.is_empty() {
+            let session = self
+                .session
+                .as_ref()
+                .ok_or_else(|| eyre::eyre!("PowerShell session is no longer running"))?;
+            session.write_input(&bytes)?;
+        }
+        Ok(true)
+    }
+
+    fn set_mouse_button_state(&mut self, button: MouseButton, pressed: bool) -> Option<u8> {
+        let button = match button {
+            MouseButton::Left => 0,
+            MouseButton::Middle => 1,
+            MouseButton::Right => 2,
+            MouseButton::Back => 3,
+            MouseButton::Forward => 4,
+            MouseButton::Other(value) => u8::try_from(value).ok()?.min(7),
+        };
+        let mask = 1_u8 << button;
+        if pressed {
+            self.pressed_mouse_buttons |= mask;
+        } else {
+            self.pressed_mouse_buttons &= !mask;
+        }
+        Some(button)
+    }
+
     fn finish_paste_dialog(&mut self, choice: PasteDialogChoice) -> Result<()> {
         let id = self
             .paste_dialog
@@ -1043,6 +1102,39 @@ impl InteractiveApplication {
         }
     }
 
+    fn handle_cursor_moved(
+        &mut self,
+        position: winit::dpi::PhysicalPosition<f64>,
+        event_loop: &ActiveEventLoop,
+    ) {
+        self.last_cursor_position = Some(position);
+        if self.terminal.mouse_reporting_enabled() && self.pressed_mouse_buttons != 0 {
+            self.selecting = false;
+            let button =
+                u8::try_from(self.pressed_mouse_buttons.trailing_zeros().min(7)).unwrap_or(0);
+            if let Err(error) = self.forward_child_mouse(button, true, true, 0, 0) {
+                self.fail(error, event_loop);
+            }
+        } else if self.selecting {
+            self.update_selection_from_position(position);
+        }
+    }
+
+    fn handle_reported_mouse_input(
+        &mut self,
+        state: ElementState,
+        button: MouseButton,
+        event_loop: &ActiveEventLoop,
+    ) {
+        self.selecting = false;
+        let pressed = state == ElementState::Pressed;
+        if let Some(button) = self.set_mouse_button_state(button, pressed)
+            && let Err(error) = self.forward_child_mouse(button, pressed, false, 0, 0)
+        {
+            self.fail(error, event_loop);
+        }
+    }
+
     fn copy_selection(&mut self) -> Result<bool> {
         self.terminal.selected_text().map_or(Ok(false), |text| {
             self.copy_selection_text_for(text).map(|()| true)
@@ -1095,10 +1187,7 @@ impl ApplicationHandler for InteractiveApplication {
             }
             WindowEvent::ModifiersChanged(modifiers) => self.modifiers = modifiers.state(),
             WindowEvent::CursorMoved { position, .. } => {
-                self.last_cursor_position = Some(position);
-                if self.selecting {
-                    self.update_selection_from_position(position);
-                }
+                self.handle_cursor_moved(position, event_loop);
             }
             WindowEvent::MouseInput {
                 state,
@@ -1112,12 +1201,18 @@ impl ApplicationHandler for InteractiveApplication {
                 }
             }
             WindowEvent::MouseInput { .. } if self.paste_dialog.is_some() => {}
+            WindowEvent::MouseInput { state, button, .. }
+                if self.terminal.mouse_reporting_enabled() =>
+            {
+                self.handle_reported_mouse_input(state, button, event_loop);
+            }
             WindowEvent::MouseInput {
                 state,
                 button: MouseButton::Left,
                 ..
             } => match state {
                 ElementState::Pressed => {
+                    self.set_mouse_button_state(MouseButton::Left, true);
                     if let Some(position) = self.last_cursor_position
                         && let Some(cell) = self.terminal_cell_at(position)
                     {
@@ -1127,6 +1222,7 @@ impl ApplicationHandler for InteractiveApplication {
                     }
                 }
                 ElementState::Released => {
+                    self.set_mouse_button_state(MouseButton::Left, false);
                     if self.selecting {
                         if let Some(position) = self.last_cursor_position {
                             self.update_selection_from_position(position);
@@ -1148,14 +1244,28 @@ impl ApplicationHandler for InteractiveApplication {
                 button: MouseButton::Right,
                 ..
             } => {
+                self.set_mouse_button_state(MouseButton::Right, true);
                 if let Err(error) = self.handle_secondary_click() {
                     self.fail(error, event_loop);
                 }
+            }
+            WindowEvent::MouseInput {
+                state: ElementState::Released,
+                button: MouseButton::Right,
+                ..
+            } => {
+                self.set_mouse_button_state(MouseButton::Right, false);
             }
             WindowEvent::MouseWheel { delta, .. } if self.modifiers.control_key() => {
                 if let Some(direction) = wheel_zoom_direction(&delta)
                     && let Err(error) = self.adjust_font_size(direction)
                 {
+                    self.fail(error, event_loop);
+                }
+            }
+            WindowEvent::MouseWheel { delta, .. } if self.terminal.mouse_reporting_enabled() => {
+                let (wheel_x, wheel_y) = mouse_wheel_steps(&delta);
+                if let Err(error) = self.forward_child_mouse(0, true, false, wheel_x, wheel_y) {
                     self.fail(error, event_loop);
                 }
             }
@@ -1222,6 +1332,26 @@ fn wheel_zoom_direction(delta: &MouseScrollDelta) -> Option<f32> {
         Some(-1.0)
     } else {
         None
+    }
+}
+
+fn mouse_wheel_steps(delta: &MouseScrollDelta) -> (i32, i32) {
+    let (horizontal, vertical) = match delta {
+        MouseScrollDelta::LineDelta(horizontal, vertical) => {
+            (f64::from(*horizontal), f64::from(*vertical))
+        }
+        MouseScrollDelta::PixelDelta(position) => (position.x, position.y),
+    };
+    (mouse_wheel_step(horizontal), mouse_wheel_step(vertical))
+}
+
+fn mouse_wheel_step(value: f64) -> i32 {
+    if value > 0.0 {
+        1
+    } else if value < 0.0 {
+        -1
+    } else {
+        0
     }
 }
 
@@ -2262,6 +2392,16 @@ mod tests {
         assert_eq!(
             wheel_zoom_direction(&MouseScrollDelta::LineDelta(0.0, 0.0)),
             None
+        );
+        assert_eq!(
+            mouse_wheel_steps(&MouseScrollDelta::LineDelta(-2.0, 3.0)),
+            (-1, 1)
+        );
+        assert_eq!(
+            mouse_wheel_steps(&MouseScrollDelta::PixelDelta(
+                winit::dpi::PhysicalPosition::new(0.0, -12.0)
+            )),
+            (0, -1)
         );
     }
 
