@@ -19,6 +19,9 @@ use spec_proto::terminal::TerminalConnectRequest;
 use spec_proto::terminal::TerminalConnectResult;
 use spec_proto::terminal::TerminalContentRequest;
 use spec_proto::terminal::TerminalContentResult;
+use spec_proto::terminal::TerminalCopySelectionDisposition;
+use spec_proto::terminal::TerminalCopySelectionRequest;
+use spec_proto::terminal::TerminalCopySelectionResult;
 use spec_proto::terminal::TerminalCursor;
 use spec_proto::terminal::TerminalDisconnectRequest;
 use spec_proto::terminal::TerminalDispatcher;
@@ -28,10 +31,16 @@ use spec_proto::terminal::TerminalFrameEncoding;
 use spec_proto::terminal::TerminalFrameEvent;
 use spec_proto::terminal::TerminalFrameKind;
 use spec_proto::terminal::TerminalFrameOrigin;
+use spec_proto::terminal::TerminalInputDisposition;
 use spec_proto::terminal::TerminalInputResult;
 use spec_proto::terminal::TerminalKeyInput;
 use spec_proto::terminal::TerminalMouseInput;
 use spec_proto::terminal::TerminalOperationResult;
+use spec_proto::terminal::TerminalPasteDisposition;
+use spec_proto::terminal::TerminalPastePolicy;
+use spec_proto::terminal::TerminalPasteRequest;
+use spec_proto::terminal::TerminalPasteResult;
+use spec_proto::terminal::TerminalPasteSource;
 use spec_proto::terminal::TerminalPresentationCapabilitiesRequest;
 use spec_proto::terminal::TerminalPresentationCapabilitiesResult;
 use spec_proto::terminal::TerminalPresentationMode;
@@ -81,6 +90,9 @@ use std::time::Instant;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 use teamy_terminal_control::ControlPhysicalKey;
+use teamy_terminal_core::PasteConfirmationId;
+use teamy_terminal_core::PasteGuard;
+use teamy_terminal_core::PasteRequest;
 use teamy_terminal_core::TerminalLimits;
 use teamy_terminal_core::TerminalSession;
 use teamy_terminal_font::DEFAULT_PIXEL_SIZE;
@@ -581,6 +593,7 @@ struct TerminalSessionState {
     tuning: TerminalTuningMetrics,
     closed: bool,
     debug_output: Vec<u8>,
+    paste_guard: PasteGuard,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -703,6 +716,10 @@ impl TerminalSessionRuntime {
     fn publish_mutation(&self, sequence: i64, full_resync: bool) {
         self.terminal_sequence.store(sequence, Ordering::Release);
         self.publication.publish(sequence, full_resync);
+    }
+
+    fn publish_interaction(&self, sequence: i64) {
+        self.terminal_sequence.store(sequence, Ordering::Release);
     }
 
     fn lease_explicit_render_resources(&self) -> ExplicitRenderResourceLease<'_> {
@@ -2199,6 +2216,7 @@ fn telemetry_usize(value: usize) -> i64 {
 
 struct CapturedTerminal {
     snapshot: teamy_terminal_core::TerminalSnapshot,
+    raster_snapshot: teamy_terminal_core::TerminalSnapshot,
     tuning: TerminalTuningMetrics,
     terminal_sequence: i64,
     mutations: i64,
@@ -2390,7 +2408,7 @@ impl VoxTerminalService {
             mouse_input: true,
             structured_cells: false,
             raster_frames: true,
-            selection: false,
+            selection: true,
             scrollback: true,
             dirty_frames: true,
             max_width: MAX_COLUMNS,
@@ -2911,6 +2929,22 @@ impl VoxTerminalService {
         }
     }
 
+    fn selection_metadata(
+        selection: Option<teamy_terminal_core::SelectionRange>,
+    ) -> (bool, TerminalSelection) {
+        selection.map_or((false, TerminalSelection::default()), |selection| {
+            (
+                true,
+                TerminalSelection {
+                    anchor_x: selection.anchor.column,
+                    anchor_y: selection.anchor.row,
+                    focus_x: selection.focus.column,
+                    focus_y: selection.focus.row,
+                },
+            )
+        })
+    }
+
     fn close_connection_sessions(&self) {
         let removed = self
             .sessions
@@ -2936,8 +2970,12 @@ impl VoxTerminalService {
         runtime: &TerminalSessionRuntime,
     ) -> Result<CapturedTerminal, TerminalError> {
         let state = Self::lock_session(runtime)?;
+        let snapshot = state.terminal.snapshot();
+        let mut raster_snapshot = snapshot.clone();
+        raster_snapshot.selection = None;
         Ok(CapturedTerminal {
-            snapshot: state.terminal.snapshot(),
+            snapshot,
+            raster_snapshot,
             tuning: state.tuning.clone(),
             terminal_sequence: state.sequence,
             mutations: runtime.publication.mutations.load(Ordering::Acquire),
@@ -2959,7 +2997,7 @@ impl VoxTerminalService {
             .resolve_tuning(&request, RasterRenderer::CpuFontdue)
             .map_err(|failure| Self::tuning_error(failure, capture.terminal_sequence))?;
         let encoded = resources
-            .encode_png(&capture.snapshot, &resolved)
+            .encode_png(&capture.raster_snapshot, &resolved)
             .map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
@@ -3006,13 +3044,8 @@ impl VoxTerminalService {
                 y: capture.snapshot.cursor.row,
                 visible: capture.snapshot.cursor_visible,
             },
-            selection_present: false,
-            selection: TerminalSelection {
-                anchor_x: 0,
-                anchor_y: 0,
-                focus_x: 0,
-                focus_y: 0,
-            },
+            selection_present: capture.snapshot.selection.is_some(),
+            selection: Self::selection_metadata(capture.snapshot.selection).1,
             prompt: Self::prompt_metadata(&capture.snapshot.prompt),
             timing: TerminalSnapshotTiming {
                 pty_drain_us: 0,
@@ -3223,13 +3256,8 @@ impl VoxTerminalService {
                 y: capture.snapshot.cursor.row,
                 visible: capture.snapshot.cursor_visible,
             },
-            selection_present: false,
-            selection: TerminalSelection {
-                anchor_x: 0,
-                anchor_y: 0,
-                focus_x: 0,
-                focus_y: 0,
-            },
+            selection_present: capture.snapshot.selection.is_some(),
+            selection: Self::selection_metadata(capture.snapshot.selection).1,
             prompt: Self::prompt_metadata(&capture.snapshot.prompt),
             timing: TerminalRasterSnapshotTiming {
                 pty_drain_us: 0,
@@ -3290,6 +3318,7 @@ impl Terminal for VoxTerminalService {
             tuning,
             closed: false,
             debug_output: Vec::new(),
+            paste_guard: PasteGuard::default(),
         };
         let sequence = state.sequence;
         let connected_surface = state.surface.clone();
@@ -3448,11 +3477,15 @@ impl Terminal for VoxTerminalService {
             )
         })?;
         let sequence = session.sequence;
+        let (selection_present, selection) = Self::selection_metadata(session.terminal.selection());
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
             correlation_id: request.correlation_id,
+            disposition: TerminalInputDisposition::Forwarded,
+            selection_present,
+            selection,
         })
     }
 
@@ -3478,11 +3511,15 @@ impl Terminal for VoxTerminalService {
             })?;
         }
         let sequence = session.sequence;
+        let (selection_present, selection) = Self::selection_metadata(session.terminal.selection());
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
             correlation_id: request.correlation_id,
+            disposition: TerminalInputDisposition::Forwarded,
+            selection_present,
+            selection,
         })
     }
 
@@ -3490,33 +3527,221 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalMouseInput,
     ) -> Result<TerminalInputResult, TerminalError> {
-        let session = self.session(&request.session_id)?;
-        let session = Self::lock_session(&session)?;
-        let bytes = mouse_input_bytes(
-            &session.terminal,
-            request.x,
-            request.y,
-            request.buttons,
-            request.button,
-            request.pressed,
-            request.motion,
-            request.wheel_x,
-            request.wheel_y,
-        );
-        if !bytes.is_empty() {
-            session.pty.write_input(&bytes).map_err(|error| {
-                Self::error(
-                    TerminalErrorCode::Internal,
-                    error.to_string(),
-                    session.sequence,
-                )
-            })?;
+        let runtime = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&runtime)?;
+        let disposition = if session.terminal.mouse_reporting_enabled() {
+            let bytes = mouse_input_bytes(
+                &session.terminal,
+                request.x,
+                request.y,
+                request.buttons,
+                request.button,
+                request.pressed,
+                request.motion,
+                request.wheel_x,
+                request.wheel_y,
+            );
+            if bytes.is_empty() {
+                TerminalInputDisposition::NoChange
+            } else {
+                session.pty.write_input(&bytes).map_err(|error| {
+                    Self::error(
+                        TerminalErrorCode::Internal,
+                        error.to_string(),
+                        session.sequence,
+                    )
+                })?;
+                TerminalInputDisposition::Forwarded
+            }
+        } else {
+            let previous = session.terminal.selection();
+            let position = teamy_terminal_core::CursorPosition {
+                column: request.x,
+                row: request.y,
+            };
+            if request.wheel_x == 0 && request.wheel_y == 0 {
+                if request.motion && request.buttons & 1 != 0 {
+                    session.terminal.update_selection(position);
+                } else if request.button == 0 && request.pressed {
+                    session.terminal.begin_selection(position);
+                } else if request.button == 0
+                    && !request.pressed
+                    && session
+                        .terminal
+                        .selection()
+                        .is_some_and(|selection| selection.anchor == selection.focus)
+                {
+                    session.terminal.clear_selection();
+                }
+            }
+            if session.terminal.selection() == previous {
+                TerminalInputDisposition::NoChange
+            } else {
+                TerminalInputDisposition::SelectionChanged
+            }
+        };
+        let sequence = if disposition == TerminalInputDisposition::SelectionChanged {
+            Self::next_sequence(&mut session.sequence)
+        } else {
+            session.sequence
+        };
+        let (selection_present, selection) = Self::selection_metadata(session.terminal.selection());
+        drop(session);
+        if disposition == TerminalInputDisposition::SelectionChanged {
+            runtime.publish_interaction(sequence);
         }
-        let sequence = session.sequence;
         Ok(TerminalInputResult {
             session_id: request.session_id,
             server_sequence: sequence,
             frame_sequence: sequence,
+            correlation_id: request.correlation_id,
+            disposition,
+            selection_present,
+            selection,
+        })
+    }
+
+    async fn copy_selection(
+        &self,
+        request: TerminalCopySelectionRequest,
+    ) -> Result<TerminalCopySelectionResult, TerminalError> {
+        let runtime = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&runtime)?;
+        let Some(text) = session.terminal.selected_text() else {
+            let sequence = session.sequence;
+            let (selection_present, selection) =
+                Self::selection_metadata(session.terminal.selection());
+            return Ok(TerminalCopySelectionResult {
+                session_id: request.session_id,
+                disposition: TerminalCopySelectionDisposition::NoSelection,
+                text: String::new(),
+                server_sequence: sequence,
+                frame_sequence: sequence,
+                selection_present,
+                selection,
+                correlation_id: request.correlation_id,
+            });
+        };
+        session.terminal.clear_selection();
+        let sequence = Self::next_sequence(&mut session.sequence);
+        let (selection_present, selection) = Self::selection_metadata(session.terminal.selection());
+        drop(session);
+        runtime.publish_interaction(sequence);
+        Ok(TerminalCopySelectionResult {
+            session_id: request.session_id,
+            disposition: TerminalCopySelectionDisposition::Copied,
+            text,
+            server_sequence: sequence,
+            frame_sequence: sequence,
+            selection_present,
+            selection,
+            correlation_id: request.correlation_id,
+        })
+    }
+
+    async fn paste(
+        &self,
+        request: TerminalPasteRequest,
+    ) -> Result<TerminalPasteResult, TerminalError> {
+        let runtime = self.session(&request.session_id)?;
+        let mut session = Self::lock_session(&runtime)?;
+        if request.source != TerminalPasteSource::Supplied {
+            return Err(Self::error(
+                TerminalErrorCode::UnsupportedCapability,
+                "remote terminal paste requires caller-supplied clipboard text",
+                session.sequence,
+            ));
+        }
+
+        let (disposition, preview, content_id) = match request.policy {
+            TerminalPastePolicy::GuardMultiline => {
+                match session.paste_guard.request(request.supplied_text) {
+                    Ok(PasteRequest::Ready(approved)) => {
+                        session
+                            .pty
+                            .write_input(approved.text().as_bytes())
+                            .map_err(|error| {
+                                Self::error(
+                                    TerminalErrorCode::Internal,
+                                    error.to_string(),
+                                    session.sequence,
+                                )
+                            })?;
+                        (
+                            TerminalPasteDisposition::Pasted,
+                            String::new(),
+                            String::new(),
+                        )
+                    }
+                    Ok(PasteRequest::ConfirmationRequired(confirmation)) => (
+                        TerminalPasteDisposition::ConfirmationRequired,
+                        confirmation.preview().to_string(),
+                        confirmation.id().get().to_string(),
+                    ),
+                    Err(error) => {
+                        return Err(Self::error(
+                            TerminalErrorCode::CapacityExceeded,
+                            error.to_string(),
+                            session.sequence,
+                        ));
+                    }
+                }
+            }
+            TerminalPastePolicy::BypassGuard => {
+                let confirmation_id = request
+                    .approved_content_id
+                    .parse::<u64>()
+                    .ok()
+                    .and_then(PasteConfirmationId::from_raw)
+                    .ok_or_else(|| {
+                        Self::error(
+                            TerminalErrorCode::InvalidRequest,
+                            "paste bypass requires a valid approved content identity",
+                            session.sequence,
+                        )
+                    })?;
+                let approved = session
+                    .paste_guard
+                    .approve(confirmation_id)
+                    .map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::InvalidRequest,
+                            error.to_string(),
+                            session.sequence,
+                        )
+                    })?;
+                if approved.text() != request.supplied_text {
+                    return Err(Self::error(
+                        TerminalErrorCode::InvalidRequest,
+                        "approved paste body changed before confirmation",
+                        session.sequence,
+                    ));
+                }
+                session
+                    .pty
+                    .write_input(approved.text().as_bytes())
+                    .map_err(|error| {
+                        Self::error(
+                            TerminalErrorCode::Internal,
+                            error.to_string(),
+                            session.sequence,
+                        )
+                    })?;
+                (
+                    TerminalPasteDisposition::Pasted,
+                    String::new(),
+                    String::new(),
+                )
+            }
+        };
+        let sequence = session.sequence;
+        Ok(TerminalPasteResult {
+            session_id: request.session_id,
+            disposition,
+            server_sequence: sequence,
+            frame_sequence: sequence,
+            preview,
+            content_id,
             correlation_id: request.correlation_id,
         })
     }
@@ -3590,6 +3815,8 @@ impl Terminal for VoxTerminalService {
                 png_buffer_capacity_bytes: resources.png_buffer_capacity_bytes,
                 transport_payload_copies: resources.transport_payload_copies,
             });
+            let (selection_present, selection) =
+                Self::selection_metadata(session.terminal.selection());
             return Ok(TerminalSnapshot {
                 session_id: request.session_id,
                 sequence,
@@ -3618,13 +3845,8 @@ impl Terminal for VoxTerminalService {
                     y: 0,
                     visible: false,
                 },
-                selection_present: false,
-                selection: TerminalSelection {
-                    anchor_x: 0,
-                    anchor_y: 0,
-                    focus_x: 0,
-                    focus_y: 0,
-                },
+                selection_present,
+                selection,
                 prompt: TerminalPromptMetadata {
                     prompt_present: false,
                     prompt: Self::empty_range(),
@@ -3647,6 +3869,8 @@ impl Terminal for VoxTerminalService {
         }
         let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
+        let mut raster_snapshot = terminal_snapshot.clone();
+        raster_snapshot.selection = None;
         let terminal_snapshot_micros = elapsed_micros(terminal_snapshot_started);
         let surface = session.surface.clone();
         let tuning_request =
@@ -3657,7 +3881,7 @@ impl Terminal for VoxTerminalService {
             .resolve_tuning(&tuning_request, RasterRenderer::CpuFontdue)
             .map_err(|failure| Self::tuning_error(failure, sequence))?;
         let encoded = render_resources
-            .encode_png(&terminal_snapshot, &resolved)
+            .encode_png(&raster_snapshot, &resolved)
             .map_err(|error| {
                 Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
             })?;
@@ -3793,13 +4017,8 @@ impl Terminal for VoxTerminalService {
                 y: 0,
                 visible: false,
             },
-            selection_present: false,
-            selection: TerminalSelection {
-                anchor_x: 0,
-                anchor_y: 0,
-                focus_x: 0,
-                focus_y: 0,
-            },
+            selection_present: terminal_snapshot.selection.is_some(),
+            selection: Self::selection_metadata(terminal_snapshot.selection).1,
             prompt: Self::prompt_metadata(&terminal_snapshot.prompt),
             timing: TerminalSnapshotTiming {
                 pty_drain_us: telemetry_i64(pty_drain_micros),
@@ -4125,7 +4344,7 @@ impl Terminal for VoxTerminalService {
             let worker_cancellation = render_cancellation.clone();
             let mut render_worker = tokio::task::spawn_blocking(move || {
                 let result = resources.render_raster_update(
-                    &capture.snapshot,
+                    &capture.raster_snapshot,
                     &capture.tuning.request,
                     presentation,
                     previous_snapshot.as_ref(),
@@ -4163,7 +4382,7 @@ impl Terminal for VoxTerminalService {
             else {
                 last_terminal_sequence = capture.terminal_sequence;
                 last_mutations = capture.mutations;
-                last_delivered_snapshot = Some(capture.snapshot);
+                last_delivered_snapshot = Some(capture.raster_snapshot);
                 first = false;
                 continue;
             };
@@ -4240,7 +4459,7 @@ impl Terminal for VoxTerminalService {
             last_delivered_frame_sequence = next_frame_sequence;
             last_terminal_sequence = capture.terminal_sequence;
             last_mutations = capture.mutations;
-            last_delivered_snapshot = Some(capture.snapshot);
+            last_delivered_snapshot = Some(capture.raster_snapshot);
             first = false;
             if runtime.closed.load(Ordering::Acquire) {
                 break;
@@ -6485,6 +6704,354 @@ mod tests {
             key_input_bytes(GLFW_KEY_ENTER, 0, true, true),
             b"\x1b[13;28;13;1;0;1_"
         );
+    }
+
+    #[tokio::test]
+    async fn remote_selection_copy_is_authoritative_without_raster_publication() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request_for_surface(
+                "remote-selection",
+                1,
+                20,
+                4,
+                240,
+                120,
+            ))
+            .await
+            .expect("terminal session should connect");
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should be registered");
+        {
+            let mut state = runtime.state.lock().expect("terminal session lock");
+            state.terminal.process_bytes(b"alpha beta");
+        }
+        let raster_mutations_before = runtime.publication.mutations.load(Ordering::Acquire);
+
+        let pressed = service
+            .send_mouse(TerminalMouseInput {
+                session_id: connected.session_id.clone(),
+                x: 0,
+                y: 0,
+                buttons: 1,
+                button: 0,
+                pressed: true,
+                motion: false,
+                wheel_x: 0,
+                wheel_y: 0,
+                client_sequence: 2,
+                correlation_id: "selection-press".to_string(),
+            })
+            .await
+            .expect("selection press should succeed");
+        assert_eq!(
+            pressed.disposition,
+            TerminalInputDisposition::SelectionChanged
+        );
+        assert!(pressed.selection_present);
+
+        let dragged = service
+            .send_mouse(TerminalMouseInput {
+                session_id: connected.session_id.clone(),
+                x: 4,
+                y: 0,
+                buttons: 1,
+                button: 0,
+                pressed: true,
+                motion: true,
+                wheel_x: 0,
+                wheel_y: 0,
+                client_sequence: 3,
+                correlation_id: "selection-drag".to_string(),
+            })
+            .await
+            .expect("selection drag should succeed");
+        assert_eq!(
+            dragged.disposition,
+            TerminalInputDisposition::SelectionChanged
+        );
+        assert_eq!(dragged.selection.anchor_x, 0);
+        assert_eq!(dragged.selection.focus_x, 4);
+        assert_eq!(
+            runtime.publication.mutations.load(Ordering::Acquire),
+            raster_mutations_before,
+            "selection-only interaction must not wake the raster publication queue"
+        );
+        let capture = VoxTerminalService::capture_terminal(&runtime)
+            .expect("terminal capture should succeed");
+        assert!(capture.snapshot.selection.is_some());
+        assert!(capture.raster_snapshot.selection.is_none());
+
+        let copied = service
+            .copy_selection(TerminalCopySelectionRequest {
+                session_id: connected.session_id.clone(),
+                client_sequence: 4,
+                correlation_id: "selection-copy".to_string(),
+            })
+            .await
+            .expect("selection copy should succeed");
+        assert_eq!(copied.disposition, TerminalCopySelectionDisposition::Copied);
+        assert_eq!(copied.text, "alpha");
+        assert!(!copied.selection_present);
+        assert_eq!(
+            runtime.publication.mutations.load(Ordering::Acquire),
+            raster_mutations_before,
+            "copy-clear must not rerasterize unchanged glyphs"
+        );
+        let no_selection = service
+            .copy_selection(TerminalCopySelectionRequest {
+                session_id: connected.session_id.clone(),
+                client_sequence: 5,
+                correlation_id: "selection-copy-empty".to_string(),
+            })
+            .await
+            .expect("empty selection copy should be typed");
+        assert_eq!(
+            no_selection.disposition,
+            TerminalCopySelectionDisposition::NoSelection
+        );
+
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "remote selection test complete".to_string(),
+                client_sequence: 6,
+            })
+            .await
+            .expect("terminal session should disconnect");
+    }
+
+    #[tokio::test]
+    async fn remote_guarded_paste_requires_exact_single_use_confirmation() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request_for_surface(
+                "remote-paste",
+                1,
+                20,
+                4,
+                240,
+                120,
+            ))
+            .await
+            .expect("terminal session should connect");
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("connected session should be registered");
+        let mut previous_output_len = 0;
+        let mut saw_startup_prompt = false;
+        let mut quiet_intervals = 0;
+        for _ in 0..200 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+            let (current_output_len, has_prompt) = {
+                let state = runtime.state.lock().expect("terminal session lock");
+                let output = String::from_utf8_lossy(&state.debug_output);
+                (
+                    state.debug_output.len(),
+                    output.contains("PS ") || output.contains('❯'),
+                )
+            };
+            saw_startup_prompt |= has_prompt;
+            if saw_startup_prompt && current_output_len == previous_output_len {
+                quiet_intervals += 1;
+                if quiet_intervals >= 10 {
+                    break;
+                }
+            } else {
+                quiet_intervals = 0;
+            }
+            previous_output_len = current_output_len;
+        }
+        assert!(
+            saw_startup_prompt,
+            "PowerShell should emit its startup prompt before paste measurement"
+        );
+        {
+            let mut state = runtime.state.lock().expect("terminal session lock");
+            state.debug_output.clear();
+        }
+        let raster_mutations_before = runtime.publication.mutations.load(Ordering::Acquire);
+
+        let confirmation = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::GuardMultiline,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "99\n100".to_string(),
+                approved_content_id: String::new(),
+                client_sequence: 2,
+                correlation_id: "paste-guard".to_string(),
+            })
+            .await
+            .expect("multiline paste should request confirmation");
+        assert_eq!(
+            confirmation.disposition,
+            TerminalPasteDisposition::ConfirmationRequired
+        );
+        assert_eq!(confirmation.preview, "99\n100");
+        assert!(!confirmation.content_id.is_empty());
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        assert!(
+            runtime
+                .state
+                .lock()
+                .expect("terminal session lock")
+                .debug_output
+                .is_empty(),
+            "guarded multiline paste must not reach the PTY before approval"
+        );
+        assert_eq!(
+            runtime.publication.mutations.load(Ordering::Acquire),
+            raster_mutations_before,
+            "requesting confirmation must not publish a raster mutation"
+        );
+
+        let approved = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::BypassGuard,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "99\n100".to_string(),
+                approved_content_id: confirmation.content_id.clone(),
+                client_sequence: 3,
+                correlation_id: "paste-approve".to_string(),
+            })
+            .await
+            .expect("exact paste approval should succeed");
+        assert_eq!(approved.disposition, TerminalPasteDisposition::Pasted);
+        let reused = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::BypassGuard,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "99\n100".to_string(),
+                approved_content_id: confirmation.content_id,
+                client_sequence: 4,
+                correlation_id: "paste-reuse".to_string(),
+            })
+            .await;
+        assert!(reused.is_err(), "confirmation identity must be single-use");
+
+        let changed_confirmation = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::GuardMultiline,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "first\nsecond".to_string(),
+                approved_content_id: String::new(),
+                client_sequence: 5,
+                correlation_id: "paste-changed-guard".to_string(),
+            })
+            .await
+            .expect("second multiline paste should request confirmation");
+        let changed_body = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::BypassGuard,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "first\nchanged".to_string(),
+                approved_content_id: changed_confirmation.content_id.clone(),
+                client_sequence: 6,
+                correlation_id: "paste-changed-reject".to_string(),
+            })
+            .await;
+        assert!(changed_body.is_err(), "changed paste body must be rejected");
+        let changed_retry = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::BypassGuard,
+                source: TerminalPasteSource::Supplied,
+                supplied_text: "first\nsecond".to_string(),
+                approved_content_id: changed_confirmation.content_id,
+                client_sequence: 7,
+                correlation_id: "paste-changed-retry".to_string(),
+            })
+            .await;
+        assert!(
+            changed_retry.is_err(),
+            "a changed-body attempt must invalidate the pending approval"
+        );
+
+        let automatic = service
+            .paste(TerminalPasteRequest {
+                session_id: connected.session_id.clone(),
+                policy: TerminalPastePolicy::GuardMultiline,
+                source: TerminalPasteSource::AutomaticCallerClipboard,
+                supplied_text: String::new(),
+                approved_content_id: String::new(),
+                client_sequence: 8,
+                correlation_id: "paste-automatic".to_string(),
+            })
+            .await;
+        assert!(
+            automatic.is_err(),
+            "the remote service cannot read the caller's clipboard"
+        );
+
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "remote paste test complete".to_string(),
+                client_sequence: 9,
+            })
+            .await
+            .expect("terminal session should disconnect");
+    }
+
+    #[tokio::test]
+    async fn remote_mouse_reporting_takes_precedence_over_shell_selection() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request_for_surface(
+                "remote-mouse-reporting",
+                1,
+                20,
+                4,
+                240,
+                120,
+            ))
+            .await
+            .expect("terminal session should connect");
+        {
+            let runtime = service
+                .session(&connected.session_id)
+                .expect("connected session should be registered");
+            runtime
+                .state
+                .lock()
+                .expect("terminal session lock")
+                .terminal
+                .process_bytes(b"\x1b[?1000;1006h");
+        }
+
+        let forwarded = service
+            .send_mouse(TerminalMouseInput {
+                session_id: connected.session_id.clone(),
+                x: 2,
+                y: 1,
+                buttons: 1,
+                button: 0,
+                pressed: true,
+                motion: false,
+                wheel_x: 0,
+                wheel_y: 0,
+                client_sequence: 2,
+                correlation_id: "mouse-reporting".to_string(),
+            })
+            .await
+            .expect("mouse reporting input should be forwarded");
+        assert_eq!(forwarded.disposition, TerminalInputDisposition::Forwarded);
+        assert!(!forwarded.selection_present);
+
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "remote mouse reporting test complete".to_string(),
+                client_sequence: 3,
+            })
+            .await
+            .expect("terminal session should disconnect");
     }
 
     #[test]
