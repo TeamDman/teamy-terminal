@@ -57,6 +57,13 @@ use spec_proto::terminal::TerminalState;
 use spec_proto::terminal::TerminalSubscribeRequest;
 use spec_proto::terminal::TerminalSurfaceMetrics;
 use spec_proto::terminal::TerminalTextInput;
+use spec_proto::terminal::TerminalTuningAdjustments;
+use spec_proto::terminal::TerminalTuningAxis;
+use spec_proto::terminal::TerminalTuningMetrics;
+use spec_proto::terminal::TerminalTuningMode;
+use spec_proto::terminal::TerminalTuningRejection;
+use spec_proto::terminal::TerminalTuningRejectionReason;
+use spec_proto::terminal::TerminalTuningRequest;
 use std::collections::BTreeMap;
 use std::io::Cursor;
 use std::sync::Arc;
@@ -120,7 +127,7 @@ const MAX_PIXEL_HEIGHT: u16 = 4096;
 // slightly shorter than the minimum interactive-window font would allow.  A
 // bridge renderer therefore has a lower fitting floor than the user-facing
 // standalone zoom control; impossible sub-cell targets are still rejected.
-const MIN_FONT_PIXEL_SIZE: f32 = 1.0;
+const MIN_FONT_PIXEL_SIZE: f32 = 8.0;
 const MAX_FONT_PIXEL_SIZE: f32 = 64.0;
 const MAX_CACHED_FONT_SIZES: usize = 4;
 const SESSION_ACTOR_CAPACITY: usize = 64;
@@ -158,6 +165,22 @@ fn rounded_font_pixel_size(pixel_size: f32) -> Result<u16> {
         ));
     }
     Ok(rounded as u16)
+}
+
+#[expect(
+    clippy::cast_precision_loss,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "the finite rounded milli-pixel value is range-checked immediately before conversion"
+)]
+fn font_pixel_size_milli(pixel_size: f32) -> Result<u32> {
+    let milli = (pixel_size * 1_000.0).round();
+    if !milli.is_finite() || !(0.0..=u32::MAX as f32).contains(&milli) {
+        return Err(eyre::eyre!(
+            "font pixel size {pixel_size} cannot be represented in milli-pixels"
+        ));
+    }
+    Ok(milli as u32)
 }
 
 fn max_dirty_regions() -> u16 {
@@ -490,6 +513,8 @@ impl GpuRendererRegistry {
                 message: error.message.clone(),
                 retryable: error.retryable,
                 server_sequence,
+                tuning_rejection_present: false,
+                tuning_rejection: TerminalTuningRejection::default(),
             }),
         }
     }
@@ -538,6 +563,8 @@ impl GpuRendererRegistry {
             message: cached.message,
             retryable: cached.retryable,
             server_sequence,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
         })
     }
 }
@@ -551,6 +578,7 @@ struct TerminalSessionState {
     terminal: TerminalSession,
     sequence: i64,
     surface: TerminalSurfaceMetrics,
+    tuning: TerminalTuningMetrics,
     closed: bool,
     debug_output: Vec<u8>,
 }
@@ -677,19 +705,16 @@ impl TerminalSessionRuntime {
         self.publication.publish(sequence, full_resync);
     }
 
-    fn take_explicit_render_resources(&self) -> TerminalRenderResources {
-        self.explicit_render_resources
+    fn lease_explicit_render_resources(&self) -> ExplicitRenderResourceLease<'_> {
+        let resources = self
+            .explicit_render_resources
             .lock()
             .ok()
             .and_then(|mut resources| resources.take())
-            .unwrap_or_default()
-    }
-
-    fn return_explicit_render_resources(&self, resources: TerminalRenderResources) {
-        if let Ok(mut slot) = self.explicit_render_resources.lock()
-            && slot.is_none()
-        {
-            *slot = Some(resources);
+            .unwrap_or_default();
+        ExplicitRenderResourceLease {
+            runtime: self,
+            resources: Some(resources),
         }
     }
 
@@ -750,6 +775,42 @@ impl TerminalSessionRuntime {
         let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
         if let Ok(state) = self.state.lock() {
             let _ = state.pty.kill();
+        }
+    }
+}
+
+struct ExplicitRenderResourceLease<'a> {
+    runtime: &'a TerminalSessionRuntime,
+    resources: Option<TerminalRenderResources>,
+}
+
+impl std::ops::Deref for ExplicitRenderResourceLease<'_> {
+    type Target = TerminalRenderResources;
+
+    fn deref(&self) -> &Self::Target {
+        self.resources
+            .as_ref()
+            .expect("explicit render resource lease must contain resources")
+    }
+}
+
+impl std::ops::DerefMut for ExplicitRenderResourceLease<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.resources
+            .as_mut()
+            .expect("explicit render resource lease must contain resources")
+    }
+}
+
+impl Drop for ExplicitRenderResourceLease<'_> {
+    fn drop(&mut self) {
+        let Some(resources) = self.resources.take() else {
+            return;
+        };
+        if let Ok(mut slot) = self.runtime.explicit_render_resources.lock()
+            && slot.is_none()
+        {
+            *slot = Some(resources);
         }
     }
 }
@@ -962,7 +1023,39 @@ impl TerminalRenderResources {
         rows: u16,
         requested_pixel_width: u16,
         requested_pixel_height: u16,
+        requested_font_pixel_size: u16,
     ) -> Result<(usize, f32)> {
+        if requested_font_pixel_size != 0 {
+            let pixel_size = f32::from(requested_font_pixel_size);
+            if !(MIN_FONT_PIXEL_SIZE..=MAX_FONT_PIXEL_SIZE).contains(&pixel_size) {
+                return Err(eyre::eyre!(
+                    "exact font pixel size {requested_font_pixel_size} is outside {}..={}",
+                    MIN_FONT_PIXEL_SIZE,
+                    MAX_FONT_PIXEL_SIZE
+                ));
+            }
+            let font_index = self.ensure_font(pixel_size)?;
+            let font = &self.fonts[font_index].font;
+            let width = u32::from(columns).saturating_mul(font.cell_width());
+            let height = u32::from(rows).saturating_mul(font.cell_height());
+            let target_width = if requested_pixel_width == 0 {
+                width
+            } else {
+                u32::from(requested_pixel_width)
+            };
+            let target_height = if requested_pixel_height == 0 {
+                height
+            } else {
+                u32::from(requested_pixel_height)
+            };
+            if width <= target_width && height <= target_height {
+                return Ok((font_index, pixel_size));
+            }
+            return Err(eyre::eyre!(
+                "exact font {requested_font_pixel_size}px produces {width}x{height} for grid {columns}x{rows}, which cannot fit panel {target_width}x{target_height}"
+            ));
+        }
+
         let default_font_index = self.ensure_font(DEFAULT_PIXEL_SIZE)?;
         let default_font = &self.fonts[default_font_index].font;
         let default_width = u32::from(columns).saturating_mul(default_font.cell_width());
@@ -1010,6 +1103,313 @@ impl TerminalRenderResources {
         ))
     }
 
+    #[expect(
+        clippy::too_many_lines,
+        reason = "typed renderer-specific tuning validation is intentionally kept in one auditable decision path"
+    )]
+    fn resolve_tuning(
+        &mut self,
+        request: &TerminalTuningRequest,
+        renderer: RasterRenderer,
+    ) -> std::result::Result<ResolvedTerminalTuning, TerminalTuningFailure> {
+        if request.renderer_id != renderer.renderer_id() {
+            return Err(TerminalTuningFailure::new(
+                request,
+                TerminalTuningAxis::Renderer,
+                TerminalTuningRejectionReason::InvalidModeValue,
+                format!(
+                    "terminal tuning renderer {} does not match selected renderer {}",
+                    request.renderer_id,
+                    renderer.renderer_id()
+                ),
+            ));
+        }
+
+        let mut adjustments = TerminalTuningAdjustments::default();
+        let (surface_width, surface_height) = match request.surface_mode {
+            TerminalTuningMode::Auto => {
+                let width = if request.surface_width == 0 {
+                    0
+                } else {
+                    let clamped = request.surface_width.min(MAX_PIXEL_WIDTH);
+                    adjustments.surface_width_clamped = clamped != request.surface_width;
+                    clamped
+                };
+                let height = if request.surface_height == 0 {
+                    0
+                } else {
+                    let clamped = request.surface_height.min(MAX_PIXEL_HEIGHT);
+                    adjustments.surface_height_clamped = clamped != request.surface_height;
+                    clamped
+                };
+                (width, height)
+            }
+            TerminalTuningMode::Manual => {
+                if request.surface_width == 0
+                    || request.surface_height == 0
+                    || request.surface_width > MAX_PIXEL_WIDTH
+                    || request.surface_height > MAX_PIXEL_HEIGHT
+                {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Surface,
+                        TerminalTuningRejectionReason::OutOfRange,
+                        format!(
+                            "manual terminal surface {}x{} is outside 1..={} by 1..={}",
+                            request.surface_width,
+                            request.surface_height,
+                            MAX_PIXEL_WIDTH,
+                            MAX_PIXEL_HEIGHT
+                        ),
+                    ));
+                }
+                (request.surface_width, request.surface_height)
+            }
+        };
+
+        let (columns, rows) = match request.cells_mode {
+            TerminalTuningMode::Auto => {
+                let columns = request.columns.clamp(1, MAX_COLUMNS);
+                let rows = request.rows.clamp(1, MAX_ROWS);
+                adjustments.columns_clamped = columns != request.columns;
+                adjustments.rows_clamped = rows != request.rows;
+                (columns, rows)
+            }
+            TerminalTuningMode::Manual => {
+                if request.columns == 0
+                    || request.rows == 0
+                    || request.columns > MAX_COLUMNS
+                    || request.rows > MAX_ROWS
+                {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Cells,
+                        TerminalTuningRejectionReason::OutOfRange,
+                        format!(
+                            "manual terminal grid {}x{} is outside 1..={} by 1..={}",
+                            request.columns, request.rows, MAX_COLUMNS, MAX_ROWS
+                        ),
+                    ));
+                }
+                (request.columns, request.rows)
+            }
+        };
+
+        let requested_font_pixel_size = match request.font_mode {
+            TerminalTuningMode::Auto => {
+                if request.font_pixel_size != 0 {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Font,
+                        TerminalTuningRejectionReason::InvalidModeValue,
+                        "auto terminal font mode requires font_pixel_size=0",
+                    ));
+                }
+                0
+            }
+            TerminalTuningMode::Manual => {
+                let pixel_size = f32::from(request.font_pixel_size);
+                if !(MIN_FONT_PIXEL_SIZE..=MAX_FONT_PIXEL_SIZE).contains(&pixel_size) {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Font,
+                        TerminalTuningRejectionReason::OutOfRange,
+                        format!(
+                            "manual terminal font {}px is outside {}..={}",
+                            request.font_pixel_size, MIN_FONT_PIXEL_SIZE, MAX_FONT_PIXEL_SIZE
+                        ),
+                    ));
+                }
+                request.font_pixel_size
+            }
+        };
+
+        let (font_pixel_size, cell_width, cell_height, raster_width, raster_height) = match renderer
+        {
+            RasterRenderer::CpuFontdue => {
+                let (font_index, font_pixel_size) = self
+                    .fit_font(
+                        columns,
+                        rows,
+                        surface_width,
+                        surface_height,
+                        requested_font_pixel_size,
+                    )
+                    .map_err(|error| {
+                        TerminalTuningFailure::new(
+                            request,
+                            TerminalTuningAxis::Combination,
+                            TerminalTuningRejectionReason::OverConstrained,
+                            error.to_string(),
+                        )
+                    })?;
+                let font = &self.fonts[font_index].font;
+                let cell_width = font.cell_width();
+                let cell_height = font.cell_height();
+                (
+                    font_pixel_size,
+                    cell_width,
+                    cell_height,
+                    u32::from(columns).saturating_mul(cell_width),
+                    u32::from(rows).saturating_mul(cell_height),
+                )
+            }
+            RasterRenderer::GpuSlug => {
+                let runtime = self.gpu_runtime.as_ref().ok_or_else(|| {
+                    TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Renderer,
+                        TerminalTuningRejectionReason::RendererUnavailable,
+                        format!("cached {GPU_RENDERER_ID} runtime is unavailable"),
+                    )
+                })?;
+                let metrics = if requested_font_pixel_size == 0 {
+                    runtime.fit_surface_metrics(
+                        columns,
+                        rows,
+                        u32::from(surface_width),
+                        u32::from(surface_height),
+                    )
+                } else {
+                    runtime.surface_metrics(f32::from(requested_font_pixel_size))
+                }
+                .map_err(|error| {
+                    TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Combination,
+                        TerminalTuningRejectionReason::OverConstrained,
+                        error.to_string(),
+                    )
+                })?;
+                if metrics.font_pixel_size < MIN_FONT_PIXEL_SIZE {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Combination,
+                        TerminalTuningRejectionReason::OverConstrained,
+                        format!(
+                            "logical terminal grid {columns}x{rows} requires a GPU font below the shared {MIN_FONT_PIXEL_SIZE}px floor"
+                        ),
+                    ));
+                }
+                let raster_width = metrics.native_width(columns);
+                let raster_height = metrics.native_height(rows);
+                let target_width = if surface_width == 0 {
+                    raster_width
+                } else {
+                    u32::from(surface_width)
+                };
+                let target_height = if surface_height == 0 {
+                    raster_height
+                } else {
+                    u32::from(surface_height)
+                };
+                if raster_width > target_width || raster_height > target_height {
+                    return Err(TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Combination,
+                        TerminalTuningRejectionReason::OverConstrained,
+                        format!(
+                            "exact GPU font {}px produces {raster_width}x{raster_height} for grid {columns}x{rows}, which cannot fit surface {target_width}x{target_height}",
+                            metrics.font_pixel_size
+                        ),
+                    ));
+                }
+                (
+                    metrics.font_pixel_size,
+                    metrics.cell_width,
+                    metrics.cell_height,
+                    raster_width,
+                    raster_height,
+                )
+            }
+        };
+
+        let effective_surface_width = if surface_width == 0 {
+            raster_width
+        } else {
+            u32::from(surface_width)
+        };
+        let effective_surface_height = if surface_height == 0 {
+            raster_height
+        } else {
+            u32::from(surface_height)
+        };
+        adjustments.font_clamped = request.font_mode == TerminalTuningMode::Auto
+            && (font_pixel_size - MAX_FONT_PIXEL_SIZE).abs() < f32::EPSILON;
+        let metrics = TerminalTuningMetrics {
+            request: request.clone(),
+            surface_width: u16::try_from(effective_surface_width).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Surface,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            surface_height: u16::try_from(effective_surface_height).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Surface,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            columns,
+            rows,
+            cell_width: u16::try_from(cell_width).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Font,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            cell_height: u16::try_from(cell_height).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Font,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            effective_font_pixel_size_milli: font_pixel_size_milli(font_pixel_size).map_err(
+                |error| {
+                    TerminalTuningFailure::new(
+                        request,
+                        TerminalTuningAxis::Font,
+                        TerminalTuningRejectionReason::OutOfRange,
+                        error.to_string(),
+                    )
+                },
+            )?,
+            raster_width: u16::try_from(raster_width).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Combination,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            raster_height: u16::try_from(raster_height).map_err(|error| {
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Combination,
+                    TerminalTuningRejectionReason::OutOfRange,
+                    error.to_string(),
+                )
+            })?,
+            remainder_width: u16::try_from(effective_surface_width.saturating_sub(raster_width))
+                .unwrap_or(u16::MAX),
+            remainder_height: u16::try_from(effective_surface_height.saturating_sub(raster_height))
+                .unwrap_or(u16::MAX),
+            adjustments,
+        };
+        Ok(ResolvedTerminalTuning {
+            metrics,
+            font_pixel_size,
+        })
+    }
+
     fn snapshot_stats(&self) -> TerminalRenderResourceStats {
         let (
             glyph_cache_hits,
@@ -1053,27 +1453,37 @@ impl TerminalRenderResources {
     fn encode_png(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
-        requested_pixel_width: u16,
-        requested_pixel_height: u16,
+        resolved: &ResolvedTerminalTuning,
     ) -> Result<EncodedPng> {
+        if snapshot.columns != resolved.metrics.columns || snapshot.rows != resolved.metrics.rows {
+            return Err(eyre::eyre!(
+                "terminal snapshot grid {}x{} does not match resolved tuning grid {}x{}",
+                snapshot.columns,
+                snapshot.rows,
+                resolved.metrics.columns,
+                resolved.metrics.rows
+            ));
+        }
         let font_started = Instant::now();
         let constructions_before = self.stats.font_renderer_constructions;
-        let (font_index, font_pixel_size) = self.fit_font(
-            snapshot.columns,
-            snapshot.rows,
-            requested_pixel_width,
-            requested_pixel_height,
-        )?;
+        let font_index = self.ensure_font(resolved.font_pixel_size)?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
             elapsed_micros(font_started)
         } else {
             0
         };
         let font = &self.fonts[font_index].font;
-        let width = u32::from(snapshot.columns).saturating_mul(font.cell_width());
-        let height = u32::from(snapshot.rows).saturating_mul(font.cell_height());
+        let width = u32::from(resolved.metrics.raster_width);
+        let height = u32::from(resolved.metrics.raster_height);
         let cell_width = font.cell_width();
         let cell_height = font.cell_height();
+        if u16::try_from(cell_width)? != resolved.metrics.cell_width
+            || u16::try_from(cell_height)? != resolved.metrics.cell_height
+        {
+            return Err(eyre::eyre!(
+                "CPU font metrics changed after terminal tuning was accepted"
+            ));
+        }
 
         let raster_started = Instant::now();
         let frame_capacity_before = self.frame.pixels.capacity();
@@ -1117,7 +1527,8 @@ impl TerminalRenderResources {
             png_encode_micros,
             cell_width: u16::try_from(cell_width)?,
             cell_height: u16::try_from(cell_height)?,
-            font_pixel_size: rounded_font_pixel_size(font_pixel_size)?,
+            font_pixel_size: rounded_font_pixel_size(resolved.font_pixel_size)?,
+            tuning: resolved.metrics.clone(),
             resource_stats: self.snapshot_stats(),
         })
     }
@@ -1129,8 +1540,7 @@ impl TerminalRenderResources {
     fn render_raster_update(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
-        requested_pixel_width: u16,
-        requested_pixel_height: u16,
+        tuning_request: &TerminalTuningRequest,
         presentation: RasterPresentation,
         previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
         frame_sequence: u64,
@@ -1140,11 +1550,14 @@ impl TerminalRenderResources {
         gpu_identity: GpuSlugRenderIdentity,
         gpu_cancellation: Option<&VulkanOffscreenCancellation>,
     ) -> Result<Option<RenderedRasterUpdate>> {
+        let request = tuning_request_for_renderer(tuning_request, presentation.renderer);
+        let resolved = self
+            .resolve_tuning(&request, presentation.renderer)
+            .map_err(eyre::Report::new)?;
         match presentation.renderer {
             RasterRenderer::CpuFontdue => self.render_cpu_raster_update(
                 snapshot,
-                requested_pixel_width,
-                requested_pixel_height,
+                &resolved,
                 presentation.transport,
                 previous_snapshot,
                 frame_sequence,
@@ -1154,8 +1567,7 @@ impl TerminalRenderResources {
             ),
             RasterRenderer::GpuSlug => self.render_gpu_raster_update(
                 snapshot,
-                requested_pixel_width,
-                requested_pixel_height,
+                &resolved,
                 presentation.transport,
                 previous_snapshot,
                 frame_sequence,
@@ -1176,8 +1588,7 @@ impl TerminalRenderResources {
     fn render_cpu_raster_update(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
-        requested_pixel_width: u16,
-        requested_pixel_height: u16,
+        resolved: &ResolvedTerminalTuning,
         transport: RasterTransport,
         previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
         frame_sequence: u64,
@@ -1185,14 +1596,18 @@ impl TerminalRenderResources {
         force_full: bool,
         max_regions: u16,
     ) -> Result<Option<RenderedRasterUpdate>> {
+        if snapshot.columns != resolved.metrics.columns || snapshot.rows != resolved.metrics.rows {
+            return Err(eyre::eyre!(
+                "terminal snapshot grid {}x{} does not match resolved CPU tuning grid {}x{}",
+                snapshot.columns,
+                snapshot.rows,
+                resolved.metrics.columns,
+                resolved.metrics.rows
+            ));
+        }
         let font_started = Instant::now();
         let constructions_before = self.stats.font_renderer_constructions;
-        let (font_index, font_pixel_size) = self.fit_font(
-            snapshot.columns,
-            snapshot.rows,
-            requested_pixel_width,
-            requested_pixel_height,
-        )?;
+        let font_index = self.ensure_font(resolved.font_pixel_size)?;
         let font_load_micros = if self.stats.font_renderer_constructions > constructions_before {
             elapsed_micros(font_started)
         } else {
@@ -1201,8 +1616,15 @@ impl TerminalRenderResources {
         let font = &self.fonts[font_index].font;
         let cell_width = font.cell_width();
         let cell_height = font.cell_height();
-        let width = u32::from(snapshot.columns).saturating_mul(cell_width);
-        let height = u32::from(snapshot.rows).saturating_mul(cell_height);
+        if u16::try_from(cell_width)? != resolved.metrics.cell_width
+            || u16::try_from(cell_height)? != resolved.metrics.cell_height
+        {
+            return Err(eyre::eyre!(
+                "CPU font metrics changed after terminal tuning was resolved"
+            ));
+        }
+        let width = u32::from(resolved.metrics.raster_width);
+        let height = u32::from(resolved.metrics.raster_height);
         let dimensions_changed = self.frame.width != width || self.frame.height != height;
         let damage_started = Instant::now();
         let (cell_regions, damage_forces_full) =
@@ -1305,9 +1727,7 @@ impl TerminalRenderResources {
         Ok(Some(RenderedRasterUpdate {
             update,
             full_recovery,
-            cell_width: u16::try_from(cell_width)?,
-            cell_height: u16::try_from(cell_height)?,
-            font_pixel_size: rounded_font_pixel_size(font_pixel_size)?,
+            tuning: resolved.metrics.clone(),
             font_load_micros,
             damage_micros,
             raster_micros,
@@ -1326,8 +1746,7 @@ impl TerminalRenderResources {
     fn render_gpu_raster_update(
         &mut self,
         snapshot: &teamy_terminal_core::TerminalSnapshot,
-        requested_pixel_width: u16,
-        requested_pixel_height: u16,
+        resolved: &ResolvedTerminalTuning,
         transport: RasterTransport,
         previous_snapshot: Option<&teamy_terminal_core::TerminalSnapshot>,
         frame_sequence: u64,
@@ -1337,18 +1756,17 @@ impl TerminalRenderResources {
         gpu_identity: GpuSlugRenderIdentity,
         gpu_cancellation: Option<&VulkanOffscreenCancellation>,
     ) -> Result<Option<RenderedRasterUpdate>> {
-        let runtime = self
-            .gpu_runtime
-            .clone()
-            .ok_or_else(|| eyre::eyre!("cached {GPU_RENDERER_ID} runtime is unavailable"))?;
-        let metrics = runtime.fit_surface_metrics(
-            snapshot.columns,
-            snapshot.rows,
-            u32::from(requested_pixel_width),
-            u32::from(requested_pixel_height),
-        )?;
-        let width = metrics.native_width(snapshot.columns);
-        let height = metrics.native_height(snapshot.rows);
+        if snapshot.columns != resolved.metrics.columns || snapshot.rows != resolved.metrics.rows {
+            return Err(eyre::eyre!(
+                "terminal snapshot grid {}x{} does not match resolved GPU tuning grid {}x{}",
+                snapshot.columns,
+                snapshot.rows,
+                resolved.metrics.columns,
+                resolved.metrics.rows
+            ));
+        }
+        let width = u32::from(resolved.metrics.raster_width);
+        let height = u32::from(resolved.metrics.raster_height);
         let dimensions_changed = self.gpu_surface != Some((width, height));
         let damage_started = Instant::now();
         let (cell_regions, damage_forces_full) =
@@ -1376,7 +1794,7 @@ impl TerminalRenderResources {
             snapshot,
             width,
             height,
-            font_pixel_size: metrics.font_pixel_size,
+            font_pixel_size: resolved.font_pixel_size,
             damage: if render_full { &[] } else { &cell_regions },
             force_full_refresh: render_full,
             identity: gpu_identity,
@@ -1395,6 +1813,16 @@ impl TerminalRenderResources {
             device.queue_family_index
         );
         let gpu_frame = gpu_renderer.render(request)?;
+        if gpu_frame.width != width
+            || gpu_frame.height != height
+            || u16::try_from(gpu_frame.metrics.cell_width)? != resolved.metrics.cell_width
+            || u16::try_from(gpu_frame.metrics.cell_height)? != resolved.metrics.cell_height
+            || gpu_frame.metrics.font_pixel_size.to_bits() != resolved.font_pixel_size.to_bits()
+        {
+            return Err(eyre::eyre!(
+                "GPU renderer metrics changed after terminal tuning was resolved"
+            ));
+        }
         self.gpu_surface = Some((width, height));
         let readback_bytes = gpu_frame.full_rgba.as_ref().map_or_else(
             || {
@@ -1490,9 +1918,7 @@ impl TerminalRenderResources {
         Ok(Some(RenderedRasterUpdate {
             update,
             full_recovery,
-            cell_width: u16::try_from(metrics.cell_width)?,
-            cell_height: u16::try_from(metrics.cell_height)?,
-            font_pixel_size: rounded_font_pixel_size(metrics.font_pixel_size)?,
+            tuning: resolved.metrics.clone(),
             font_load_micros: render_stats
                 .outline_extraction_us
                 .saturating_add(render_stats.directional_band_build_us),
@@ -1517,6 +1943,7 @@ struct EncodedPng {
     cell_width: u16,
     cell_height: u16,
     font_pixel_size: u16,
+    tuning: TerminalTuningMetrics,
     resource_stats: TerminalRenderResourceStats,
 }
 
@@ -1551,6 +1978,91 @@ impl RasterRenderer {
                 server_sequence,
             )),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct ResolvedTerminalTuning {
+    metrics: TerminalTuningMetrics,
+    font_pixel_size: f32,
+}
+
+#[derive(Clone, Debug)]
+struct TerminalTuningFailure {
+    message: String,
+    rejection: TerminalTuningRejection,
+}
+
+impl TerminalTuningFailure {
+    fn new(
+        request: &TerminalTuningRequest,
+        axis: TerminalTuningAxis,
+        reason: TerminalTuningRejectionReason,
+        message: impl Into<String>,
+    ) -> Self {
+        Self {
+            message: message.into(),
+            rejection: TerminalTuningRejection {
+                axis,
+                reason,
+                request: request.clone(),
+            },
+        }
+    }
+}
+
+impl std::fmt::Display for TerminalTuningFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for TerminalTuningFailure {}
+
+fn legacy_tuning_request(
+    surface: &TerminalSurfaceMetrics,
+    columns: u16,
+    rows: u16,
+    renderer: RasterRenderer,
+) -> TerminalTuningRequest {
+    TerminalTuningRequest {
+        renderer_id: renderer.renderer_id().to_string(),
+        surface_mode: TerminalTuningMode::Auto,
+        surface_width: surface.panel_width,
+        surface_height: surface.panel_height,
+        font_mode: if surface.font_pixel_size == 0 {
+            TerminalTuningMode::Auto
+        } else {
+            TerminalTuningMode::Manual
+        },
+        font_pixel_size: surface.font_pixel_size,
+        cells_mode: TerminalTuningMode::Auto,
+        columns,
+        rows,
+    }
+}
+
+fn tuning_request_for_renderer(
+    request: &TerminalTuningRequest,
+    renderer: RasterRenderer,
+) -> TerminalTuningRequest {
+    let mut request = request.clone();
+    request.renderer_id = renderer.renderer_id().to_string();
+    request
+}
+
+fn legacy_surface_metrics(metrics: &TerminalTuningMetrics) -> TerminalSurfaceMetrics {
+    TerminalSurfaceMetrics {
+        columns: metrics.columns,
+        rows: metrics.rows,
+        panel_width: metrics.surface_width,
+        panel_height: metrics.surface_height,
+        cell_width: metrics.cell_width,
+        cell_height: metrics.cell_height,
+        font_pixel_size: u16::try_from(
+            metrics.effective_font_pixel_size_milli.saturating_add(500) / 1_000,
+        )
+        .unwrap_or(u16::MAX),
     }
 }
 
@@ -1656,9 +2168,7 @@ impl RasterPresentation {
 struct RenderedRasterUpdate {
     update: RasterFrameUpdate,
     full_recovery: bool,
-    cell_width: u16,
-    cell_height: u16,
-    font_pixel_size: u16,
+    tuning: TerminalTuningMetrics,
     font_load_micros: u64,
     damage_micros: u64,
     raster_micros: u64,
@@ -1689,7 +2199,7 @@ fn telemetry_usize(value: usize) -> i64 {
 
 struct CapturedTerminal {
     snapshot: teamy_terminal_core::TerminalSnapshot,
-    surface: TerminalSurfaceMetrics,
+    tuning: TerminalTuningMetrics,
     terminal_sequence: i64,
     mutations: i64,
 }
@@ -1969,6 +2479,8 @@ impl VoxTerminalService {
                     message: error.message,
                     retryable: error.retryable,
                     server_sequence,
+                    tuning_rejection_present: false,
+                    tuning_rejection: TerminalTuningRejection::default(),
                 };
                 (
                     Self::presentation_modes(false),
@@ -1992,10 +2504,32 @@ impl VoxTerminalService {
                 TerminalErrorCode::Internal | TerminalErrorCode::Cancelled
             ),
             server_sequence: sequence,
+            tuning_rejection_present: false,
+            tuning_rejection: TerminalTuningRejection::default(),
+        }
+    }
+
+    fn tuning_error(failure: TerminalTuningFailure, sequence: i64) -> TerminalError {
+        let code = if failure.rejection.reason == TerminalTuningRejectionReason::RendererUnavailable
+        {
+            TerminalErrorCode::UnsupportedCapability
+        } else {
+            TerminalErrorCode::InvalidRequest
+        };
+        TerminalError {
+            code,
+            message: failure.message,
+            retryable: false,
+            server_sequence: sequence,
+            tuning_rejection_present: true,
+            tuning_rejection: failure.rejection,
         }
     }
 
     fn raster_render_error(&self, error: &eyre::Report, server_sequence: i64) -> TerminalError {
+        if let Some(failure) = error.downcast_ref::<TerminalTuningFailure>() {
+            return Self::tuning_error(failure.clone(), server_sequence);
+        }
         if let Some(device_lost) = self
             .gpu_registry
             .retire_on_device_loss(error, server_sequence)
@@ -2114,6 +2648,133 @@ impl VoxTerminalService {
             ));
         }
         Ok(())
+    }
+
+    fn normalize_tuning_request(
+        tuning_present: bool,
+        tuning: &TerminalTuningRequest,
+        width: u16,
+        height: u16,
+        surface: &TerminalSurfaceMetrics,
+        server_sequence: i64,
+    ) -> Result<TerminalTuningRequest, TerminalError> {
+        if !tuning_present {
+            Self::validate_dimensions(width, height)?;
+            Self::validate_pixel_dimensions(surface.panel_width, surface.panel_height)?;
+            return Ok(legacy_tuning_request(
+                surface,
+                width,
+                height,
+                RasterRenderer::CpuFontdue,
+            ));
+        }
+
+        if width != tuning.columns || height != tuning.rows {
+            return Err(Self::tuning_error(
+                TerminalTuningFailure::new(
+                    tuning,
+                    TerminalTuningAxis::Cells,
+                    TerminalTuningRejectionReason::InvalidModeValue,
+                    format!(
+                        "typed terminal grid {}x{} conflicts with compatibility dimensions {width}x{height}",
+                        tuning.columns, tuning.rows
+                    ),
+                ),
+                server_sequence,
+            ));
+        }
+        if surface.panel_width != tuning.surface_width
+            || surface.panel_height != tuning.surface_height
+        {
+            return Err(Self::tuning_error(
+                TerminalTuningFailure::new(
+                    tuning,
+                    TerminalTuningAxis::Surface,
+                    TerminalTuningRejectionReason::InvalidModeValue,
+                    format!(
+                        "typed terminal surface {}x{} conflicts with compatibility panel {}x{}",
+                        tuning.surface_width,
+                        tuning.surface_height,
+                        surface.panel_width,
+                        surface.panel_height
+                    ),
+                ),
+                server_sequence,
+            ));
+        }
+        Ok(tuning.clone())
+    }
+
+    fn tuning_renderer(
+        &self,
+        request: &TerminalTuningRequest,
+        server_sequence: i64,
+    ) -> Result<RasterRenderer, TerminalError> {
+        match request.renderer_id.as_str() {
+            CPU_RENDERER_ID => Ok(RasterRenderer::CpuFontdue),
+            GPU_RENDERER_ID => self
+                .gpu_registry
+                .runtime(server_sequence)
+                .map(|_| RasterRenderer::GpuSlug)
+                .map_err(|error| {
+                    Self::tuning_error(
+                        TerminalTuningFailure::new(
+                            request,
+                            TerminalTuningAxis::Renderer,
+                            TerminalTuningRejectionReason::RendererUnavailable,
+                            error.message,
+                        ),
+                        server_sequence,
+                    )
+                }),
+            unsupported => Err(Self::tuning_error(
+                TerminalTuningFailure::new(
+                    request,
+                    TerminalTuningAxis::Renderer,
+                    TerminalTuningRejectionReason::RendererUnavailable,
+                    format!("unsupported terminal renderer: {unsupported}"),
+                ),
+                server_sequence,
+            )),
+        }
+    }
+
+    fn prepare_tuning_resources(
+        &self,
+        resources: &mut TerminalRenderResources,
+        renderer: RasterRenderer,
+        request: &TerminalTuningRequest,
+        server_sequence: i64,
+    ) -> Result<(), TerminalError> {
+        if renderer == RasterRenderer::GpuSlug && resources.gpu_runtime.is_none() {
+            resources.gpu_runtime = Some(self.gpu_registry.runtime(server_sequence).map_err(
+                |error| {
+                    Self::tuning_error(
+                        TerminalTuningFailure::new(
+                            request,
+                            TerminalTuningAxis::Renderer,
+                            TerminalTuningRejectionReason::RendererUnavailable,
+                            error.message,
+                        ),
+                        server_sequence,
+                    )
+                },
+            )?);
+        }
+        Ok(())
+    }
+
+    fn resolve_tuning_request(
+        &self,
+        resources: &mut TerminalRenderResources,
+        request: &TerminalTuningRequest,
+        server_sequence: i64,
+    ) -> Result<ResolvedTerminalTuning, TerminalError> {
+        let renderer = self.tuning_renderer(request, server_sequence)?;
+        self.prepare_tuning_resources(resources, renderer, request, server_sequence)?;
+        resources
+            .resolve_tuning(request, renderer)
+            .map_err(|failure| Self::tuning_error(failure, server_sequence))
     }
 
     fn process_pty_event(runtime: &TerminalSessionRuntime, event: PtyEvent) {
@@ -2277,7 +2938,7 @@ impl VoxTerminalService {
         let state = Self::lock_session(runtime)?;
         Ok(CapturedTerminal {
             snapshot: state.terminal.snapshot(),
-            surface: state.surface.clone(),
+            tuning: state.tuning.clone(),
             terminal_sequence: state.sequence,
             mutations: runtime.publication.mutations.load(Ordering::Acquire),
         })
@@ -2292,12 +2953,13 @@ impl VoxTerminalService {
         max_frame_bytes: u32,
     ) -> Result<TerminalSnapshot, TerminalError> {
         let started = Instant::now();
+        let request =
+            tuning_request_for_renderer(&capture.tuning.request, RasterRenderer::CpuFontdue);
+        let resolved = resources
+            .resolve_tuning(&request, RasterRenderer::CpuFontdue)
+            .map_err(|failure| Self::tuning_error(failure, capture.terminal_sequence))?;
         let encoded = resources
-            .encode_png(
-                &capture.snapshot,
-                capture.surface.panel_width,
-                capture.surface.panel_height,
-            )
+            .encode_png(&capture.snapshot, &resolved)
             .map_err(|error| {
                 Self::error(
                     TerminalErrorCode::Internal,
@@ -2324,8 +2986,8 @@ impl VoxTerminalService {
             logical_rows: capture.snapshot.rows,
             width,
             height,
-            panel_width: capture.surface.panel_width,
-            panel_height: capture.surface.panel_height,
+            panel_width: encoded.tuning.surface_width,
+            panel_height: encoded.tuning.surface_height,
             cell_width: encoded.cell_width,
             cell_height: encoded.cell_height,
             font_pixel_size: encoded.font_pixel_size,
@@ -2360,6 +3022,8 @@ impl VoxTerminalService {
                 png_encode_us: i64::try_from(encoded.png_encode_micros).unwrap_or(i64::MAX),
                 total_us,
             },
+            tuning_present: true,
+            tuning: encoded.tuning,
         })
     }
 
@@ -2466,6 +3130,8 @@ impl VoxTerminalService {
         total_us: i64,
     ) -> Result<TerminalRasterFrame, TerminalError> {
         let renderer_telemetry = Self::raster_renderer_telemetry(&rendered);
+        let tuning = rendered.tuning.clone();
+        let surface = legacy_surface_metrics(&tuning);
         let descriptor = rendered.update.descriptor;
         let encoding = match descriptor.compression {
             FrameCompression::Raw => TerminalFrameEncoding::Rgba8,
@@ -2532,15 +3198,7 @@ impl VoxTerminalService {
                     capture.terminal_sequence,
                 )
             })?,
-            surface: TerminalSurfaceMetrics {
-                columns: capture.snapshot.columns,
-                rows: capture.snapshot.rows,
-                panel_width: capture.surface.panel_width,
-                panel_height: capture.surface.panel_height,
-                cell_width: rendered.cell_width,
-                cell_height: rendered.cell_height,
-                font_pixel_size: rendered.font_pixel_size,
-            },
+            surface,
             encoding,
             kind,
             // Encoded PNG bytes do not expose a row stride. The decoded
@@ -2584,6 +3242,8 @@ impl VoxTerminalService {
                 total_us,
             },
             renderer: renderer_telemetry,
+            tuning_present: true,
+            tuning,
         })
     }
 }
@@ -2599,40 +3259,41 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalConnectRequest,
     ) -> Result<TerminalConnectResult, TerminalError> {
-        Self::validate_dimensions(request.requested_width, request.requested_height)?;
-        Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
+        let tuning_request = Self::normalize_tuning_request(
+            request.tuning_present,
+            &request.tuning,
+            request.requested_width,
+            request.requested_height,
+            &request.surface,
+            0,
+        )?;
+        let mut render_resources = TerminalRenderResources::default();
+        let resolved = self.resolve_tuning_request(&mut render_resources, &tuning_request, 0)?;
+        let width = resolved.metrics.columns;
+        let height = resolved.metrics.rows;
+        let surface = legacy_surface_metrics(&resolved.metrics);
+        let tuning = resolved.metrics;
         let epoch_sequence = NEXT_SESSION_EPOCH.fetch_add(1, Ordering::Relaxed);
         let session_id = format!("sfm-terminal-{epoch_sequence}");
         let session_epoch: Arc<str> =
             Arc::from(format!("{}:session:{epoch_sequence}", self.process_epoch));
         let pty = PtySession::spawn(&PtyConfig::interactive())
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        pty.resize(request.requested_width, request.requested_height, 0, 0)
+        pty.resize(width, height, 0, 0)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         let (pty, events) = pty.split();
-        let surface = TerminalSurfaceMetrics {
-            columns: request.requested_width,
-            rows: request.requested_height,
-            panel_width: request.surface.panel_width,
-            panel_height: request.surface.panel_height,
-            cell_width: 0,
-            cell_height: 0,
-            font_pixel_size: 0,
-        };
         let state = TerminalSessionState {
             pty,
-            terminal: TerminalSession::new(
-                TerminalLimits::default(),
-                request.requested_width,
-                request.requested_height,
-            ),
+            terminal: TerminalSession::new(TerminalLimits::default(), width, height),
             sequence: 1,
             surface,
+            tuning,
             closed: false,
             debug_output: Vec::new(),
         };
         let sequence = state.sequence;
         let connected_surface = state.surface.clone();
+        let connected_tuning = state.tuning.clone();
         let (actor_sender, actor_receiver) = mpsc::sync_channel(SESSION_ACTOR_CAPACITY);
         let runtime = Arc::new(TerminalSessionRuntime {
             session_id: session_id.clone(),
@@ -2642,7 +3303,7 @@ impl Terminal for VoxTerminalService {
             gpu_registry: Arc::clone(&self.gpu_registry),
             state: Mutex::new(state),
             publication: PublicationHub::new(),
-            explicit_render_resources: Mutex::new(Some(TerminalRenderResources::default())),
+            explicit_render_resources: Mutex::new(Some(render_resources)),
             raster_render_resources: Mutex::new(Vec::with_capacity(
                 MAX_CONCURRENT_RASTER_PRESENTATIONS_PER_SESSION,
             )),
@@ -2672,6 +3333,8 @@ impl Terminal for VoxTerminalService {
             server_sequence: sequence,
             state: TerminalState::Ready,
             correlation_id: request.correlation_id,
+            tuning_present: true,
+            tuning: connected_tuning,
         })
     }
 
@@ -2710,39 +3373,56 @@ impl Terminal for VoxTerminalService {
         &self,
         request: TerminalResizeRequest,
     ) -> Result<TerminalResizeResult, TerminalError> {
-        Self::validate_dimensions(request.width, request.height)?;
-        Self::validate_pixel_dimensions(request.surface.panel_width, request.surface.panel_height)?;
         let runtime = self.session(&request.session_id)?;
+        let current_sequence = runtime.sequence();
+        let tuning_request = Self::normalize_tuning_request(
+            request.tuning_present,
+            &request.tuning,
+            request.width,
+            request.height,
+            &request.surface,
+            current_sequence,
+        )?;
+        let mut resources = runtime.lease_explicit_render_resources();
+        let resolved =
+            self.resolve_tuning_request(&mut resources, &tuning_request, current_sequence)?;
+        let width = resolved.metrics.columns;
+        let height = resolved.metrics.rows;
+        let surface = legacy_surface_metrics(&resolved.metrics);
+        let tuning = resolved.metrics;
         let mut session = Self::lock_session(&runtime)?;
-        session.surface.columns = request.width;
-        session.surface.rows = request.height;
-        session.surface.panel_width = request.surface.panel_width;
-        session.surface.panel_height = request.surface.panel_height;
-        session.surface.cell_width = request.surface.cell_width;
-        session.surface.cell_height = request.surface.cell_height;
-        session.surface.font_pixel_size = request.surface.font_pixel_size;
-        session
-            .pty
-            .resize(request.width, request.height, 0, 0)
-            .map_err(|error| {
-                Self::error(
-                    TerminalErrorCode::Internal,
-                    error.to_string(),
-                    session.sequence,
-                )
-            })?;
-        session.terminal.resize(request.width, request.height);
+        session.pty.resize(width, height, 0, 0).map_err(|error| {
+            Self::error(
+                TerminalErrorCode::Internal,
+                error.to_string(),
+                session.sequence,
+            )
+        })?;
+        session.terminal.resize(width, height);
+        session.surface = surface.clone();
+        session.tuning = tuning.clone();
         let sequence = Self::next_sequence(&mut session.sequence);
-        let surface = session.surface.clone();
         drop(session);
         runtime.publish_mutation(sequence, true);
+        tracing::info!(
+            session_id = %request.session_id,
+            sequence,
+            columns = width,
+            rows = height,
+            surface_width = surface.panel_width,
+            surface_height = surface.panel_height,
+            font_pixel_size = surface.font_pixel_size,
+            "terminal resize applied and raster mutation published"
+        );
         Ok(TerminalResizeResult {
             session_id: request.session_id,
-            width: request.width,
-            height: request.height,
+            width,
+            height,
             surface,
             server_sequence: sequence,
             correlation_id: request.correlation_id,
+            tuning_present: true,
+            tuning,
         })
     }
 
@@ -2855,6 +3535,7 @@ impl Terminal for VoxTerminalService {
         let pty_drain_micros = 0;
         let sequence = session.sequence;
         if request.after_sequence > 0 && request.after_sequence >= sequence {
+            let tuning = session.tuning.clone();
             let snapshot_total_micros = elapsed_micros(snapshot_started);
             let resources = runtime.explicit_render_resource_stats();
             tracing::debug!(
@@ -2960,21 +3641,26 @@ impl Terminal for VoxTerminalService {
                     png_encode_us: 0,
                     total_us: telemetry_i64(snapshot_total_micros),
                 },
+                tuning_present: true,
+                tuning,
             });
         }
         let terminal_snapshot_started = Instant::now();
         let terminal_snapshot = session.terminal.snapshot();
         let terminal_snapshot_micros = elapsed_micros(terminal_snapshot_started);
         let surface = session.surface.clone();
-        let panel_width = surface.panel_width;
-        let panel_height = surface.panel_height;
+        let tuning_request =
+            tuning_request_for_renderer(&session.tuning.request, RasterRenderer::CpuFontdue);
         drop(session);
-        let mut render_resources = runtime.take_explicit_render_resources();
-        let encoded = render_resources.encode_png(&terminal_snapshot, panel_width, panel_height);
-        runtime.return_explicit_render_resources(render_resources);
-        let encoded = encoded.map_err(|error| {
-            Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
-        })?;
+        let mut render_resources = runtime.lease_explicit_render_resources();
+        let resolved = render_resources
+            .resolve_tuning(&tuning_request, RasterRenderer::CpuFontdue)
+            .map_err(|failure| Self::tuning_error(failure, sequence))?;
+        let encoded = render_resources
+            .encode_png(&terminal_snapshot, &resolved)
+            .map_err(|error| {
+                Self::error(TerminalErrorCode::Internal, error.to_string(), sequence)
+            })?;
         let EncodedPng {
             width,
             height,
@@ -2986,6 +3672,7 @@ impl Terminal for VoxTerminalService {
             cell_width,
             cell_height,
             font_pixel_size,
+            tuning,
             resource_stats,
         } = encoded;
         let max_bytes = request.max_frame_bytes.min(MAX_FRAME_BYTES);
@@ -3122,6 +3809,8 @@ impl Terminal for VoxTerminalService {
                 png_encode_us: telemetry_i64(png_encode_micros),
                 total_us: telemetry_i64(snapshot_total_micros),
             },
+            tuning_present: true,
+            tuning,
         })
     }
 
@@ -3424,8 +4113,6 @@ impl Terminal for VoxTerminalService {
             } else {
                 last_delivered_frame_sequence
             };
-            let panel_width = capture.surface.panel_width;
-            let panel_height = capture.surface.panel_height;
             let gpu_identity = GpuSlugRenderIdentity {
                 session_sequence: runtime.session_sequence,
                 terminal_sequence: u64::try_from(capture.terminal_sequence).unwrap_or(u64::MAX),
@@ -3439,8 +4126,7 @@ impl Terminal for VoxTerminalService {
             let mut render_worker = tokio::task::spawn_blocking(move || {
                 let result = resources.render_raster_update(
                     &capture.snapshot,
-                    panel_width,
-                    panel_height,
+                    &capture.tuning.request,
                     presentation,
                     previous_snapshot.as_ref(),
                     u64::try_from(next_frame_sequence).unwrap_or(u64::MAX),
@@ -3767,18 +4453,114 @@ mod tests {
         facet_json::from_str(json.get()).expect("pushed raster frame test JSON should decode")
     }
 
-    fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
+    fn test_tuning_request(
+        columns: u16,
+        rows: u16,
+        surface_width: u16,
+        surface_height: u16,
+        font_pixel_size: u16,
+        renderer: RasterRenderer,
+    ) -> TerminalTuningRequest {
+        TerminalTuningRequest {
+            renderer_id: renderer.renderer_id().to_string(),
+            surface_mode: TerminalTuningMode::Auto,
+            surface_width,
+            surface_height,
+            font_mode: if font_pixel_size == 0 {
+                TerminalTuningMode::Auto
+            } else {
+                TerminalTuningMode::Manual
+            },
+            font_pixel_size,
+            cells_mode: TerminalTuningMode::Auto,
+            columns,
+            rows,
+        }
+    }
+
+    fn test_snapshot_tuning_request(
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        surface_width: u16,
+        surface_height: u16,
+        font_pixel_size: u16,
+        renderer: RasterRenderer,
+    ) -> TerminalTuningRequest {
+        test_tuning_request(
+            snapshot.columns,
+            snapshot.rows,
+            surface_width,
+            surface_height,
+            font_pixel_size,
+            renderer,
+        )
+    }
+
+    fn test_encode_cpu_png(
+        resources: &mut TerminalRenderResources,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        surface_width: u16,
+        surface_height: u16,
+        font_pixel_size: u16,
+    ) -> Result<EncodedPng> {
+        let resolved = test_resolve_tuning(
+            resources,
+            snapshot,
+            surface_width,
+            surface_height,
+            font_pixel_size,
+            RasterRenderer::CpuFontdue,
+        )?;
+        resources.encode_png(snapshot, &resolved)
+    }
+
+    fn test_resolve_tuning(
+        resources: &mut TerminalRenderResources,
+        snapshot: &teamy_terminal_core::TerminalSnapshot,
+        surface_width: u16,
+        surface_height: u16,
+        font_pixel_size: u16,
+        renderer: RasterRenderer,
+    ) -> Result<ResolvedTerminalTuning> {
+        let request = test_snapshot_tuning_request(
+            snapshot,
+            surface_width,
+            surface_height,
+            font_pixel_size,
+            renderer,
+        );
+        resources
+            .resolve_tuning(&request, renderer)
+            .map_err(eyre::Report::new)
+    }
+
+    fn test_connect_request_for_surface(
+        endpoint: &str,
+        client_sequence: i64,
+        columns: u16,
+        rows: u16,
+        panel_width: u16,
+        panel_height: u16,
+    ) -> TerminalConnectRequest {
+        let surface = TerminalSurfaceMetrics {
+            columns,
+            rows,
+            panel_width,
+            panel_height,
+            ..TerminalSurfaceMetrics::default()
+        };
+        let tuning = test_tuning_request(
+            columns,
+            rows,
+            panel_width,
+            panel_height,
+            0,
+            RasterRenderer::CpuFontdue,
+        );
         TerminalConnectRequest {
             endpoint: endpoint.to_string(),
-            requested_width: 80,
-            requested_height: 24,
-            surface: TerminalSurfaceMetrics {
-                columns: 80,
-                rows: 24,
-                panel_width: 800,
-                panel_height: 480,
-                ..TerminalSurfaceMetrics::default()
-            },
+            requested_width: columns,
+            requested_height: rows,
+            surface,
             capabilities: TerminalCapabilities {
                 text_input: true,
                 key_input: true,
@@ -3796,6 +4578,38 @@ mod tests {
             },
             client_sequence,
             correlation_id: format!("connect-{client_sequence}"),
+            tuning_present: true,
+            tuning,
+        }
+    }
+
+    fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
+        test_connect_request_for_surface(endpoint, client_sequence, 80, 24, 800, 480)
+    }
+
+    fn test_resize_request(
+        session_id: &str,
+        surface: TerminalSurfaceMetrics,
+        client_sequence: i64,
+        correlation_id: &str,
+    ) -> TerminalResizeRequest {
+        let tuning = test_tuning_request(
+            surface.columns,
+            surface.rows,
+            surface.panel_width,
+            surface.panel_height,
+            surface.font_pixel_size,
+            RasterRenderer::CpuFontdue,
+        );
+        TerminalResizeRequest {
+            session_id: session_id.to_string(),
+            width: surface.columns,
+            height: surface.rows,
+            surface,
+            client_sequence,
+            correlation_id: correlation_id.to_string(),
+            tuning_present: true,
+            tuning,
         }
     }
 
@@ -3991,6 +4805,8 @@ mod tests {
         let mut terminal = TerminalSession::new(TerminalLimits::default(), 12, 3);
         terminal.process_bytes(b"\x1b[?25l\x1b[1;36mhello\x1b[0m");
         let initial_snapshot = terminal.snapshot();
+        let gpu_tuning =
+            test_snapshot_tuning_request(&initial_snapshot, 0, 0, 0, RasterRenderer::GpuSlug);
 
         for (frame_sequence, transport) in [
             RasterTransport::FullPng,
@@ -4005,8 +4821,7 @@ mod tests {
             let rendered = resources
                 .render_raster_update(
                     &initial_snapshot,
-                    0,
-                    0,
+                    &gpu_tuning,
                     RasterPresentation {
                         renderer: RasterRenderer::GpuSlug,
                         transport,
@@ -4025,9 +4840,9 @@ mod tests {
                 .update
                 .validate()
                 .expect("valid GPU frame contract");
-            assert!(rendered.cell_width > 0);
-            assert!(rendered.cell_height > 0);
-            assert!(rendered.font_pixel_size > 0);
+            assert!(rendered.tuning.cell_width > 0);
+            assert!(rendered.tuning.cell_height > 0);
+            assert!(rendered.tuning.effective_font_pixel_size_milli > 0);
             let evidence = rendered
                 .gpu_evidence
                 .as_ref()
@@ -4084,8 +4899,7 @@ mod tests {
         let initial = resources
             .render_raster_update(
                 &initial_snapshot,
-                0,
-                0,
+                &gpu_tuning,
                 dirty_presentation,
                 None,
                 40,
@@ -4105,8 +4919,7 @@ mod tests {
         let dirty = resources
             .render_raster_update(
                 &current_snapshot,
-                0,
-                0,
+                &gpu_tuning,
                 dirty_presentation,
                 Some(&initial_snapshot),
                 41,
@@ -4127,8 +4940,7 @@ mod tests {
         let expected = resources
             .render_raster_update(
                 &current_snapshot,
-                0,
-                0,
+                &gpu_tuning,
                 RasterPresentation {
                     renderer: RasterRenderer::GpuSlug,
                     transport: RasterTransport::FullRawRgba,
@@ -4152,11 +4964,19 @@ mod tests {
         terminal.process_bytes(b"\x1b[1;36mhello\x1b[0m");
         let previous = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
+        let resolved = test_resolve_tuning(
+            &mut resources,
+            &previous,
+            0,
+            0,
+            0,
+            RasterRenderer::CpuFontdue,
+        )
+        .expect("CPU tuning should resolve");
         let full = resources
             .render_cpu_raster_update(
                 &previous,
-                0,
-                0,
+                &resolved,
                 RasterTransport::DirtyRawRgba,
                 None,
                 1,
@@ -4182,8 +5002,7 @@ mod tests {
         let dirty = resources
             .render_cpu_raster_update(
                 &current,
-                0,
-                0,
+                &resolved,
                 RasterTransport::DirtyRawRgba,
                 Some(&previous),
                 2,
@@ -4211,11 +5030,19 @@ mod tests {
         terminal.process_bytes(b"\x1b[?25l");
         let previous = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
+        let resolved = test_resolve_tuning(
+            &mut resources,
+            &previous,
+            0,
+            0,
+            0,
+            RasterRenderer::CpuFontdue,
+        )
+        .expect("CPU tuning should resolve");
         resources
             .render_cpu_raster_update(
                 &previous,
-                0,
-                0,
+                &resolved,
                 RasterTransport::DirtyRawRgba,
                 None,
                 1,
@@ -4238,8 +5065,7 @@ mod tests {
         let fallback = resources
             .render_cpu_raster_update(
                 &current,
-                0,
-                0,
+                &resolved,
                 RasterTransport::DirtyRawRgba,
                 Some(&previous),
                 2,
@@ -4265,11 +5091,19 @@ mod tests {
         terminal.process_bytes(b"\x1b[?25lA");
         let first_snapshot = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
+        let resolved = test_resolve_tuning(
+            &mut resources,
+            &first_snapshot,
+            0,
+            0,
+            0,
+            RasterRenderer::CpuFontdue,
+        )
+        .expect("CPU tuning should resolve");
         let first = resources
             .render_cpu_raster_update(
                 &first_snapshot,
-                0,
-                0,
+                &resolved,
                 RasterTransport::FullRawRgba,
                 None,
                 1,
@@ -4286,8 +5120,7 @@ mod tests {
         let second = resources
             .render_cpu_raster_update(
                 &second_snapshot,
-                0,
-                0,
+                &resolved,
                 RasterTransport::FullRawRgba,
                 Some(&first_snapshot),
                 2,
@@ -4323,13 +5156,7 @@ mod tests {
             .await
             .expect("terminal service lane should open");
 
-        let mut connect_request = test_connect_request("v3-initial", 1);
-        connect_request.requested_width = 20;
-        connect_request.requested_height = 6;
-        connect_request.surface.columns = 20;
-        connect_request.surface.rows = 6;
-        connect_request.surface.panel_width = 240;
-        connect_request.surface.panel_height = 120;
+        let connect_request = test_connect_request_for_surface("v3-initial", 1, 20, 6, 240, 120);
         let connected = client
             .connect(connect_request)
             .await
@@ -4426,13 +5253,8 @@ mod tests {
             .await
             .expect("terminal control lane should open");
 
-        let mut connect_request = test_connect_request("v3-switch-cpu-gpu-cpu", 1);
-        connect_request.requested_width = 20;
-        connect_request.requested_height = 6;
-        connect_request.surface.columns = 20;
-        connect_request.surface.rows = 6;
-        connect_request.surface.panel_width = 240;
-        connect_request.surface.panel_height = 120;
+        let connect_request =
+            test_connect_request_for_surface("v3-switch-cpu-gpu-cpu", 1, 20, 6, 240, 120);
         let connected = control_client
             .connect(connect_request)
             .await
@@ -4585,6 +5407,63 @@ mod tests {
             .expect("Vox server connection should shut down");
     }
 
+    async fn assert_resize_pushes_matching_full_raw_frame(
+        control_client: &TerminalClient,
+        session_id: &str,
+        frame_rx: &mut vox::Rx<TerminalRasterFrameEvent>,
+        initial_terminal_sequence: i64,
+    ) {
+        let resized_surface = TerminalSurfaceMetrics {
+            columns: 10,
+            rows: 6,
+            panel_width: 120,
+            panel_height: 120,
+            font_pixel_size: 0,
+            ..TerminalSurfaceMetrics::default()
+        };
+        let resized = control_client
+            .resize(test_resize_request(
+                session_id,
+                resized_surface,
+                3,
+                "v3-control-resize",
+            ))
+            .await
+            .expect("control-lane resize should be accepted while raster publication is idle");
+        assert_eq!(resized.width, 10);
+        assert_eq!(resized.height, 6);
+        let resized_frame = tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let frame = frame_rx
+                    .recv()
+                    .await
+                    .expect("resized raw frame receive should succeed")
+                    .expect("resized raw frame should be present");
+                let frame = own_raster_frame(frame);
+                if frame.terminal_sequence >= resized.server_sequence
+                    && frame.frame.logical_columns == 10
+                    && frame.frame.logical_rows == 6
+                    && frame.frame.surface.panel_width == 120
+                    && frame.frame.surface.panel_height == 120
+                {
+                    break frame;
+                }
+            }
+        })
+        .await
+        .expect("resize mutation should push a replacement raw frame");
+        assert!(resized_frame.terminal_sequence > initial_terminal_sequence);
+        assert!(
+            resized_frame.full_resync,
+            "the resize replacement must remain an explicit full resync"
+        );
+        assert_eq!(resized_frame.base_frame_sequence, 0);
+        assert_eq!(resized_frame.frame.logical_columns, 10);
+        assert_eq!(resized_frame.frame.logical_rows, 6);
+        assert_eq!(resized_frame.frame.surface.panel_width, 120);
+        assert_eq!(resized_frame.frame.surface.panel_height, 120);
+    }
+
     #[tokio::test]
     async fn v3_raster_lane_does_not_starve_control_lane_content_reads() {
         let (client_link, server_link) = vox::memory_link_pair(16);
@@ -4607,13 +5486,8 @@ mod tests {
             .await
             .expect("terminal control lane should open");
 
-        let mut connect_request = test_connect_request("v3-control-during-raster", 1);
-        connect_request.requested_width = 20;
-        connect_request.requested_height = 6;
-        connect_request.surface.columns = 20;
-        connect_request.surface.rows = 6;
-        connect_request.surface.panel_width = 240;
-        connect_request.surface.panel_height = 120;
+        let connect_request =
+            test_connect_request_for_surface("v3-control-during-raster", 1, 20, 6, 240, 120);
         let connected = control_client
             .connect(connect_request)
             .await
@@ -4634,18 +5508,26 @@ mod tests {
                 .await
         });
 
-        tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
+        let initial = tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
             .await
             .expect("initial full RGBA frame should arrive")
             .expect("initial full RGBA frame receive should succeed")
             .expect("initial full RGBA frame should be present");
+        let initial = own_raster_frame(initial);
+        assert_resize_pushes_matching_full_raw_frame(
+            &control_client,
+            &connected.session_id,
+            &mut frame_rx,
+            initial.terminal_sequence,
+        )
+        .await;
         let content = tokio::time::timeout(
             Duration::from_secs(2),
             control_client.get_content(TerminalContentRequest {
                 session_id: connected.session_id.clone(),
                 after_sequence: 0,
                 max_chars: MAX_CONTENT_CHARS,
-                client_sequence: 3,
+                client_sequence: 4,
             }),
         )
         .await
@@ -4657,7 +5539,7 @@ mod tests {
             .disconnect(TerminalDisconnectRequest {
                 session_id: connected.session_id,
                 reason: "control-lane concurrency test complete".to_string(),
-                client_sequence: 4,
+                client_sequence: 5,
             })
             .await
             .expect("test session should disconnect");
@@ -4915,24 +5797,21 @@ mod tests {
         let snapshot = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
 
-        let first = resources
-            .encode_png(&snapshot, 0, 0)
+        let first = test_encode_cpu_png(&mut resources, &snapshot, 0, 0, 0)
             .expect("first A frame should render");
         let first_stats = first.resource_stats;
-        assert!(first.font_load_micros > 0);
+        assert_eq!(first.font_load_micros, 0);
         assert_eq!(first_stats.font_catalog_acquisitions, 1);
         assert_eq!(first_stats.font_renderer_constructions, 1);
         assert_eq!(first_stats.frame_buffer_grows, 1);
 
-        let second = resources
-            .encode_png(&snapshot, 1600, 900)
+        let second = test_encode_cpu_png(&mut resources, &snapshot, 1600, 900, 0)
             .expect("B frame should render");
         let second_stats = second.resource_stats;
-        assert!(second.font_load_micros > 0);
+        assert_eq!(second.font_load_micros, 0);
         assert_eq!(second_stats.font_renderer_constructions, 2);
 
-        let third = resources
-            .encode_png(&snapshot, 0, 0)
+        let third = test_encode_cpu_png(&mut resources, &snapshot, 0, 0, 0)
             .expect("second A frame should render from retained state");
         let third_stats = third.resource_stats;
         assert_eq!(third.font_load_micros, 0);
@@ -4957,8 +5836,7 @@ mod tests {
         let snapshot = terminal.snapshot();
         let mut resources = TerminalRenderResources::default();
 
-        let rendered = resources
-            .encode_png(&snapshot, 425, 238)
+        let rendered = test_encode_cpu_png(&mut resources, &snapshot, 425, 238, 0)
             .expect("normal-scale SFM panel should fit without clipping");
 
         assert_eq!(
@@ -4971,6 +5849,88 @@ mod tests {
         );
         assert!(rendered.width <= 425);
         assert!(rendered.height <= 238);
+    }
+
+    #[test]
+    fn exact_font_size_is_honoured_or_rejected_without_silent_shrinking() {
+        let terminal = TerminalSession::new(TerminalLimits::default(), 80, 24);
+        let snapshot = terminal.snapshot();
+        let mut resources = TerminalRenderResources::default();
+
+        let rendered = test_encode_cpu_png(&mut resources, &snapshot, 2048, 2048, 24)
+            .expect("24px exact font should fit the generous target");
+        assert_eq!(rendered.font_pixel_size, 24);
+
+        let oversized = test_encode_cpu_png(&mut resources, &snapshot, 100, 100, 24)
+            .err()
+            .expect("exact font must not silently shrink to fit");
+        assert!(oversized.to_string().contains("exact font 24px"));
+
+        let out_of_range = test_encode_cpu_png(&mut resources, &snapshot, 2048, 2048, 7)
+            .err()
+            .expect("exact font below the shared renderer floor must be rejected");
+        assert!(out_of_range.to_string().contains("outside 8..=64"));
+    }
+
+    #[tokio::test]
+    async fn rejected_exact_font_resize_retains_the_last_valid_surface() {
+        let service = VoxTerminalService::new();
+        let connected = service
+            .connect(test_connect_request("exact-font-resize", 1))
+            .await
+            .expect("terminal session should connect");
+        let accepted_surface = TerminalSurfaceMetrics {
+            columns: 80,
+            rows: 24,
+            panel_width: 1600,
+            panel_height: 900,
+            font_pixel_size: 16,
+            ..TerminalSurfaceMetrics::default()
+        };
+        let accepted = service
+            .resize(test_resize_request(
+                &connected.session_id,
+                accepted_surface.clone(),
+                2,
+                "resize-valid",
+            ))
+            .await
+            .expect("valid exact-font surface should be accepted");
+
+        let rejected_surface = TerminalSurfaceMetrics {
+            panel_width: 100,
+            panel_height: 100,
+            font_pixel_size: 24,
+            ..accepted_surface.clone()
+        };
+        let rejected = service
+            .resize(test_resize_request(
+                &connected.session_id,
+                rejected_surface,
+                3,
+                "resize-invalid",
+            ))
+            .await
+            .expect_err("over-constrained exact font should be rejected");
+        assert_eq!(rejected.code, TerminalErrorCode::InvalidRequest);
+
+        let runtime = service
+            .session(&connected.session_id)
+            .expect("session should remain connected after a rejected resize");
+        let retained = VoxTerminalService::lock_session(&runtime)
+            .expect("session should remain readable")
+            .surface
+            .clone();
+        assert_eq!(retained, accepted.surface);
+
+        service
+            .disconnect(TerminalDisconnectRequest {
+                session_id: connected.session_id,
+                reason: "exact-font resize test complete".to_string(),
+                client_sequence: 4,
+            })
+            .await
+            .expect("terminal session should disconnect");
     }
 
     #[test]
@@ -5090,36 +6050,10 @@ mod tests {
             .await
             .expect("terminal service lane should open");
 
+        let mut connect_request = test_connect_request_for_surface("test", 1, 120, 40, 1200, 760);
+        connect_request.correlation_id = "connect-01".to_string();
         let connected = client
-            .connect(TerminalConnectRequest {
-                endpoint: "test".to_string(),
-                requested_width: 120,
-                requested_height: 40,
-                surface: TerminalSurfaceMetrics {
-                    columns: 120,
-                    rows: 40,
-                    panel_width: 1200,
-                    panel_height: 760,
-                    ..TerminalSurfaceMetrics::default()
-                },
-                capabilities: TerminalCapabilities {
-                    text_input: true,
-                    key_input: true,
-                    mouse_input: true,
-                    structured_cells: false,
-                    raster_frames: true,
-                    selection: false,
-                    scrollback: true,
-                    dirty_frames: false,
-                    max_width: MAX_COLUMNS,
-                    max_height: MAX_ROWS,
-                    max_frame_bytes: MAX_FRAME_BYTES,
-                    backend_id: String::new(),
-                    transport_id: String::new(),
-                },
-                client_sequence: 1,
-                correlation_id: "connect-01".to_string(),
-            })
+            .connect(connect_request)
             .await
             .expect("terminal session should connect");
         let (frame_tx, mut frame_rx) = vox::channel::<TerminalFrameEvent>();
@@ -5384,36 +6318,11 @@ mod tests {
             .open_lane::<TerminalClient>()
             .await
             .expect("terminal service lane should open");
+        let mut connect_request =
+            test_connect_request_for_surface("test-cancel", 1, 120, 40, 1200, 760);
+        connect_request.correlation_id = "connect-cancel-01".to_string();
         let connected = client
-            .connect(TerminalConnectRequest {
-                endpoint: "test-cancel".to_string(),
-                requested_width: 120,
-                requested_height: 40,
-                surface: TerminalSurfaceMetrics {
-                    columns: 120,
-                    rows: 40,
-                    panel_width: 1200,
-                    panel_height: 760,
-                    ..TerminalSurfaceMetrics::default()
-                },
-                capabilities: TerminalCapabilities {
-                    text_input: true,
-                    key_input: true,
-                    mouse_input: true,
-                    structured_cells: false,
-                    raster_frames: true,
-                    selection: false,
-                    scrollback: true,
-                    dirty_frames: false,
-                    max_width: MAX_COLUMNS,
-                    max_height: MAX_ROWS,
-                    max_frame_bytes: MAX_FRAME_BYTES,
-                    backend_id: String::new(),
-                    transport_id: String::new(),
-                },
-                client_sequence: 1,
-                correlation_id: "connect-cancel-01".to_string(),
-            })
+            .connect(connect_request)
             .await
             .expect("terminal session should connect");
 

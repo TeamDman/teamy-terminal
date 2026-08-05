@@ -188,7 +188,7 @@ checksum = "980c2afde4af43d6a05c5be738f9eae595cff86dce1f38f88b95058a98c027f3"
 [[package]]
 name = "copypatch"
 version = "0.2.0-rc.4"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "libc",
  "object",
@@ -360,7 +360,7 @@ dependencies = [
 [[package]]
 name = "facet"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "autocfg",
  "facet-core",
@@ -370,7 +370,7 @@ dependencies = [
 [[package]]
 name = "facet-core"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "autocfg",
  "camino",
@@ -384,7 +384,7 @@ dependencies = [
 [[package]]
 name = "facet-dessert"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -393,7 +393,7 @@ dependencies = [
 [[package]]
 name = "facet-error"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
 ]
@@ -401,7 +401,7 @@ dependencies = [
 [[package]]
 name = "facet-format"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-dessert",
@@ -413,7 +413,7 @@ dependencies = [
 [[package]]
 name = "facet-json"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "copypatch",
  "facet",
@@ -426,7 +426,7 @@ dependencies = [
 [[package]]
 name = "facet-macro-parse"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-macro-types",
  "proc-macro2",
@@ -436,7 +436,7 @@ dependencies = [
 [[package]]
 name = "facet-macro-types"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -446,7 +446,7 @@ dependencies = [
 [[package]]
 name = "facet-macros"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-macros-impl",
 ]
@@ -454,7 +454,7 @@ dependencies = [
 [[package]]
 name = "facet-macros-impl"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-macro-parse",
  "facet-macro-types",
@@ -467,7 +467,7 @@ dependencies = [
 [[package]]
 name = "facet-path"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
 ]
@@ -475,7 +475,7 @@ dependencies = [
 [[package]]
 name = "facet-pretty"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -486,7 +486,7 @@ dependencies = [
 [[package]]
 name = "facet-reflect"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-path",
@@ -497,7 +497,7 @@ dependencies = [
 [[package]]
 name = "facet-solver"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-reflect",
@@ -507,7 +507,7 @@ dependencies = [
 [[package]]
 name = "facet-value"
 version = "0.50.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-core",
  "facet-format",
@@ -527,7 +527,7 @@ dependencies = [
 [[package]]
 name = "figue"
 version = "5.0.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "arbitrary",
  "ariadne",
@@ -555,7 +555,7 @@ dependencies = [
 [[package]]
 name = "figue-attrs"
 version = "5.0.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
 ]
@@ -1016,7 +1016,7 @@ dependencies = [
 [[package]]
 name = "phon"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
  "facet-value",
@@ -1029,7 +1029,7 @@ dependencies = [
 [[package]]
 name = "phon-engine"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet-value",
  "phon-ir",
@@ -1040,7 +1040,7 @@ dependencies = [
 [[package]]
 name = "phon-ir"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "phon-schema",
  "weavy",
@@ -1049,7 +1049,7 @@ dependencies = [
 [[package]]
 name = "phon-jit"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "copypatch",
  "phon-ir",
@@ -1060,7 +1060,7 @@ dependencies = [
 [[package]]
 name = "phon-schema"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "blake3",
  "facet-value",
@@ -1381,7 +1381,7 @@ dependencies = [
 [[package]]
 name = "spec-proto"
 version = "0.2.2"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
  "facet-value",
@@ -1470,7 +1470,7 @@ dependencies = [
 [[package]]
 name = "taxon"
 version = "0.2.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "blake3",
 ]
@@ -1493,6 +1493,7 @@ dependencies = [
  "num-traits",
  "swash",
  "teamy-terminal-core",
+ "ttf-parser 0.25.1",
  "unicode-width",
 ]
 
@@ -1753,7 +1754,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 [[package]]
 name = "vox"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
  "facet-pretty",
@@ -1772,7 +1773,7 @@ dependencies = [
 [[package]]
 name = "vox-core"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
  "facet-core",
@@ -1789,7 +1790,7 @@ dependencies = [
 [[package]]
 name = "vox-fdpass"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "libc",
  "passfd",
@@ -1800,7 +1801,7 @@ dependencies = [
 [[package]]
 name = "vox-macros-core"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "heck",
  "proc-macro2",
@@ -1811,7 +1812,7 @@ dependencies = [
 [[package]]
 name = "vox-macros-parse"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "proc-macro2",
  "unsynn",
@@ -1820,7 +1821,7 @@ dependencies = [
 [[package]]
 name = "vox-phon"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "facet",
  "phon",
@@ -1834,7 +1835,7 @@ dependencies = [
 [[package]]
 name = "vox-rt"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -1850,12 +1851,12 @@ dependencies = [
 [[package]]
 name = "vox-rt-macros"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 
 [[package]]
 name = "vox-schema"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "blake3",
  "facet",
@@ -1865,7 +1866,7 @@ dependencies = [
 [[package]]
 name = "vox-service-macros"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "proc-macro2",
  "vox-macros-core",
@@ -1874,7 +1875,7 @@ dependencies = [
 [[package]]
 name = "vox-stream"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "libc",
  "tokio",
@@ -1888,7 +1889,7 @@ dependencies = [
 [[package]]
 name = "vox-types"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "blake3",
  "facet",
@@ -1907,7 +1908,7 @@ dependencies = [
 [[package]]
 name = "vox-websocket"
 version = "0.10.0-rc.5"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "futures-channel",
  "futures-util",
@@ -2013,7 +2014,7 @@ dependencies = [
 [[package]]
 name = "weavy"
 version = "0.2.2"
-source = "git+https://github.com/TeamDman/facet.git?rev=aa75598dabb2138b18365cdf0d97ca94a34c5319#aa75598dabb2138b18365cdf0d97ca94a34c5319"
+source = "git+https://github.com/TeamDman/facet.git?rev=765f0851bef7ce764b44554b7d2db059af1e7759#765f0851bef7ce764b44554b7d2db059af1e7759"
 dependencies = [
  "copypatch",
 ]
