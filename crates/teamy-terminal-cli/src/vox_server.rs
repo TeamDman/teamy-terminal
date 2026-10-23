@@ -4612,6 +4612,11 @@ impl Terminal for VoxTerminalService {
 }
 
 /// Serve the Rust-authoritative terminal endpoint until the process exits.
+///
+/// # Errors
+///
+/// Returns an error if the listen address is invalid or the TCP listener cannot
+/// bind, report its local address, or accept a connection.
 pub async fn serve(listen: &str) -> Result<()> {
     let listen = normalize_listen_address(listen)?;
     let listener = tokio::net::TcpListener::bind(&listen)
@@ -6383,6 +6388,12 @@ mod tests {
             .expect("dropped receiver should finish the subscription request")
             .expect("dropped receiver subscription task should not panic")
             .expect("dropped receiver subscription should complete cleanly");
+        // PTY read chunking varies by platform and shell history. Publish a known
+        // burst without yielding this current-thread executor so the subscription
+        // must coalesce it; retain the real shell output and all frame witnesses.
+        for _ in 0..2 {
+            VoxTerminalService::process_pty_event(&runtime, PtyEvent::Output(b"\r\n".to_vec()));
+        }
         client
             .send_text(TerminalTextInput {
                 session_id: connected.session_id.clone(),
@@ -6398,7 +6409,14 @@ mod tests {
         for _ in 0..600 {
             let candidate = tokio::time::timeout(Duration::from_secs(10), frame_rx.recv())
                 .await
-                .expect("PTY mutation should push a frame without another RPC")
+                .unwrap_or_else(|error| {
+                    let state = runtime.state.lock().expect("session state should lock");
+                    panic!(
+                        "PTY mutation should push a frame without another RPC: {error}; closed={}, sequence={}, raw={:?}, visible={:?}",
+                        state.closed, state.sequence, String::from_utf8_lossy(&state.debug_output),
+                        state.terminal.snapshot().visible_text(),
+                    );
+                })
                 .expect("pushed frame receive should succeed")
                 .expect("pushed frame should be present");
             let candidate = own_frame(candidate);
@@ -6467,16 +6485,20 @@ mod tests {
                     text.find("hello, world!").map(|column| (row, column))
                 })
                 .unwrap_or_else(|| panic!("Rust terminal state should contain Write-Host output (closed={}, sequence={}, raw={:?}):\n{}", session.closed, session.sequence, String::from_utf8_lossy(&session.debug_output), terminal_snapshot.visible_text()));
-            assert!(matches!(
-                terminal_snapshot
-                    .cell(
-                        u16::try_from(hello.1).expect("hello column fits in u16"),
-                        u16::try_from(hello.0).expect("hello row fits in u16"),
-                    )
-                    .expect("hello cell")
-                    .foreground,
-                Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
-            ));
+            assert!(
+                matches!(
+                    terminal_snapshot
+                        .cell(
+                            u16::try_from(hello.1).expect("hello column fits in u16"),
+                            u16::try_from(hello.0).expect("hello row fits in u16"),
+                        )
+                        .expect("hello cell")
+                        .foreground,
+                    Color::Indexed(6 | 14) | Color::Rgb(0, 255, 255)
+                ),
+                "expected cyan output; raw={:?}, visible={visible_text:?}",
+                String::from_utf8_lossy(&session.debug_output)
+            );
         };
 
         let content = client

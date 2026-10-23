@@ -153,6 +153,7 @@ pub struct PtySessionControl {
     master: Box<dyn MasterPty + Send>,
     writer: Mutex<Box<dyn Write + Send>>,
     killer: Arc<Mutex<Box<dyn ChildKiller + Send + Sync>>>,
+    #[cfg(windows)]
     process_id: Option<u32>,
 }
 
@@ -203,6 +204,7 @@ impl PtySession {
             .map_err(|error| {
                 eyre::eyre!("failed to spawn the configured shell in the pseudoterminal: {error}")
             })?;
+        #[cfg(windows)]
         let process_id = child.process_id();
         let killer = Arc::new(Mutex::new(child.clone_killer()));
         let reader = pair
@@ -223,6 +225,7 @@ impl PtySession {
                 master: pair.master,
                 writer: Mutex::new(writer),
                 killer,
+                #[cfg(windows)]
                 process_id,
             },
             events: PtyEventReceiver { events },
