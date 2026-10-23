@@ -1,0 +1,51 @@
+{
+  "baseline": "8aede3a196d46354e253ecc0e9446fd4ff00fe74",
+  "tested_source": "b315215f228513f2fda21971e9fc544b631d45ce",
+  "vox_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+  "rust": "1.96.0",
+  "publication": "local only; changed consumer publication pending approval",
+  "results": {
+    "workspace_build_all_features": "passed",
+    "prototype_check": "passed",
+    "control_tests": "8 passed, including local transport RPC",
+    "workspace_tests_all_features_no_fail_fast": {
+      "passed": 158,
+      "failed": 2,
+      "failures": [
+        "v3_switch_cpu_gpu_cpu_releases_idle_receiver_without_terminal_mutation: supported no-window GPU renderer unavailable",
+        "vox_puppet_runs_power_shell_and_returns_bounded_png: PTY frame receive timed out; reproduced alone; cause unresolved"
+      ]
+    },
+    "strict_clippy": "failed: preexisting Unix dead_code PtySessionControl.process_id",
+    "stable_format_check": "passed; nightly-only grouping options ignored; nightly check unrun",
+    "prototype_build_and_help": "passed"
+  },
+  "identities": {
+    "teamy-facet": "registry 0.50.0-rc.7",
+    "teamy-facet-core": "registry 0.50.0-rc.7",
+    "taxon": "registry 0.2.0-rc.5; no teamy-taxon duplicate",
+    "teamy-facet-format": "registry 0.50.0-rc.9",
+    "teamy-facet-csv": "git 642d268fc01eced0a861bded044342ff88733eec; version 0.50.0-rc.8"
+  },
+  "powershell": {
+    "version": "7.5.4 Linux x64",
+    "official_archive_sha256": "1fd7983fe56ca9e6233f126925edb24bf6b6b33e356b69996d925c4db94e2fef",
+    "setup": "workspace-local executable and pwsh.exe symlink, writable XDG cache/config/data paths; no fixture or product shell changes"
+  },
+  "unrun": [
+    "Windows-specific tests (cfg excluded on Linux)",
+    "real GPU lifecycle qualification",
+    "nightly rustfmt",
+    "terminal-Java/SFM end-to-end game integration"
+  ],
+  "logs": {
+    "terminal-workspace-pwsh.log": "21ad0a448b4dd9501eb1e2c5b4e9c02c9f04b19ce91aeffd72c8a7ee5a34d236",
+    "terminal-puppet-focused.log": "45993b9be62af9ba8d7e9bb1dfb34fab325a22161a717e9627f7b378e66b2c15",
+    "terminal-build-final.log": "eff386e16346e2d1ae0ba666981486ff9e40bd221cec1097b5ff3051d8bc736d",
+    "terminal-prototype3.log": "9462cb5c817c2d951e20b355ce43629dd593642395efe4a77574d440c2e12120",
+    "terminal-fmt-final.log": "49d811ef25221f6dc8630eef85e281baecdccc942021b0ba7bc6b96d7d35140e",
+    "terminal-clippy-final.log": "bb0c63076958252bbb667065ad32627a84fcb2e7700c34ead7535ae61683e40e",
+    "terminal-control.log": "67c1072074f2c734972091339faa22b54313f76839120984ea99222209758653",
+    "terminal-prototype-help.log": "e62ec106811799e6c2b9dccd7c4c51c39527066aa852db5bc4f626392111648e"
+  }
+}
