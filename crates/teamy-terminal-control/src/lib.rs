@@ -82,8 +82,8 @@ pub enum ControlPhysicalKey {
 
 /// A key action sent to the control service.
 ///
-/// This type intentionally derives Vox's Facet version, not the CLI's Facet
-/// version: Vox owns this type's wire schema and can evolve it independently.
+/// Control, streaming and CLI types share the Facet identity used by Vox.
+/// The service still owns this type's wire schema.
 #[derive(Clone, Debug, Facet, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ControlKey {

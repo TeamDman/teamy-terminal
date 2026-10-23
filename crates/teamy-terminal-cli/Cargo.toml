@@ -60,6 +60,8 @@ embed-resource.workspace = true
 
 [dev-dependencies]
 portable-pty.workspace = true
+
+[target.'cfg(windows)'.dev-dependencies]
 windows = { workspace = true, features = ["Win32_UI_WindowsAndMessaging"] }
 
 [lints]

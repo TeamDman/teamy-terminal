@@ -58,15 +58,18 @@ tracing-tracy = { version = "0.11", default-features = false, features = [
 tokio = { version = "1.49.0", features = ["full"] }
 teamy-cancellation = { git = "https://github.com/TeamDman/teamy-cancellation.git", rev = "7c77848", features = ["arbitrary"] }
 
-# Keep every Facet/Figue/Vox package on the same reviewed and published
-# TeamDman/facet terminal-contract revision.
-facet = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "facet", features = ["uuid", "compact_str", "chrono", "net"] }
-facet-csv = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "facet-csv" }
-facet-json = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "facet-json" }
-facet-pretty = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "facet-pretty" }
-figue = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "figue", features = ["arbitrary"] }
-spec-proto = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "spec-proto" }
-vox-terminal = { git = "https://github.com/TeamDman/facet.git", rev = "f2afdece6c79e64085d2f8c047e22fe16b2c8c54", package = "vox", default-features = false, features = ["runtime", "transport-tcp"] }
+# Facet identity is shared with the validated standalone Vox/Phon graph.
+# Keep control and streaming peers on this exact Vox source revision.
+facet = { package = "teamy-facet", version = "=0.50.0-rc.7", features = ["uuid", "compact_str", "chrono", "net"] }
+# Published CSV rc.8 still requires format rc.8; this source aligns it with rc.9.
+facet-csv = { git = "https://github.com/TeamDman/facet-format.git", rev = "642d268fc01eced0a861bded044342ff88733eec", package = "teamy-facet-csv" }
+facet-json = { package = "teamy-facet-json", version = "=0.50.0-rc.9" }
+facet-pretty = { package = "teamy-facet-pretty", version = "=0.50.0-rc.7" }
+figue = { package = "teamy-figue", version = "=6.0.0-rc.5", features = ["arbitrary"] }
+spec-proto = { git = "https://github.com/TeamDman/vox.git", rev = "5628c00d9f3816199f324a9ccc081de8a3a1b1bc", package = "teamy-vox-proto" }
+vox-terminal = { git = "https://github.com/TeamDman/vox.git", rev = "5628c00d9f3816199f324a9ccc081de8a3a1b1bc", package = "teamy-vox", default-features = false, features = ["runtime", "transport-tcp"] }
+
+vox = { git = "https://github.com/TeamDman/vox.git", rev = "5628c00d9f3816199f324a9ccc081de8a3a1b1bc", package = "teamy-vox", default-features = false, features = ["runtime", "transport-local"] }
 
 embed-resource = "3.0.6"
 portable-pty = "0.9"
@@ -134,3 +137,10 @@ unnecessary_safety_comment = "warn"
 unnecessary_safety_doc = "warn"
 unneeded_field_pattern = "warn"
 unused_result_ok = "warn"
+
+# Keep the CSV source package's format dependency identical to registry JSON/Figue.
+[patch."https://github.com/TeamDman/facet-format.git"]
+teamy-facet-format = { version = "=0.50.0-rc.9" }
+teamy-facet = { version = "=0.50.0-rc.7" }
+teamy-facet-core = { version = "=0.50.0-rc.7" }
+teamy-facet-reflect = { version = "=0.50.0-rc.7" }

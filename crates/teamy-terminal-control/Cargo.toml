@@ -16,7 +16,7 @@ facet.workspace = true
 facet-json.workspace = true
 tokio.workspace = true
 tracing.workspace = true
-vox = { git = "https://github.com/bearcove/vox.git", rev = "2ca38f41c2d615e05c11347d6d6e781b3a3a178e", package = "vox", default-features = false, features = ["runtime", "transport-local"] }
+vox.workspace = true
 
 [lints]
 workspace = true

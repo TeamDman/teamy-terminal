@@ -6,6 +6,9 @@ mod interactive;
 pub mod logging_init;
 mod stop_after_args;
 mod vox_server;
+
+// Share the CLI implementation with the standalone server prototype.
+pub use vox_server::serve as serve_vox;
 #[cfg(windows)]
 mod windows_startup;
 

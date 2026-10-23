@@ -1,6 +1,3 @@
-#[path = "../../../crates/teamy-terminal-cli/src/vox_server.rs"]
-mod vox_server;
-
 #[tokio::main]
 async fn main() -> eyre::Result<()> {
     let mut listen = String::from("127.0.0.1:0");
@@ -19,5 +16,5 @@ async fn main() -> eyre::Result<()> {
             other => return Err(eyre::eyre!("unknown argument: {other}")),
         }
     }
-    vox_server::serve(&listen).await
+    teamy_terminal_cli::serve_vox(&listen).await
 }
