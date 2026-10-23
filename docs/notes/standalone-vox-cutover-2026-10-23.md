@@ -1,5 +1,7 @@
 # Standalone Vox consumer qualification
 
+This is the initial historical result. See the [bounded cloud follow-up](standalone-vox-cloud-followup-2026-10-23.md) for subsequent repairs and current qualification.
+
 Source baseline: `8aede3a196d46354e253ecc0e9446fd4ff00fe74`, published on
 `migration/vox-consumer-source-handoff-2026-10-23`. The local migration source
 commit is `b315215f228513f2fda21971e9fc544b631d45ce`; validation ran against its

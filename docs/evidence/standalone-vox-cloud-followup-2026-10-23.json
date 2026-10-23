@@ -1,0 +1,74 @@
+{
+  "baseline": "8aede3a196d46354e253ecc0e9446fd4ff00fe74",
+  "baseline_adjustments": [
+    "Windows-target dev-dependency scope to compile on Linux",
+    "test failure diagnostics only"
+  ],
+  "baseline_lock_changed": false,
+  "tested_source": "fbd0975c57aad49a1ed24b6425a163f57c8e6ac7",
+  "runtime_dependencies_changed": false,
+  "publication": "local only, pending approval",
+  "test_environment": "Rust 1.96.0; verified Linux PowerShell 7.5.4 via local pwsh.exe symlink; writable XDG paths; NO_COLOR unset for final runs",
+  "observations": {
+    "original_baseline_build": "failed: 16 Windows library errors on Linux",
+    "baseline_with_color_disabled": "cyan output assertion failed in 3 diagnostic runs",
+    "migrated_with_color_disabled": "cyan output assertion failed in 3 diagnostic runs",
+    "baseline_with_color_enabled": "3 passes",
+    "migrated_before_controlled_burst_color_enabled": "3 failures at nonzero coalescing assertion; fresh shell run passed; aggregate run passed except GPU",
+    "original_timeout": "did not recur in diagnostic comparison/final runs; root cause remains unproven"
+  },
+  "final": {
+    "puppet_repetitions": {
+      "passed": 3,
+      "failed": 0
+    },
+    "focused_rpc_streams": {
+      "passed": 31,
+      "failed": 0,
+      "explicitly_filtered": "GPU lifecycle"
+    },
+    "full_workspace": {
+      "passed": 159,
+      "failed": 1,
+      "failure": "GPU lifecycle requires supported no-window GPU renderer; fixture unchanged"
+    },
+    "strict_clippy": "passed",
+    "workspace_build": "passed",
+    "stable_format": "passed; nightly-only settings unverified",
+    "prototype_check": "passed"
+  },
+  "unrun": [
+    "Windows-specific execution",
+    "supported GPU lifecycle execution",
+    "nightly formatting",
+    "terminal-Java/SFM game integration"
+  ],
+  "logs": {
+    "terminal-baseline-puppet.log": "749e253a3e87ea9ca251f7b6461e400392a96524a8c0b3f1ab5c05fd972d4e94",
+    "terminal-baseline-puppet-portable.log": "821ef8715d4e03925247833da6efc7c2a5902ef18218f5dcf7bc5318488cf133",
+    "terminal-puppet-diagnostic.log": "d48fffda7ea08156a3c28a601e5bb30bff849c533053b7c10478b5bc1786ec5a",
+    "terminal-puppet-fresh.log": "c9e0ada555188f306f8bd6b7d4ce3e1d948956571214f8f2d8954d85b317de60",
+    "terminal-platform-aggregate.log": "45d5c7fce750e208416a4537d25c580fce44faa60b0ea99cf5ad0e2519056800",
+    "terminal-platform-final-tests.log": "c70a0943aa19591d3e251ba440117e587f935ef65baa8ac6d12e6303f01acdd3",
+    "terminal-platform-final-clippy.log": "03a08f09bead308b0320cfbbcd29b69840839568dcb4e3bc23684a5bfc52f50b",
+    "terminal-platform-final-build.log": "e7a0e788c2f011df0653279f56cd58dcca091a34d28573a86e1b886eaa34b4d9",
+    "terminal-platform-final-fmt.log": "49d811ef25221f6dc8630eef85e281baecdccc942021b0ba7bc6b96d7d35140e",
+    "terminal-platform-focused-streams.log": "45344941c682c24fb792803f6a935c669ca38603029a5510a588ba64998615ad",
+    "terminal-platform-prototype.log": "e3923e472e9cf477b67ec53b418f38515ea41acca9d4eba89b2ef1e06765ec68",
+    "terminal-baseline-observe-1.log": "5663507ff8ad293bb6fe08337198f673a71e15984647eda5b827aaff1016b655",
+    "terminal-baseline-observe-2.log": "8c9d7925572eeac312c7b482ba61fd69181d44f79a1b8482d59e9f126b54c544",
+    "terminal-baseline-observe-3.log": "3116670cb235f06b10f09606c181f77635e79cd9341923811e127dcc0bf4882f",
+    "terminal-puppet-observe-1.log": "fc3d06b81f7fd295b39dad900a145bc0161115550fcc70ca83990c4e4c9bad7a",
+    "terminal-puppet-observe-2.log": "dd2950604558cd98c0e2dd919e54412c9f931b1b7afc42e25ce05bc1d2fe51d1",
+    "terminal-puppet-observe-3.log": "0ce8aa967d11d577dc0353c0262c1657f1d528cf62afdaab1be2b9d6bb692aab",
+    "terminal-baseline-color-1.log": "56966ec125d53e8fa2fb7268091bb53a8713c27f218e01ce25c7bf5ad942fb68",
+    "terminal-baseline-color-2.log": "a237da11ce62ad6b92faaeb846c83e661d96450f9c3c57ac76c797f9088a8524",
+    "terminal-baseline-color-3.log": "850a2cf3be9598d03d706f5de4b3c5a164bc53d2af781dd40b4e653d4198d5a4",
+    "terminal-puppet-color-1.log": "851c6e13e936b9539d0796a535756c19f56ad986a986c178c7d0757d6917c1f2",
+    "terminal-puppet-color-2.log": "ef6623b60b0c57bf3c74f724e2c2dbcaf3deb1fee58b9d8383d667183ccb57bd",
+    "terminal-puppet-color-3.log": "f37d00909bba5e0c4c3afd048df58b78783b968b17ca62738d93e1f02ae4d6f3",
+    "terminal-puppet-controlled-1.log": "a5df8a5dcb73c7086dd9868fcfac10c26e4cd04ff6c9f1a1a24170d1bbf19a7d",
+    "terminal-puppet-controlled-2.log": "c67f3f208a562253c797afe8801717a5fa0c3a9f5e54a1c74c514bc776a0f3ca",
+    "terminal-puppet-controlled-3.log": "5e0702efdc0aadaacbf9f732e654b7b502db1c035f55c8a4c31a02a7a6bef95b"
+  }
+}
