@@ -1,0 +1,83 @@
+{
+  "probe_test_source": "5039d481a9a281e7a0b86429ddd5f41272d9a9d8",
+  "vox_fix_source": "e469b86cdbab46502b913fb2af48dfacbd8e26f0",
+  "terminal_runtime_source": "9078e66b1f327d919d19c4170dd038b9dbb84523",
+  "published_sfm_inspected": "0918604ac558906c93a9c4ab449400e8f75792ce",
+  "comparison": {
+    "published": {
+      "status": "failed",
+      "client_exit": 1,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "2834a61a8e877f5eb73d3c61590ff276db5f92d148ef8c0d8d41527749de6b78",
+      "probe_sha256": "391ac669eb579ed001e553271eee0a4a5a44cf0d01f478e60bf17376e80e2d99",
+      "early_input": false,
+      "checks": [
+        "PASS malformed payload decoded as INVALID_PAYLOAD"
+      ]
+    },
+    "macro_overlay": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "e0856fedbd38c3be8bbf61fd7ae573929b7af406db4de47ac82dfd25898b1d35",
+      "probe_sha256": "391ac669eb579ed001e553271eee0a4a5a44cf0d01f478e60bf17376e80e2d99",
+      "early_input": false,
+      "checks": [
+        "PASS malformed payload decoded as INVALID_PAYLOAD",
+        "PASS generated schema negotiation, renderer rejection and connect",
+        "PASS missing and cross-connection session rejection",
+        "PASS Unicode PTY output, pushed PNG and receiver-close completion",
+        "PASS connection survives stream cancellation; disconnect invalidates session"
+      ]
+    },
+    "early_input_macro_overlay": {
+      "status": "failed",
+      "client_exit": 1,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "e0856fedbd38c3be8bbf61fd7ae573929b7af406db4de47ac82dfd25898b1d35",
+      "probe_sha256": "391ac669eb579ed001e553271eee0a4a5a44cf0d01f478e60bf17376e80e2d99",
+      "early_input": true,
+      "checks": [
+        "PASS malformed payload decoded as INVALID_PAYLOAD",
+        "PASS generated schema negotiation, renderer rejection and connect",
+        "PASS missing and cross-connection session rejection"
+      ]
+    }
+  },
+  "tests": {
+    "vox_macro": 25,
+    "vox_core": 88,
+    "vox_schema_compat": 8,
+    "vox_service_macro": 10,
+    "terminal_puppet": 1,
+    "terminal_control": 8,
+    "terminal_strict_clippy": "passed",
+    "stable_format": "passed"
+  },
+  "limits": [
+    "fixed result uses local macro path overlay; published pins remain unfixed",
+    "production early shell input behavior unresolved",
+    "SFM native-root follow-up source unavailable in this executor",
+    "GPU, desktop, Minecraft, Windows and full aggregate execution unrun",
+    "nightly formatting and Tracey unavailable"
+  ],
+  "log_sha256": {
+    "tmp/vox-malformed-macros-final.log": "0d73c0e8a9d856c1b7c7c1e5f94538fd761a8a9ed7ee5813dcc2bc3ea5b929ff",
+    "tmp/vox-malformed-core.log": "56c8ae14c7bdd59767683b036657cb3e05c62cdc1c653b9a8a015499e04b085d",
+    "tmp/vox-malformed-service-tests.log": "31350125ab820b4aa0cd781ebfb146c390bfd4911d0effe37989179f103f33f6",
+    "tmp/terminal-java-integration-puppet.log": "a0527046c10a723da9cff8c483c8cd202ca908348ba8242df7168a5cfe5abdb8",
+    "tmp/terminal-java-integration-control.log": "4b4293c8e60421435bcc7c0eee25ac2c74d4e3dd431f9059a2763f04db5dee3a",
+    "tmp/terminal-java-integration-clippy.log": "08af3445cc64b22b287812946860c81028fdb51667fc6dadfdc590e318e78cac",
+    "tmp/terminal-java-integration-format.log": "49d811ef25221f6dc8630eef85e281baecdccc942021b0ba7bc6b96d7d35140e",
+    "terminal-java-5039d48-baseline/client.stderr": "3fad3392d0a3e2a2ddcb3c4fb8d57e1b6c2a9845fa3b1300ba240c4aeccd4e54",
+    "terminal-java-5039d48-fixed/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "terminal-java-probe-3/client.stderr": "47722f47fd89b09b8a9bcc0b321b659f4c77b22dfbc895afdc851d2142ab11fd",
+    "terminal-java-5039d48-early/client.stderr": "9341d015a9df4b0af9b382f1b89e6c099d04c9127cfdbcb2d84b67dcb4439d1a"
+  }
+}
