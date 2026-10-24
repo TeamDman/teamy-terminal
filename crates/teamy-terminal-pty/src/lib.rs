@@ -56,10 +56,18 @@ pub const DEFAULT_ROWS: u16 = 36;
 const EVENT_QUEUE_CAPACITY: usize = 128;
 const MAX_OUTPUT_CHUNK: usize = 16 * 1024;
 
-/// Configuration for a shell PTY.
+// PowerShell has different installed executable names across platforms.
+#[cfg(windows)]
+const DEFAULT_POWERSHELL_EXECUTABLE: &str = "pwsh.exe";
+#[cfg(not(windows))]
+const DEFAULT_POWERSHELL_EXECUTABLE: &str = "pwsh";
+
+/// Configuration for a PowerShell PTY.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PtyConfig {
-    /// Executable passed to `portable-pty`.
+    /// PowerShell executable name or path passed directly to `portable-pty`.
+    /// Arguments and readiness integration are PowerShell-specific; this is not
+    /// an arbitrary shell command line. Do not add quotes around paths with spaces.
     pub shell: String,
     /// Optional initial working directory.
     pub current_dir: Option<PathBuf>,
@@ -72,7 +80,7 @@ pub struct PtyConfig {
 impl Default for PtyConfig {
     fn default() -> Self {
         Self {
-            shell: String::from("pwsh.exe"),
+            shell: String::from(DEFAULT_POWERSHELL_EXECUTABLE),
             current_dir: std::env::current_dir().ok(),
             size: PtySize {
                 rows: DEFAULT_ROWS,
@@ -780,6 +788,59 @@ mod tests {
             }
         }
         control.kill().unwrap();
+    }
+
+    #[test]
+    fn platform_default_uses_the_installed_powershell_name() {
+        #[cfg(windows)]
+        let expected = "pwsh.exe";
+        #[cfg(not(windows))]
+        let expected = "pwsh";
+        for config in [
+            PtyConfig::default(),
+            PtyConfig::interactive(),
+            PtyConfig::test(),
+        ] {
+            assert_eq!(config.shell, expected);
+            assert_eq!(config.command().get_argv()[0], expected);
+        }
+    }
+
+    #[test]
+    fn executable_paths_with_spaces_remain_one_argument_and_receive_bootstrap() {
+        let directory = std::env::temp_dir().join("PowerShell path with spaces");
+        for basename in ["pwsh", "pwsh.exe", "powershell", "powershell.exe", "PWSH"] {
+            let shell = directory.join(basename).to_string_lossy().into_owned();
+            assert!(is_pwsh_shell(&shell));
+            let config = PtyConfig {
+                shell: shell.clone(),
+                ..PtyConfig::test()
+            };
+            let command = config.command_with_readiness(Some(&ShellReadinessToken::default()));
+            let argv = command.get_argv();
+            assert_eq!(argv[0], shell.as_str());
+            assert_eq!(argv.len(), 6);
+            assert_eq!(argv[4], "-Command");
+            assert!(argv[5].to_str().unwrap().contains("TeamyShellReady"));
+        }
+        for shell in ["", "sh", "not-pwsh", "pwsh -NoProfile", "pwsh.exe.bak"] {
+            assert!(!is_pwsh_shell(shell), "{shell}");
+        }
+    }
+
+    #[test]
+    fn missing_executable_returns_spawn_error_without_fallback() {
+        let path = std::env::temp_dir()
+            .join(format!("teamy-missing-powershell-{}", std::process::id()))
+            .join(DEFAULT_POWERSHELL_EXECUTABLE);
+        assert!(!path.exists());
+        let config = PtyConfig {
+            shell: path.to_string_lossy().into_owned(),
+            ..PtyConfig::test()
+        };
+        let error = PtySession::spawn_with_readiness(&config, &ShellReadinessToken::default())
+            .expect_err("missing executable must fail during spawn");
+        assert!(error.to_string().contains("failed to spawn"));
     }
 
     #[test]

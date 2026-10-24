@@ -261,7 +261,7 @@ impl InteractiveApplication {
     fn new(cancellation_token: CancellationToken, initially_hidden: bool) -> Result<Self> {
         let config = PtyConfig::interactive();
         let session = PtySession::spawn(&config)
-            .wrap_err("failed to launch default-profile pwsh.exe through portable-pty")?;
+            .wrap_err("failed to launch default-profile PowerShell through portable-pty")?;
         Ok(Self {
             cancellation_token,
             session: Some(session),
