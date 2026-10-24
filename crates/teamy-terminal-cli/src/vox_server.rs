@@ -598,6 +598,8 @@ struct TerminalSessionState {
     debug_output: Vec<u8>,
     paste_guard: PasteGuard,
     input_gate: ShellInputGate,
+    #[cfg(test)]
+    readiness_token: String,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -2843,19 +2845,22 @@ impl VoxTerminalService {
         };
         match event {
             PtyEvent::Output(bytes) => {
-                if let Err(error) = Self::answer_terminal_queries(&state.pty, &bytes) {
-                    tracing::warn!(session_id = %runtime.session_id, ?error, "terminal query response failed");
-                    state.closed = true;
-                    runtime.closed.store(true, Ordering::Release);
-                }
                 state.debug_output.extend_from_slice(&bytes);
                 if state.debug_output.len() > 64 * 1024 {
                     let remove = state.debug_output.len() - 64 * 1024;
                     state.debug_output.drain(..remove);
                 }
                 state.terminal.process_bytes(&bytes);
+                let responses = state.terminal.drain_responses().collect::<Vec<_>>();
+                for response in responses {
+                    if let Err(error) = state.pty.write_input(&response) {
+                        tracing::warn!(session_id = %runtime.session_id, ?error, "terminal query response failed");
+                        state.closed = true;
+                        runtime.closed.store(true, Ordering::Release);
+                    }
+                }
                 if matches!(state.input_gate, ShellInputGate::Starting { .. })
-                    && state.terminal.prompt_metadata().prompt_range.is_some()
+                    && state.terminal.is_shell_ready()
                 {
                     state.input_gate.observe_prompt(Instant::now());
                 }
@@ -2906,26 +2911,6 @@ impl VoxTerminalService {
             drop(runtime);
             let _ = forwarder.join();
         });
-    }
-
-    fn answer_terminal_queries(pty: &PtySessionControl, bytes: &[u8]) -> Result<(), TerminalError> {
-        let cursor_queries = bytes
-            .windows(4)
-            .filter(|window| *window == b"\x1b[6n")
-            .count();
-        for _ in 0..cursor_queries {
-            pty.write_input(b"\x1b[1;1R")
-                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        }
-        let device_attribute_queries = bytes
-            .windows(3)
-            .filter(|window| *window == b"\x1b[c")
-            .count();
-        for _ in 0..device_attribute_queries {
-            pty.write_input(b"\x1b[?1;2c")
-                .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
-        }
-        Ok(())
     }
 
     fn empty_range() -> TerminalRange {
@@ -3436,14 +3421,23 @@ impl Terminal for VoxTerminalService {
         let pty_config = PtyConfig::interactive();
         #[cfg(test)]
         let pty_config = self.test_pty_config.clone().unwrap_or(pty_config);
-        let pty = PtySession::spawn(&pty_config)
+        let token = teamy_terminal_pty::ShellReadinessToken::default();
+        let pty = PtySession::spawn_with_readiness(&pty_config, &token)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         pty.resize(width, height, 0, 0)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         let (pty, events) = pty.split();
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), width, height);
+        terminal.arm_shell_readiness(
+            token
+                .as_str()
+                .as_bytes()
+                .try_into()
+                .expect("fixed-length token"),
+        );
         let state = TerminalSessionState {
             pty,
-            terminal: TerminalSession::new(TerminalLimits::default(), width, height),
+            terminal,
             sequence: 1,
             surface,
             tuning,
@@ -3451,6 +3445,8 @@ impl Terminal for VoxTerminalService {
             debug_output: Vec::new(),
             paste_guard: PasteGuard::default(),
             input_gate: ShellInputGate::new(Instant::now()),
+            #[cfg(test)]
+            readiness_token: token.as_str().to_owned(),
         };
         let sequence = state.sequence;
         let connected_surface = state.surface.clone();
@@ -6870,7 +6866,7 @@ mod tests {
         let runtime = service
             .session(&connected.session_id)
             .expect("connected session should be registered");
-        process_terminal_bytes(&runtime, b"alpha beta");
+        process_terminal_bytes(&runtime, b"\x1b[2J\x1b[Halpha beta");
         let raster_mutations_before = runtime.publication.mutations.load(Ordering::Acquire);
 
         let pressed = service

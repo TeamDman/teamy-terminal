@@ -398,6 +398,8 @@ struct TerminalState {
     prompt_start: Option<CursorPosition>,
     command_start: Option<CursorPosition>,
     responses: VecDeque<Vec<u8>>,
+    shell_readiness: Option<[u8; 32]>,
+    shell_ready: bool,
     win32_input_mode: bool,
     mouse_tracking_mode: u8,
     sgr_mouse_mode: bool,
@@ -428,6 +430,8 @@ impl TerminalState {
             prompt_start: None,
             command_start: None,
             responses: VecDeque::new(),
+            shell_readiness: None,
+            shell_ready: false,
             win32_input_mode: false,
             mouse_tracking_mode: 0,
             sgr_mouse_mode: false,
@@ -1089,6 +1093,17 @@ impl Perform for Performer<'_> {
     }
 
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        if params.len() == 3 && params[0] == b"1337" && params[1] == b"TeamyShellReady" {
+            if self
+                .state
+                .shell_readiness
+                .as_ref()
+                .is_some_and(|token| params[2] == token)
+            {
+                self.state.shell_ready = true;
+            }
+            return;
+        }
         if params.first().copied() != Some(b"133") {
             return;
         }
@@ -1350,6 +1365,18 @@ impl TerminalSession {
     #[must_use]
     pub fn selected_text(&self) -> Option<String> {
         self.state.selected_text()
+    }
+
+    /// Arm an opaque per-process readiness signal independently of screen state.
+    pub fn arm_shell_readiness(&mut self, token: [u8; 32]) {
+        self.state.shell_readiness = Some(token);
+        self.state.shell_ready = false;
+    }
+
+    /// Whether the armed signal has been parsed, regardless of subsequent scrolling.
+    #[must_use]
+    pub fn is_shell_ready(&self) -> bool {
+        self.state.shell_ready
     }
 
     /// Return shell prompt metadata without copying the terminal's cells.
@@ -1781,6 +1808,77 @@ mod tests {
                 .cell(2, 0)
                 .map(|cell| cell.combining_scalars().count()),
             Some(0)
+        );
+    }
+}
+
+#[cfg(test)]
+mod shell_readiness_tests {
+    use super::*;
+    const TOKEN: [u8; 32] = *b"0123456789abcdef0123456789abcdef";
+
+    #[test]
+    fn readiness_is_exact_framing_independent_and_not_screen_metadata() {
+        for ending in ["\x07", "\x1b\\"] {
+            let marker = format!(
+                "\x1b]1337;TeamyShellReady;{}{ending}",
+                std::str::from_utf8(&TOKEN).unwrap()
+            );
+            for split in 0..marker.len() {
+                let mut terminal = TerminalSession::new(TerminalLimits::default(), 80, 4);
+                terminal.arm_shell_readiness(TOKEN);
+                terminal.process_bytes(b"before\x1b]133;A\x07\x1b]133;B\x07\x1b]1337;TeamyShellReady;ffffffffffffffffffffffffffffffff\x07");
+                assert!(!terminal.is_shell_ready());
+                terminal.process_bytes(&marker.as_bytes()[..split]);
+                // VTE dispatches OSC on ESC, before the ST backslash arrives.
+                assert_eq!(
+                    terminal.is_shell_ready(),
+                    ending == "\x1b\\" && split == marker.len() - 1
+                );
+                terminal.process_bytes(&marker.as_bytes()[split..]);
+                terminal.process_bytes(b"\x1bcafter\r\n1\r\n2\r\n3\r\n4");
+                assert!(terminal.is_shell_ready());
+                let text = terminal.snapshot().visible_text();
+                assert!(!text.contains("TeamyShellReady"));
+                terminal.resize(40, 2);
+                assert!(terminal.is_shell_ready());
+            }
+        }
+    }
+
+    #[test]
+    fn malformed_and_aborted_signals_do_not_open_gate() {
+        for bytes in [
+            b"\x1b]1337;TeamyShellReady;0123456789abcdef0123456789abcdef;extra\x07".as_slice(),
+            b"\x1b]1337;TeamyShellReady;0123456789abcdef0123456789abcde\x07",
+            b"\x1b]1337;TeamyShellReady;012345\x18text",
+        ] {
+            let mut terminal = TerminalSession::new(TerminalLimits::default(), 80, 4);
+            terminal.arm_shell_readiness(TOKEN);
+            terminal.process_bytes(bytes);
+            assert!(!terminal.is_shell_ready());
+        }
+    }
+
+    #[test]
+    fn marker_does_not_consume_adjacent_visible_output_and_queries_survive_splits() {
+        let mut terminal = TerminalSession::new(TerminalLimits::default(), 80, 4);
+        terminal.arm_shell_readiness(TOKEN);
+        terminal.process_bytes(
+            b"before\x1b]1337;TeamyShellReady;0123456789abcdef0123456789abcdef\x07after",
+        );
+        assert_eq!(terminal.snapshot().visible_text().trim(), "beforeafter");
+        terminal.process_bytes(b"\x1b[6");
+        assert_eq!(terminal.drain_responses().count(), 0);
+        terminal.process_bytes(b"n\x1b[");
+        assert_eq!(
+            terminal.drain_responses().collect::<Vec<_>>(),
+            vec![b"\x1b[1;12R".to_vec()]
+        );
+        terminal.process_bytes(b"c");
+        assert_eq!(
+            terminal.drain_responses().collect::<Vec<_>>(),
+            vec![b"\x1b[?1;2c".to_vec()]
         );
     }
 }

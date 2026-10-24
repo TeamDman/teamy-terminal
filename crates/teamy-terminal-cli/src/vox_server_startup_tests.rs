@@ -80,8 +80,9 @@ impl Fixture {
     }
 
     fn ready(&self) {
-        // Exercise split OSC parsing, not a prompt-text heuristic.
-        for bytes in [b"\x1b]133;A\x07custom> \x1b]133;".as_slice(), b"B\x07"] {
+        let token = self.runtime.state.lock().unwrap().readiness_token.clone();
+        let marker = format!("\x1b]1337;TeamyShellReady;{token}\x07");
+        for bytes in marker.as_bytes().chunks(3) {
             VoxTerminalService::process_pty_event(&self.runtime, PtyEvent::Output(bytes.to_vec()));
         }
     }
@@ -175,6 +176,8 @@ async fn immediate_input_is_rejected_then_repeated_accepted_sends_are_distinct()
     );
     starting(&fixture.text("rejected\n").await.unwrap_err());
     VoxTerminalService::process_pty_event(&fixture.runtime, PtyEvent::Output(b"B\x07".to_vec()));
+    starting(&fixture.text("rejected\n").await.unwrap_err());
+    fixture.ready();
     for _ in 0..2 {
         assert_eq!(
             fixture.text("accepted\n").await.unwrap().disposition,
@@ -242,6 +245,12 @@ async fn startup_failure_timeout_and_close_never_admit_late_input() {
 async fn readiness_and_input_remain_session_and_connection_scoped() {
     let first = Fixture::new().await;
     let second = Fixture::new().await;
+    let first_token = first.runtime.state.lock().unwrap().readiness_token.clone();
+    VoxTerminalService::process_pty_event(
+        &second.runtime,
+        PtyEvent::Output(format!("\x1b]1337;TeamyShellReady;{first_token}\x07").into_bytes()),
+    );
+    starting(&second.text("rejected\n").await.unwrap_err());
     first.ready();
     first.text("first\n").await.unwrap();
     starting(&second.text("rejected\n").await.unwrap_err());

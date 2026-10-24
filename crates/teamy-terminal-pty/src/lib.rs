@@ -25,6 +25,30 @@ use std::time::Duration;
 
 const TEAMY_PWSH_OSC133_BOOTSTRAP: &str = r#"if (Get-Module -ListAvailable -Name PSReadLine) { Import-Module PSReadLine -ErrorAction SilentlyContinue }; $global:__teamy_prompt_seen = $false; if (Test-Path Function:\prompt) { $function:__teamy_original_prompt = $function:prompt }; function global:prompt { $status = if ($?) { 0 } elseif ($null -ne $LASTEXITCODE) { [int]$LASTEXITCODE } else { 1 }; if ($global:__teamy_prompt_seen) { [Console]::Out.Write("`e]133;D;$status`a") } else { $global:__teamy_prompt_seen = $true }; [Console]::Out.Write("`e]133;A`a"); $promptText = if (Test-Path Function:\__teamy_original_prompt) { & $function:__teamy_original_prompt } else { "PS $($executionContext.SessionState.Path.CurrentLocation)$('>' * ($nestedPromptLevel + 1)) " }; [Console]::Out.Write("`e]133;B`a"); $promptText }"#;
 
+/// Per-process discriminator for shell readiness, not an authentication secret.
+#[derive(Clone, Debug)]
+pub struct ShellReadinessToken(String);
+
+impl Default for ShellReadinessToken {
+    fn default() -> Self {
+        use std::hash::{BuildHasher, Hasher};
+        let value = || {
+            std::collections::hash_map::RandomState::new()
+                .build_hasher()
+                .finish()
+        };
+        Self(format!("{:016x}{:016x}", value(), value()))
+    }
+}
+
+impl ShellReadinessToken {
+    /// The printable, fixed-length discriminator used in the shell's OSC signal.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 /// Initial terminal dimensions used before a window reports its real size.
 pub const DEFAULT_COLUMNS: u16 = 120;
 /// Initial terminal dimensions used before a window reports its real size.
@@ -78,6 +102,10 @@ impl PtyConfig {
     }
 
     fn command(&self) -> CommandBuilder {
+        self.command_with_readiness(None)
+    }
+
+    fn command_with_readiness(&self, readiness: Option<&ShellReadinessToken>) -> CommandBuilder {
         let mut command = CommandBuilder::new(&self.shell);
         command.arg("-NoLogo");
         if self.no_profile {
@@ -96,7 +124,11 @@ impl PtyConfig {
             }
             command.arg("-NoExit");
             command.arg("-Command");
-            command.arg(TEAMY_PWSH_OSC133_BOOTSTRAP);
+            if let Some(token) = readiness {
+                command.arg(format!(r#"{TEAMY_PWSH_OSC133_BOOTSTRAP}; if (Test-Path Function:\PSConsoleHostReadLine) {{ $global:__teamy_original_readline = $function:PSConsoleHostReadLine; $global:__teamy_ready_sent = $false; function global:PSConsoleHostReadLine {{ if (-not $global:__teamy_ready_sent) {{ $global:__teamy_ready_sent = $true; [Console]::TreatControlCAsInput = $true; [Console]::Out.Write("`e]1337;TeamyShellReady;{}`a") }}; & $global:__teamy_original_readline @args }} }}"#, token.as_str()));
+            } else {
+                command.arg(TEAMY_PWSH_OSC133_BOOTSTRAP);
+            }
         }
         command
     }
@@ -194,16 +226,25 @@ impl PtySession {
     /// Returns an error when the PTY cannot be allocated, the shell cannot be
     /// spawned, or the PTY master cannot provide reader/writer handles.
     pub fn spawn(config: &PtyConfig) -> Result<Self> {
+        Self::spawn_command(config, config.command())
+    }
+
+    /// Spawn with a session-specific readiness signal from the PowerShell read hook.
+    ///
+    /// # Errors
+    /// Returns the same PTY allocation and process errors as [`Self::spawn`].
+    pub fn spawn_with_readiness(config: &PtyConfig, token: &ShellReadinessToken) -> Result<Self> {
+        Self::spawn_command(config, config.command_with_readiness(Some(token)))
+    }
+
+    fn spawn_command(config: &PtyConfig, command: CommandBuilder) -> Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(config.size)
             .map_err(|error| eyre::eyre!("failed to allocate a pseudoterminal: {error}"))?;
-        let child = pair
-            .slave
-            .spawn_command(config.command())
-            .map_err(|error| {
-                eyre::eyre!("failed to spawn the configured shell in the pseudoterminal: {error}")
-            })?;
+        let child = pair.slave.spawn_command(command).map_err(|error| {
+            eyre::eyre!("failed to spawn the configured shell in the pseudoterminal: {error}")
+        })?;
         #[cfg(windows)]
         let process_id = child.process_id();
         let killer = Arc::new(Mutex::new(child.clone_killer()));
@@ -675,6 +716,70 @@ mod tests {
     fn test_event_queue(capacity: usize) -> (SyncSender<PtyEvent>, PtyEventReceiver) {
         let (sender, events) = mpsc::sync_channel(capacity);
         (sender, PtyEventReceiver { events })
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn input_before_delayed_readline_delegate_is_preserved() {
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let (sender, receiver) = mpsc::channel();
+        std::thread::spawn(move || sender.send(listener.accept()).unwrap());
+        let config = PtyConfig::test();
+        let token = ShellReadinessToken::default();
+        let generated = config.command_with_readiness(Some(&token));
+        let bootstrap = generated.get_argv().last().unwrap().to_str().unwrap();
+        // Importing again re-exports the module hook and would erase the test delegate.
+        let bootstrap = bootstrap.split_once("; ").unwrap().1;
+        // The delegate blocks on an explicit socket barrier before PSReadLine starts.
+        // Input is written before releasing the barrier; there are no timing sleeps.
+        let program = format!(
+            r"Import-Module PSReadLine; $global:__test_reader = $function:PSConsoleHostReadLine; function global:PSConsoleHostReadLine {{ $c = [System.Net.Sockets.TcpClient]::new('127.0.0.1', {port}); $null = $c.GetStream().ReadByte(); $c.Dispose(); & $global:__test_reader @args }}; {bootstrap}"
+        );
+        let mut command = CommandBuilder::new(&config.shell);
+        command.args(["-NoLogo", "-NoProfile", "-NoExit", "-Command", &program]);
+        command.env("TERM", "xterm-256color");
+        command.env("NO_COLOR", "");
+        let session = PtySession::spawn_command(&config, command).unwrap();
+        let (control, events) = session.split();
+        let marker = format!("TeamyShellReady;{}", token.as_str());
+        let mut output = String::new();
+        let deadline = std::time::Instant::now() + Duration::from_secs(15);
+        let mut released = false;
+        let mut answered = 0;
+        loop {
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let event = events
+                .events
+                .recv_timeout(remaining)
+                .expect("bounded reader qualification");
+            if let PtyEvent::Output(bytes) = event {
+                output.push_str(&String::from_utf8_lossy(&bytes));
+                let queries = output.matches("\x1b[6n").count();
+                for _ in answered..queries {
+                    control.write_input(b"\x1b[1;1R").unwrap();
+                }
+                answered = queries;
+                if !released && output.contains(&marker) {
+                    let (mut barrier, _) = receiver
+                        .recv_timeout(Duration::from_secs(5))
+                        .unwrap()
+                        .unwrap();
+                    control
+                        .write_input(b"Write-Output ([string]::Concat('DELAYED_', 'READER_OK'))\r")
+                        .unwrap();
+                    barrier.write_all(&[1]).unwrap();
+                    released = true;
+                }
+                if output.contains("DELAYED_READER_OK") {
+                    break;
+                }
+            } else {
+                panic!("reader exited before command execution: {event:?}; {output}");
+            }
+        }
+        control.kill().unwrap();
     }
 
     #[test]
