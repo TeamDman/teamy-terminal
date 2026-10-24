@@ -125,7 +125,7 @@ impl PtyConfig {
             command.arg("-NoExit");
             command.arg("-Command");
             if let Some(token) = readiness {
-                command.arg(format!(r#"{TEAMY_PWSH_OSC133_BOOTSTRAP}; if (Test-Path Function:\PSConsoleHostReadLine) {{ $global:__teamy_original_readline = $function:PSConsoleHostReadLine; $global:__teamy_ready_sent = $false; function global:PSConsoleHostReadLine {{ if (-not $global:__teamy_ready_sent) {{ $global:__teamy_ready_sent = $true; [Console]::TreatControlCAsInput = $true; [Console]::Out.Write("`e]1337;TeamyShellReady;{}`a") }}; & $global:__teamy_original_readline @args }} }}"#, token.as_str()));
+                command.arg(format!(r#"{TEAMY_PWSH_OSC133_BOOTSTRAP}; if (Test-Path Function:\PSConsoleHostReadLine) {{ $global:__teamy_original_readline = $function:PSConsoleHostReadLine; $global:__teamy_ready_sent = $false; function global:PSConsoleHostReadLine {{ if (-not $global:__teamy_ready_sent) {{ $global:__teamy_ready_sent = $true; $previousControlCMode = [Console]::TreatControlCAsInput; try {{ [Console]::TreatControlCAsInput = $true; [Console]::Out.Write("`e]1337;TeamyShellReady;{}`a"); & $global:__teamy_original_readline @args }} finally {{ [Console]::TreatControlCAsInput = $previousControlCMode }} }} else {{ & $global:__teamy_original_readline @args }} }} }}"#, token.as_str()));
             } else {
                 command.arg(TEAMY_PWSH_OSC133_BOOTSTRAP);
             }
