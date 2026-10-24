@@ -4,6 +4,7 @@
 pub mod cli;
 mod interactive;
 pub mod logging_init;
+mod shell_input;
 mod stop_after_args;
 mod vox_server;
 

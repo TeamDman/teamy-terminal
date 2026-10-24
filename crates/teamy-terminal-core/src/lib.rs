@@ -1352,6 +1352,12 @@ impl TerminalSession {
         self.state.selected_text()
     }
 
+    /// Return shell prompt metadata without copying the terminal's cells.
+    #[must_use]
+    pub const fn prompt_metadata(&self) -> PromptMetadata {
+        self.state.prompt
+    }
+
     /// Return a deterministic copy of the current visible state.
     #[must_use]
     pub fn snapshot(&self) -> TerminalSnapshot {

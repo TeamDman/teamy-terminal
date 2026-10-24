@@ -5,6 +5,7 @@
 //! CPU Fontdue and no-window GPU Slug can each publish full PNG, full raw RGBA,
 //! or packed dirty raw RGBA through the generated Vox contract.
 
+use crate::shell_input::{InputUnavailable, ShellInputGate};
 use eyre::Context;
 use eyre::Result;
 use facet::Facet;
@@ -445,6 +446,8 @@ pub fn normalize_listen_address(raw: &str) -> Result<String> {
 
 #[derive(Clone)]
 pub struct VoxTerminalService {
+    #[cfg(test)]
+    test_pty_config: Option<PtyConfig>,
     sessions: Arc<Mutex<BTreeMap<String, Arc<TerminalSessionRuntime>>>>,
     process_epoch: Arc<str>,
     connection_epoch: Arc<str>,
@@ -594,6 +597,7 @@ struct TerminalSessionState {
     closed: bool,
     debug_output: Vec<u8>,
     paste_guard: PasteGuard,
+    input_gate: ShellInputGate,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -706,6 +710,7 @@ struct TerminalSessionRuntime {
     actor_sender: SyncSender<SessionActorMessage>,
     terminal_sequence: AtomicI64,
     closed: AtomicBool,
+    shutdown_started: AtomicBool,
 }
 
 impl TerminalSessionRuntime {
@@ -778,9 +783,10 @@ impl TerminalSessionRuntime {
     }
 
     fn shutdown(&self) {
-        if self.closed.swap(true, Ordering::AcqRel) {
+        if self.shutdown_started.swap(true, Ordering::AcqRel) {
             return;
         }
+        self.closed.store(true, Ordering::Release);
         self.raster_render_permits.close();
         self.publication.close();
         if let Ok(mut cancellations) = self.raster_render_cancellations.lock() {
@@ -790,7 +796,9 @@ impl TerminalSessionRuntime {
             cancellations.clear();
         }
         let _ = self.actor_sender.try_send(SessionActorMessage::Shutdown);
-        if let Ok(state) = self.state.lock() {
+        if let Ok(mut state) = self.state.lock() {
+            state.closed = true;
+            state.input_gate.close();
             let _ = state.pty.kill();
         }
     }
@@ -2330,6 +2338,8 @@ impl VoxTerminalService {
             process_epoch,
             gpu_registry: process_gpu_registry(),
             latest_snapshot_timing: Arc::new(Mutex::new(None)),
+            #[cfg(test)]
+            test_pty_config: None,
         }
     }
 
@@ -2340,6 +2350,8 @@ impl VoxTerminalService {
             connection_epoch: next_connection_epoch(&self.process_epoch),
             gpu_registry: Arc::clone(&self.gpu_registry),
             latest_snapshot_timing: Arc::clone(&self.latest_snapshot_timing),
+            #[cfg(test)]
+            test_pty_config: self.test_pty_config.clone(),
         }
     }
 
@@ -2398,6 +2410,34 @@ impl VoxTerminalService {
                 format!("terminal session lock poisoned: {error}"),
                 0,
             )
+        })
+    }
+
+    fn require_shell_input(session: &mut TerminalSessionState) -> Result<(), TerminalError> {
+        if session.closed {
+            session.input_gate.close();
+        }
+        session.input_gate.check(Instant::now()).map_err(|reason| {
+            let (code, message, retryable) = match reason {
+                InputUnavailable::Starting => (
+                    TerminalErrorCode::InvalidRequest,
+                    "terminal shell is starting; input was not forwarded; retry after shell readiness",
+                    true,
+                ),
+                InputUnavailable::StartupTimedOut => (
+                    TerminalErrorCode::Disconnected,
+                    "terminal shell did not report readiness within 30 seconds; input was not forwarded; disconnect and reconnect",
+                    false,
+                ),
+                InputUnavailable::Closed => (
+                    TerminalErrorCode::Disconnected,
+                    "terminal shell is closed; input was not forwarded",
+                    false,
+                ),
+            };
+            let mut error = Self::error(code, message, session.sequence);
+            error.retryable = retryable;
+            error
         })
     }
 
@@ -2814,6 +2854,11 @@ impl VoxTerminalService {
                     state.debug_output.drain(..remove);
                 }
                 state.terminal.process_bytes(&bytes);
+                if matches!(state.input_gate, ShellInputGate::Starting { .. })
+                    && state.terminal.prompt_metadata().prompt_range.is_some()
+                {
+                    state.input_gate.observe_prompt(Instant::now());
+                }
             }
             PtyEvent::Exited(status) => {
                 state.closed = true;
@@ -2831,6 +2876,9 @@ impl VoxTerminalService {
                 runtime.closed.store(true, Ordering::Release);
                 tracing::warn!(session_id = %runtime.session_id, %message, "terminal PTY failed");
             }
+        }
+        if state.closed {
+            state.input_gate.close();
         }
         let sequence = Self::next_sequence(&mut state.sequence);
         drop(state);
@@ -3385,7 +3433,10 @@ impl Terminal for VoxTerminalService {
         let session_id = format!("sfm-terminal-{epoch_sequence}");
         let session_epoch: Arc<str> =
             Arc::from(format!("{}:session:{epoch_sequence}", self.process_epoch));
-        let pty = PtySession::spawn(&PtyConfig::interactive())
+        let pty_config = PtyConfig::interactive();
+        #[cfg(test)]
+        let pty_config = self.test_pty_config.clone().unwrap_or(pty_config);
+        let pty = PtySession::spawn(&pty_config)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
         pty.resize(width, height, 0, 0)
             .map_err(|error| Self::error(TerminalErrorCode::Internal, error.to_string(), 0))?;
@@ -3399,6 +3450,7 @@ impl Terminal for VoxTerminalService {
             closed: false,
             debug_output: Vec::new(),
             paste_guard: PasteGuard::default(),
+            input_gate: ShellInputGate::new(Instant::now()),
         };
         let sequence = state.sequence;
         let connected_surface = state.surface.clone();
@@ -3423,6 +3475,7 @@ impl Terminal for VoxTerminalService {
             actor_sender,
             terminal_sequence: AtomicI64::new(sequence),
             closed: AtomicBool::new(false),
+            shutdown_started: AtomicBool::new(false),
         });
         Self::spawn_session_actor(&runtime, events, actor_receiver);
         self.sessions
@@ -3547,7 +3600,8 @@ impl Terminal for VoxTerminalService {
             ));
         }
         let session = self.session(&request.session_id)?;
-        let session = Self::lock_session(&session)?;
+        let mut session = Self::lock_session(&session)?;
+        Self::require_shell_input(&mut session)?;
         let text = request.text.into_bytes();
         session.pty.write_input(&text).map_err(|error| {
             Self::error(
@@ -3574,7 +3628,8 @@ impl Terminal for VoxTerminalService {
         request: TerminalKeyInput,
     ) -> Result<TerminalInputResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let session = Self::lock_session(&session)?;
+        let mut session = Self::lock_session(&session)?;
+        Self::require_shell_input(&mut session)?;
         let bytes = key_input_bytes(
             request.key_code,
             request.modifiers,
@@ -3609,6 +3664,7 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalInputResult, TerminalError> {
         let runtime = self.session(&request.session_id)?;
         let mut session = Self::lock_session(&runtime)?;
+        Self::require_shell_input(&mut session)?;
         let disposition = if session.terminal.mouse_reporting_enabled() {
             let bytes = mouse_input_bytes(
                 &session.terminal,
@@ -3725,6 +3781,7 @@ impl Terminal for VoxTerminalService {
     ) -> Result<TerminalPasteResult, TerminalError> {
         let runtime = self.session(&request.session_id)?;
         let mut session = Self::lock_session(&runtime)?;
+        Self::require_shell_input(&mut session)?;
         if request.source != TerminalPasteSource::Supplied {
             return Err(Self::error(
                 TerminalErrorCode::UnsupportedCapability,
@@ -4538,7 +4595,8 @@ impl Terminal for VoxTerminalService {
         request: TerminalCancelRequest,
     ) -> Result<TerminalOperationResult, TerminalError> {
         let session = self.session(&request.session_id)?;
-        let session = Self::lock_session(&session)?;
+        let mut session = Self::lock_session(&session)?;
+        Self::require_shell_input(&mut session)?;
         // Cancellation is a terminal input operation, not merely a state
         // acknowledgement. Ctrl+C is deliberately encoded through the same
         // generic key path as a client key event so every terminal control
@@ -4677,6 +4735,29 @@ mod tests {
     use spec_proto::terminal::TerminalClient;
     use teamy_terminal_core::Color;
     use teamy_terminal_frame::ComposedRasterFrame;
+
+    async fn wait_for_shell_ready(service: &VoxTerminalService, session_id: &str) {
+        let runtime = service.session(session_id).expect("session exists");
+        let (id, mut changes) = runtime.publication.register(runtime.sequence());
+        tokio::time::timeout(Duration::from_secs(10), async {
+            loop {
+                let readiness = VoxTerminalService::require_shell_input(
+                    &mut runtime.state.lock().expect("session state locks"),
+                );
+                match readiness {
+                    Ok(()) => break,
+                    Err(error) => assert!(error.retryable, "startup failed: {error:?}"),
+                }
+                changes
+                    .changed()
+                    .await
+                    .expect("session stays open during startup");
+            }
+        })
+        .await
+        .expect("shell should become ready");
+        runtime.publication.unregister(id);
+    }
 
     fn own_frame(event: vox::SelfRef<TerminalFrameEvent>) -> TerminalFrameEvent {
         let json = event.map(|event| {
@@ -4823,7 +4904,10 @@ mod tests {
         }
     }
 
-    fn test_connect_request(endpoint: &str, client_sequence: i64) -> TerminalConnectRequest {
+    pub(super) fn test_connect_request(
+        endpoint: &str,
+        client_sequence: i64,
+    ) -> TerminalConnectRequest {
         test_connect_request_for_surface(endpoint, client_sequence, 80, 24, 800, 480)
     }
 
@@ -6314,6 +6398,7 @@ mod tests {
             .connect(connect_request)
             .await
             .expect("terminal session should connect");
+        wait_for_shell_ready(&service, &connected.session_id).await;
         let (frame_tx, mut frame_rx) = vox::channel::<TerminalFrameEvent>();
         let subscription_client = client.clone();
         let subscription_session = connected.session_id.clone();
@@ -6388,28 +6473,6 @@ mod tests {
             .expect("dropped receiver should finish the subscription request")
             .expect("dropped receiver subscription task should not panic")
             .expect("dropped receiver subscription should complete cleanly");
-        // A connected session and first frame do not imply the shell is ready.
-        // Sending during PowerShell startup can be echoed without execution.
-        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-        loop {
-            let ready = runtime
-                .state
-                .lock()
-                .expect("session state should lock")
-                .terminal
-                .snapshot()
-                .visible_text()
-                .lines()
-                .any(|line| line.starts_with("PS ") && line.trim_end().ends_with('>'));
-            if ready {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < ready_deadline,
-                "PowerShell prompt should arrive before submitting the puppet command"
-            );
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
         // PTY read chunking varies by platform and shell history. Publish a known
         // burst without yielding this current-thread executor so the subscription
         // must coalesce it; retain the real shell output and all frame witnesses.
@@ -6622,6 +6685,7 @@ mod tests {
             .connect(connect_request)
             .await
             .expect("terminal session should connect");
+        wait_for_shell_ready(&service, &connected.session_id).await;
 
         client
             .send_text(TerminalTextInput {
@@ -6802,6 +6866,7 @@ mod tests {
             ))
             .await
             .expect("terminal session should connect");
+        wait_for_shell_ready(&service, &connected.session_id).await;
         let runtime = service
             .session(&connected.session_id)
             .expect("connected session should be registered");
@@ -6919,6 +6984,7 @@ mod tests {
             ))
             .await
             .expect("terminal session should connect");
+        wait_for_shell_ready(&service, &connected.session_id).await;
         let runtime = service
             .session(&connected.session_id)
             .expect("connected session should be registered");
@@ -7093,6 +7159,7 @@ mod tests {
             ))
             .await
             .expect("terminal session should connect");
+        wait_for_shell_ready(&service, &connected.session_id).await;
         let runtime = service
             .session(&connected.session_id)
             .expect("connected session should be registered");
@@ -7167,3 +7234,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(all(test, unix))]
+#[path = "vox_server_startup_tests.rs"]
+mod startup_tests;

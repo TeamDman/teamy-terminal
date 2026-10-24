@@ -20,6 +20,7 @@ def main():
     parser.add_argument('--runtime-jar', type=Path, required=True)
     parser.add_argument('--server', type=Path, required=True)
     parser.add_argument('--output', type=Path, required=True)
+    parser.add_argument('--readiness', action='store_true', help='verify immediate input admission and explicit retries')
     parser.add_argument('--early-input', action='store_true', help='diagnose input before shell readiness; may fail')
     args = parser.parse_args()
     jar, server_path = args.runtime_jar.resolve(), args.server.resolve()
@@ -32,7 +33,8 @@ def main():
     classes.mkdir()
     source = Path(__file__).with_name('TerminalProbe.java').resolve()
     subprocess.run([str(args.java_home / 'bin/javac'), '--release', '17', '-Xlint:all',
-                    '-Werror', '-cp', str(jar), '-d', str(classes), str(source)],
+                    '-Werror', '-cp', str(jar), '-d', str(classes), str(source),
+                    str(source.with_name('InputReadinessProbe.java'))],
                    check=True, timeout=60)
     env = os.environ.copy()
     for key, name in [('XDG_DATA_HOME', 'data'), ('XDG_CACHE_HOME', 'cache'),
@@ -55,7 +57,7 @@ def main():
                 time.sleep(0.05)
             result = subprocess.run([str(args.java_home / 'bin/java'), '-ea', '-cp',
                                      os.pathsep.join([str(classes), str(jar)]),
-                                     'TerminalProbe', match.group(1), *(['early'] if args.early_input else [])],
+                                     'InputReadinessProbe' if args.readiness else 'TerminalProbe', match.group(1), *(['early'] if args.early_input else [])],
                                     env=env, capture_output=True, text=True, timeout=90)
             (out / 'client.stdout').write_text(result.stdout)
             (out / 'client.stderr').write_text(result.stderr)
@@ -64,7 +66,8 @@ def main():
             receipt = {'status': 'passed' if result.returncode == 0 else 'failed', 'client_exit': result.returncode, 'scope': 'real TCP generated Java to Rust Terminal, CPU only; not Minecraft',
                        'java_runtime_source': '5628c00d9f3816199f324a9ccc081de8a3a1b1bc',
                        'runtime_sha256': digest(jar), 'server_sha256': digest(server_path),
-                       'probe_sha256': digest(source), 'early_input': args.early_input, 'checks': result.stdout.splitlines()}
+                       'probe_sha256': digest(source), 'early_input': args.early_input, 'readiness': args.readiness,
+                       'readiness_probe_sha256': digest(source.with_name('InputReadinessProbe.java')), 'checks': result.stdout.splitlines()}
             (out / 'receipt.json').write_text(json.dumps(receipt, indent=2) + '\n')
             result.check_returncode()
             print(result.stdout, end='')

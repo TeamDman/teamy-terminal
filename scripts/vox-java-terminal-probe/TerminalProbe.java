@@ -8,24 +8,24 @@ import org.facet.vox.generated.*;
 
 /** Real Terminal TCP consumer; no Minecraft, GUI or GPU rendering. */
 public final class TerminalProbe {
-    private static final long MAX_BYTES = 4 * 1024 * 1024;
-    private static <T> T await(CompletableFuture<T> future) throws Exception {
+    static final long MAX_BYTES = 4 * 1024 * 1024;
+    static <T> T await(CompletableFuture<T> future) throws Exception {
         return future.get(15, TimeUnit.SECONDS);
     }
-    private static void check(boolean condition, String message) {
+    static void check(boolean condition, String message) {
         if (!condition) throw new AssertionError(message);
     }
-    private static <T> T success(VoxResult<T, TerminalError> result) {
+    static <T> T success(VoxResult<T, TerminalError> result) {
         check(result.isSuccess(), "unexpected result " + result.kind()
                 + (result.isApplicationError() ? ": " + result.applicationError() : ""));
         return result.success();
     }
-    private static void missing(VoxResult<?, TerminalError> result) {
+    static void missing(VoxResult<?, TerminalError> result) {
         check(result.isApplicationError()
                 && result.applicationError().code() == TerminalErrorCode.SESSION_NOT_FOUND,
                 "missing/foreign session must be a typed application rejection: " + result.kind());
     }
-    private static ServiceLane open(VoxConnection connection, Executor executor) throws Exception {
+    static ServiceLane open(VoxConnection connection, Executor executor) throws Exception {
         connection.start(executor);
         long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10);
         while (connection.state() != ConnectionState.OPEN) {
@@ -37,7 +37,7 @@ public final class TerminalProbe {
         await(lane.opened());
         return lane;
     }
-    private static TerminalConnectRequest request(String renderer) {
+    static TerminalConnectRequest request(String renderer) {
         return new TerminalConnectRequest("java-consumer-probe", 80, 24,
                 new TerminalSurfaceMetrics(80, 24, 800, 480, 0, 0, 0),
                 new TerminalCapabilities(true, true, true, false, true, true, false, false,
@@ -46,7 +46,7 @@ public final class TerminalProbe {
                 new TerminalTuningRequest(renderer, TerminalTuningMode.MANUAL,
                         800, 480, TerminalTuningMode.AUTO, 0, TerminalTuningMode.MANUAL, 80, 24));
     }
-    private static void png(TerminalFrameEvent frame, String session) {
+    static void png(TerminalFrameEvent frame, String session) {
         check(frame != null && frame.sessionId().equals(session), "frame session identity");
         byte[] bytes = frame.frame().payload();
         check(bytes.length > 8 && bytes.length <= MAX_BYTES && bytes[0] == (byte)137
