@@ -1,0 +1,98 @@
+{
+  "terminal_source": "63a03c0a3f43e541860b7a31597d44e4bbba2c69",
+  "vox_overlay_source": "e469b86cdbab46502b913fb2af48dfacbd8e26f0",
+  "aggregate": {
+    "passed": 146,
+    "failed": 0,
+    "filtered": 27,
+    "command": "cargo test --offline --locked --workspace --all-features --no-fail-fast -- --skip gpu --skip vulkan --skip v3_ --skip raster_renderer_leases --skip first_device_loss"
+  },
+  "clippy": "passed: cargo clippy --offline --locked --workspace --all-targets --all-features -- -D warnings",
+  "format": "passed: cargo fmt --all -- --check",
+  "review": "independent read-only final source review: no blocking Terminal defect found",
+  "overall_consumer_ready": false,
+  "pending": [
+    "SFM typed rejection/session retention and paste completion",
+    "unpublished SFM TLS source reconciliation"
+  ],
+  "unrun": [
+    "Windows/ConPTY",
+    "GPU lifecycle/renderers",
+    "Minecraft",
+    "Tracey MCP unavailable"
+  ],
+  "java_runs": {
+    "readiness-63a03c0-pinned-1": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "b0bbe8d7adfd5c54e68a7b7d585d72fd3b5df23756f75bd3e2eab5b4c41e43de",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=34; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    },
+    "readiness-63a03c0-pinned-2": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "b0bbe8d7adfd5c54e68a7b7d585d72fd3b5df23756f75bd3e2eab5b4c41e43de",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=15; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    },
+    "readiness-63a03c0-overlay-schema": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "9af26a654109c4139c1b99cf112285915744a878fe07f8e5f6633199c56fddac",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": false,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS malformed payload decoded as INVALID_PAYLOAD",
+        "PASS generated schema negotiation, renderer rejection and connect",
+        "PASS missing and cross-connection session rejection",
+        "PASS Unicode PTY output, pushed PNG and receiver-close completion",
+        "PASS connection survives stream cancellation; disconnect invalidates session"
+      ]
+    },
+    "readiness-63a03c0-overlay-input": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "9af26a654109c4139c1b99cf112285915744a878fe07f8e5f6633199c56fddac",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=14; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    }
+  },
+  "log_sha256": {
+    "readiness-restored-aggregate.log": "83464f2f4c1c8afed2aa99f3042d55decacbb3b7f1c138eb1b561db2c54e62f6",
+    "readiness-restored-clippy.log": "c6e7c514ce8e8ab130cb8a9c5b940cadc4a17658cf395c046e0d99c36ca34c8e",
+    "readiness-final-format.log": "49d811ef25221f6dc8630eef85e281baecdccc942021b0ba7bc6b96d7d35140e"
+  }
+}

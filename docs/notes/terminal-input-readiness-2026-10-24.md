@@ -1,5 +1,8 @@
 # Production admission contract for input during shell startup
 
+Historical checkpoint. The marker mechanism below is superseded by the
+[reviewed readiness implementation](terminal-readiness-review-2026-10-24.md).
+
 Tested source checkpoint: `95acc6faff29f6d9768f929497b1f3b9f6fab1e9`, on local
 branch `task/terminal-input-readiness-20261024`. This documentation follow-up is
 not another runtime-tested source commit. The prior Vox macro fix and its isolated
