@@ -1,0 +1,180 @@
+{
+  "source_test_commit": "95acc6faff29f6d9768f929497b1f3b9f6fab1e9",
+  "source_branch": "task/terminal-input-readiness-20261024",
+  "baseline_runtime_source": "9078e66b1f327d919d19c4170dd038b9dbb84523 with existing macro overlay",
+  "macro_overlay_source": "e469b86cdbab46502b913fb2af48dfacbd8e26f0",
+  "toolchain": {
+    "rust": "1.96.0",
+    "jdk": "Temurin 21.0.8+9",
+    "powershell": "7.5.4 Linux (previously installed)"
+  },
+  "dependency_pins_changed": false,
+  "rust_tests": {
+    "state_machine": {
+      "passed": 4,
+      "failed": 0
+    },
+    "controlled_service": {
+      "passed": 5,
+      "failed": 0
+    },
+    "osc_markers": {
+      "passed": 2,
+      "failed": 0
+    },
+    "existing_behavior": {
+      "passed": 5,
+      "failed": 0,
+      "tests": [
+        "vox_puppet_runs_power_shell_and_returns_bounded_png",
+        "vox_cancel_interrupts_a_running_power_shell_command",
+        "remote_guarded_paste_requires_exact_single_use_confirmation",
+        "remote_selection_copy_is_authoritative_without_raster_publication",
+        "remote_mouse_reporting_takes_precedence_over_shell_selection"
+      ]
+    }
+  },
+  "other_checks": {
+    "strict_workspace_clippy": "passed",
+    "stable_format": "passed; nightly options unavailable",
+    "pinned_build": "passed",
+    "isolated_macro_overlay_build": "passed"
+  },
+  "real_tcp_probes": {
+    "baseline": {
+      "status": "failed",
+      "client_exit": 1,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "e0856fedbd38c3be8bbf61fd7ae573929b7af406db4de47ac82dfd25898b1d35",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": []
+    },
+    "published_pins_run_1": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "7d5cb2db5634519425f2d6b603905eae9b2cdd52cf9b28e2ede40583945020f3",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=32; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    },
+    "published_pins_run_2": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "7d5cb2db5634519425f2d6b603905eae9b2cdd52cf9b28e2ede40583945020f3",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=16; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    },
+    "published_pins_run_3": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "7d5cb2db5634519425f2d6b603905eae9b2cdd52cf9b28e2ede40583945020f3",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=14; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    },
+    "macro_overlay_schema": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "685069aa8f2320acdcd8c48fd1b399df1783d875148b23650dc0833a46444e56",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": false,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS malformed payload decoded as INVALID_PAYLOAD",
+        "PASS generated schema negotiation, renderer rejection and connect",
+        "PASS missing and cross-connection session rejection",
+        "PASS Unicode PTY output, pushed PNG and receiver-close completion",
+        "PASS connection survives stream cancellation; disconnect invalidates session"
+      ]
+    },
+    "macro_overlay_input": {
+      "status": "passed",
+      "client_exit": 0,
+      "scope": "real TCP generated Java to Rust Terminal, CPU only; not Minecraft",
+      "java_runtime_source": "5628c00d9f3816199f324a9ccc081de8a3a1b1bc",
+      "runtime_sha256": "be441a57e11d4981d283306fe471874e625bf2f423c83a91ce8f44dde623d062",
+      "server_sha256": "685069aa8f2320acdcd8c48fd1b399df1783d875148b23650dc0833a46444e56",
+      "probe_sha256": "6291111f9d7ecaec736c8ade79d1b93011244ddbdc7b418b449d6e73a61a5f5c",
+      "early_input": false,
+      "readiness": true,
+      "readiness_probe_sha256": "45a89fda466076333b273cd28201437948664aeac57a5341befe83924ee3ea36",
+      "checks": [
+        "PASS immediate input: explicit rejections=14; two accepted same-id sends executed exactly twice",
+        "PASS CPU stream, receiver cancellation and post-close input rejection"
+      ]
+    }
+  },
+  "log_sha256": {
+    "readiness-state-at-95acc6f.log": "aa687e56defba2ee7f574e17dcdbbdfb210d65be26d321868de45d4c124bbc86",
+    "readiness-service-at-95acc6f.log": "8778201e91be33cabbbc9c6d49334b7e0f809d2dfc7b5c9c03f45d706056e101",
+    "readiness-core-at-95acc6f.log": "5693fd227abb6c8b0e4badc310c5d0997d26f9033236736368804563fd027c0a",
+    "readiness-final-vox_puppet_runs_power_shell_and_returns_bounded_png.log": "594262321789f8fbe606c71b6dafe943009f1782fcd22fc81f4f8c0fc7d4928a",
+    "readiness-final-vox_cancel_interrupts_a_running_power_shell_command.log": "c41fdf4b32c5d2ac738b6c01abc7c47007a90df49d3f60cfb3787b40d77e4c79",
+    "readiness-final-remote_guarded_paste_requires_exact_single_use_confirmation.log": "b44e15fb2e7233d2eff603ad75cffa1b318b1a4b16cae0d6407a56b3f5979a48",
+    "readiness-final-remote_selection_copy_is_authoritative_without_raster_publication.log": "339f5693c0e06c1b7bddd6b64c1c00064e9caebe89654b32a2fe731dc93e8497",
+    "readiness-final-remote_mouse_reporting_takes_precedence_over_shell_selection.log": "0303e29c74528ec33c1490d1023f28b9d1a3821fc003b579aa2b5997e04f8329",
+    "readiness-clippy-final.log": "65e0bfefd0ccb801fe62e35b1b64b90298ce78996c3195ae5cb4d6233f73c5d1",
+    "readiness-final-fmt.log": "49d811ef25221f6dc8630eef85e281baecdccc942021b0ba7bc6b96d7d35140e",
+    "readiness-pinned-final-build.log": "5c316039fc8379f9de337b3eae21b9c7829e4bd8134897a8afa469ddd57987e9",
+    "readiness-overlay-final-build.log": "de592aba8effc5ccd34ecf360132f69611b714fa3e11980ed471c8bab727dbb4",
+    "baseline/client.stderr": "71fbe2e67c1f891d9d3053850ceb8920f6e14db93225eebb35116830f812765c",
+    "baseline/client.stdout": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "baseline/server.log": "240f2c725ff8927d57c35011a957dc843404d9cb236f88eae2fbccdb65fc2e90",
+    "published_pins_run_1/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "published_pins_run_1/client.stdout": "0bba7a3019f942bc0a103104ee4ed0ba774495204294be3082598c523b19f655",
+    "published_pins_run_1/server.log": "d06c76e7def4f773994dd0613e35c4aca06000645f5087cf9718eb01038c5313",
+    "published_pins_run_2/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "published_pins_run_2/client.stdout": "6c25782c7a51f4c6720f1002adad22abc2164523f70a78ed2db2c812ac5e6313",
+    "published_pins_run_2/server.log": "54cc4a27069934927de8e4b0395e453186ede64db1143d4a77913cd171dd1c4b",
+    "published_pins_run_3/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "published_pins_run_3/client.stdout": "e0ead0ced20d0d766ff009220a367f7cd35c1d8c250e3882bcba3d291a6bc861",
+    "published_pins_run_3/server.log": "6d5454db4e204b788e6a49af30a506b7cb3fe1f4550e8abccb2cef06d13b348b",
+    "macro_overlay_schema/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "macro_overlay_schema/client.stdout": "d3acc155ad9946e92bd0254bca2d617a7ac9d42b9a1708e357e9b92e50641939",
+    "macro_overlay_schema/server.log": "bcc9e19c49a65c909b3ee3153ab217f45c73469fcf6cfe7789aca15f39db2435",
+    "macro_overlay_input/client.stderr": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+    "macro_overlay_input/client.stdout": "e0ead0ced20d0d766ff009220a367f7cd35c1d8c250e3882bcba3d291a6bc861",
+    "macro_overlay_input/server.log": "e1d8a1879021eda83d8790f273eec0b753c444e7458abb861f63064a531b5a8e"
+  },
+  "unrun": [
+    "Windows/ConPTY",
+    "nightly formatting",
+    "full aggregate and GPU execution",
+    "Minecraft and SFM UI behavior"
+  ],
+  "publication": "local commits only; no push or merge"
+}

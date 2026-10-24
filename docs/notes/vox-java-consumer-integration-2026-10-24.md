@@ -1,5 +1,9 @@
 # Java consumer integration and malformed-first response regression
 
+The early-input behavior recorded here is addressed in the subsequent
+[production input-readiness checkpoint](terminal-input-readiness-2026-10-24.md).
+The malformed-first schema result remains separately qualified as described below.
+
 The Terminal probe/test source is local commit
 `5039d481a9a281e7a0b86429ddd5f41272d9a9d8` on
 `task/vox-terminal-java-integration-20261024`. The Vox fix is local commit
