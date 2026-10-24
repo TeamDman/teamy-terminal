@@ -6388,6 +6388,28 @@ mod tests {
             .expect("dropped receiver should finish the subscription request")
             .expect("dropped receiver subscription task should not panic")
             .expect("dropped receiver subscription should complete cleanly");
+        // A connected session and first frame do not imply the shell is ready.
+        // Sending during PowerShell startup can be echoed without execution.
+        let ready_deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let ready = runtime
+                .state
+                .lock()
+                .expect("session state should lock")
+                .terminal
+                .snapshot()
+                .visible_text()
+                .lines()
+                .any(|line| line.starts_with("PS ") && line.trim_end().ends_with('>'));
+            if ready {
+                break;
+            }
+            assert!(
+                tokio::time::Instant::now() < ready_deadline,
+                "PowerShell prompt should arrive before submitting the puppet command"
+            );
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         // PTY read chunking varies by platform and shell history. Publish a known
         // burst without yielding this current-thread executor so the subscription
         // must coalesce it; retain the real shell output and all frame witnesses.
